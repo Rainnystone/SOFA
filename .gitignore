@@ -1,0 +1,30 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local research workspaces and generated outputs
+workspace/
+workspaces/
+reports/
+dive_packets/
+claim_ledger.md
+search_log.md
+capability_report.md
+evidence_ledger.md
+research_workflow.md
+state.json
+
+# System files
+.DS_Store
+Thumbs.db
