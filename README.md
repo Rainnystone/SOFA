@@ -2,7 +2,7 @@
 
 **[中文](README_CN.md) | [English](README.md)**
 
-![SOFA English cover](assets/SOFA%20ENG.jpg)
+![SOFA English cover](assets/sofa-eng.jpg)
 
 SOFA is the **serenitive osint framework analyzor**: an open-source, agent-assisted OSINT research framework for technology stocks and technology sectors.
 
