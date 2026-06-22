@@ -684,6 +684,17 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("at least one Continued frontier is required before stage_3", missing)
 
+    def test_validate_stage_transition_rejects_continued_frontier_before_three_loops(self):
+        registry = self.registry(mode="ticker")
+        registry["frontiers"][0]["status"] = "Continued"
+        registry["frontiers"][1]["status"] = "Retired"
+        registry["frontiers"][1]["retire_category"] = "answered_out"
+
+        passed, missing = self.module.validate_for_stage_transition(registry, {"F1": 2, "F2": 3}, "ticker", "stage_3")
+
+        self.assertFalse(passed)
+        self.assertIn("frontier F1 is Continued with only 2 loop(s); minimum 3 required before stage_3", missing)
+
     def test_validate_stage_transition_accepts_canonical_shapes(self):
         ticker = self.registry(mode="ticker")
         ticker["frontiers"][0]["status"] = "Continued"

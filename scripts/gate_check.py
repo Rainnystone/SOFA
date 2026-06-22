@@ -29,6 +29,7 @@ from scorecard_validator import validate_scorecards
 from timeliness_checker import check_timeliness
 from synthesis_checker import check_synthesis
 from redteam_debate_validator import validate_debate
+from frontier_lifecycle import LifecycleError, derive_loop_counts, validate_for_stage_transition
 
 
 def load_state(workspace_path: str) -> dict:
@@ -36,6 +37,14 @@ def load_state(workspace_path: str) -> dict:
     if not os.path.exists(state_path):
         return None
     with open(state_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_frontier_registry(workspace_path: str) -> dict | None:
+    registry_path = os.path.join(workspace_path, "frontier_registry.json")
+    if not os.path.exists(registry_path):
+        return None
+    with open(registry_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -54,6 +63,22 @@ def count_files(workspace_path: str, subdir: str) -> int:
     if not os.path.exists(dir_path):
         return 0
     return len([f for f in os.listdir(dir_path) if f.endswith(".md")])
+
+
+def dedupe_stage_2_missing_items(items: list[str]) -> list[str]:
+    normalized_items = {
+        "evidence_ledger.md does not exist": "evidence_ledger.md not found",
+        "frontier_registry.json not found": "frontier_registry.json not found - run init_workspace.py first",
+    }
+    deduped = []
+    seen = set()
+    for item in items:
+        normalized = normalized_items.get(item, item)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
 
 
 def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[bool, list[str]]:
@@ -136,22 +161,33 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
             if not os.path.exists(ladder_path):
                 missing.append("maps/dependency_ladder.md not found (Sector Hunt core deliverable)")
 
-        # Common: ledger loop entries
-        ledger_path = os.path.join(workspace_path, "evidence_ledger.md")
-        if os.path.exists(ledger_path):
-            with open(ledger_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            loop_headers = content.count("## Loop ")
-            if loop_headers < 3:
-                missing.append(f"evidence_ledger.md has only {loop_headers} loop entries - need at least 3")
-        else:
-            missing.append("evidence_ledger.md not found")
-
         # === ENHANCED ENFORCERS (v3.3) ===
-        # 1. Loop Enforcer: each frontier must have >= 2 loops
+        # 1. Loop Enforcer: ledger loop headers must bind to stable frontier IDs
         passed_loop, loop_violations = check_loop_depth(workspace_path)
         if not passed_loop:
             missing.extend(loop_violations)
+
+        registry = load_frontier_registry(workspace_path)
+        if registry is None:
+            missing.append("frontier_registry.json not found - run init_workspace.py first")
+        elif passed_loop:
+            ledger_path = os.path.join(workspace_path, "evidence_ledger.md")
+            try:
+                with open(ledger_path, "r", encoding="utf-8") as f:
+                    ledger_content = f.read()
+                loop_counts = derive_loop_counts(ledger_content, registry)
+                passed_lifecycle, lifecycle_violations = validate_for_stage_transition(
+                    registry,
+                    loop_counts,
+                    mode,
+                    to_stage,
+                )
+                if not passed_lifecycle:
+                    missing.extend(lifecycle_violations)
+            except FileNotFoundError:
+                missing.append("evidence_ledger.md not found")
+            except LifecycleError as exc:
+                missing.append(str(exc))
 
         # 2. Scorecard Validator: Gate Scorecards must be filled
         passed_sc, sc_violations = validate_scorecards(workspace_path)
@@ -173,6 +209,8 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
 
         if "stage_2" not in state.get("stages_completed", []):
             missing.append("Stage 2 not marked as completed in state.json")
+
+        missing = dedupe_stage_2_missing_items(missing)
 
     elif from_stage == "stage_3":
         # Stage 3 -> Stage 4: mode-aware financial checks

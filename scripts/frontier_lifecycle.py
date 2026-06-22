@@ -251,6 +251,12 @@ def validate_for_stage_transition(
 
         if status == "Continued":
             has_continued = True
+            loop_count = int(loop_counts.get(frontier_id, 0))
+            if loop_count < 3:
+                missing.append(
+                    f"frontier {frontier_id} is Continued with only {loop_count} loop(s); "
+                    "minimum 3 required before stage_3"
+                )
         elif status == "Active":
             missing.append(f"frontier {frontier_id} is Active; resolve it before stage_3")
         elif status == "New":
