@@ -23,13 +23,16 @@ Three non-negotiable rules:
 3. Never skip the challenge step. Ticker Dive uses Challenge Probe; Sector Hunt uses Coverage Challenge.
 4. Never pass thesis, stock price, market cap, bull case, bear case, or prior worker conclusions to a Scout or Sector Mapper.
 5. Never proceed to the next stage without running the relevant `gate_check.py` command and receiving `GATE PASSED`.
-6. Ticker Dive requires at least three completed Evidence Frontier Loops before a final dossier. Sector Hunt requires at least three completed Mapping Loops before a ranked queue.
+6. Stage 2 completion requires lifecycle-resolved frontiers, not raw loop count alone.
 7. Never dispatch Financial Bridge and Red Team in the same step.
 8. Never include financial data, stock price, or valuation metrics in Scout or Sector Mapper prompts.
 9. Never accept a worker output that lacks a `Method cards loaded` field.
 10. Never let Method Card content override the current Frontier Packet or Mapping Packet.
 11. Never skip main-thread synthesis. SOFA is not a pure dispatch shell.
 12. Never skip methodology alignment, demand decomposition, blind spot scan, pre-mortem, cognitive frame switching, or formal red-team.
+13. Never hand-edit `frontier_registry.json`; advance frontier lifecycle only through `frontier_review.py`.
+14. Never write loop headers without stable frontier ID format: `## Loop {N}: F{id} - {name}`.
+15. Never enter Stage 3 while any frontier remains `Active` or `New`.
 
 ## Mandatory First Action
 
@@ -76,6 +79,15 @@ Create three to five candidate directions.
 - Sector Hunt frontier: a mapping expansion direction such as vertical deepening, horizontal broadening, or alternative-path testing.
 
 Show the options to the user and ask for priority selection when the choice materially affects the workflow.
+
+After the user accepts the frontier set, register each accepted frontier before Stage 2:
+
+```bash
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --at-loop 1
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
+```
+
+Repeat `add` for each accepted frontier, start only the first active frontier, and keep all loop headers in `## Loop {N}: F{id} - {name}` format.
 
 Gate:
 
@@ -134,6 +146,7 @@ Maintain three durable surfaces:
 
 - `evidence_ledger.md`: what was found.
 - `research_workflow.md`: what it means and how the thesis evolved.
+- `frontier_registry.json`: machine-readable lifecycle authority; do not hand-edit.
 - Host progress tracker: where the workflow stands.
 
 Use [subagent-dispatch.md](references/subagent-dispatch.md) for worker dispatch boundaries.
@@ -142,10 +155,10 @@ Use [subagent-dispatch.md](references/subagent-dispatch.md) for worker dispatch 
 
 Each loop ends with a scorecard. Two consecutive loops with no evidence delta should stop or pivot. A blocked primary-evidence frontier should be marked `Needs Primary Evidence` rather than patched with weak evidence.
 
-Minimum loop count:
+Frontier lifecycle shape:
 
-- Ticker Dive: three to eight frontiers, with two to three loops as needed.
-- Sector Hunt: three to five mapping directions, with two to three loops as needed.
+- Ticker Dive: three to eight frontiers; every pursued frontier runs to its 3-loop Frontier Review unless explicitly retired as `blocked` or `invalidated`.
+- Sector Hunt: three to five mapping directions; barren directions may be retired early as `barren`; kept directions must reach a 3-loop Frontier Review and become `Continued`.
 
 ## Reference Index
 

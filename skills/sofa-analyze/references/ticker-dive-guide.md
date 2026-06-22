@@ -15,7 +15,7 @@
 用 Edit 追加到 `{WORKSPACE}/evidence_ledger.md`：
 
 ```markdown
-## Loop {N}: {Frontier Name}
+## Loop {N}: F{id} - {Frontier Name}
 
 ### Frontier Packet
 - Frontier: [本轮要推进的具体边界]
@@ -58,17 +58,43 @@ Read scout + challenge 文件，在 `research_workflow.md` Evidence Loop Tracker
 **Step 6 — Continue/Stop Decision**（主线程决策）
 
 - **Continue**: Map Delta ≥ Material 且 Next Yield ≥ Medium → 同一 frontier 下一轮
-- **Pivot**: ≥2 轮且 Next Yield = Low → 切换 frontier
-- **Stop**: 连续两轮无 delta
-- **Escalate to Red Team**: 至少 3 frontier 各 2 轮 → Stage 3
+- **Review**: frontier 达到 3 loops → 暂停下一轮，先记录 Frontier Review decision
+- **Early retire**: 3 loops 前只有 `blocked` 或 `invalidated` 可用 standalone `retire` 提前结束
+- **Escalate to Red Team**: 没有 `Active` 或 `New` frontier，至少一个 `Continued` frontier，且每个 `Continued` frontier 都有 >=3 derived loops → Stage 3
 
 记录到 Decision Log。
 
-### Loop 数量要求
+Step 6 后立即运行：
 
-- 最少 3 个 frontier，每个最少 2 轮 loop；总计最少 3 轮
-- 同一 frontier 至少 2 轮后才可切换
-- 连续 3 轮无实质 delta → 自动建议 Stop
+```bash
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" check-review
+```
+
+如果有 due frontier，下一轮 loop 必须阻塞，直到记录 3-loop Frontier Review：
+
+```bash
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Continued --rationale "[why this frontier should stay in the durable queue]"
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Retired --category answered_out --rationale "[why the 3-loop review retires this frontier]"
+```
+
+3-loop review-based retirement 只允许 `answered_out`、`bad_pick`、`superseded`。如果使用 `bad_pick` 或 `superseded`，替换上例中的 category 值即可。
+
+3-loop review 之外的提前结束使用 standalone `retire`：
+
+```bash
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category blocked --reason "[why this frontier cannot be pursued before review]"
+```
+
+Ticker Dive early standalone retire 只允许 `blocked`、`invalidated`。如果使用 `invalidated`，替换上例中的 category 值即可。
+
+Do not use `blocked` or `invalidated` as `record --decision Retired` categories.
+
+### Lifecycle 数量要求
+
+- Ticker Dive 使用 3-8 个 frontier。
+- 每个 pursued frontier 必须跑到 3-loop Frontier Review，然后记录为 `Continued` 或 review-based `Retired`。
+- 3 loops 前只能用 standalone `retire` 提前结束，category 只允许 `blocked` 或 `invalidated`。
+- 进入 Stage 3 前必须没有 `Active` 或 `New` frontier，至少一个 `Continued` frontier，且每个 `Continued` frontier 都有 >=3 derived loops。
 
 ### Serendipity Loop（每 3 个 frontier 后）
 
@@ -204,7 +230,7 @@ python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_5
 
 ## 搜索预算
 
-- Ticker Dive: 3-8 个 frontier，每个 2-3 轮 loop
+- Ticker Dive: 3-8 个 frontier；每个 pursued frontier 跑到 3-loop Frontier Review，除非提前 standalone `retire` 为 `blocked` 或 `invalidated`
 - 每轮 Scout: 5-15 个独立搜索
 - 每轮 Challenge Probe: ≤5 个验证性搜索
 - Red Team: 1-3 轮，每轮 5-10 个搜索

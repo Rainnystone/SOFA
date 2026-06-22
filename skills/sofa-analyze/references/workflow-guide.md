@@ -159,15 +159,24 @@ Demand slowdown risk: [需求放缓风险]
 - 初始证据等级预期
 - Stop/Continue 条件
 
+用户接受初始 frontier set 后，立即为每个方向注册 lifecycle ID，并启动第一个要执行的 frontier：
+
+```bash
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --at-loop 1
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
+```
+
+对每个 accepted frontier 重复 `add`；只对当前要执行的第一个 frontier 运行 `start`。Registry ID（如 `F1`, `F2`, `F3`）是机器绑定 key。Display name 可以随着研究理解变清晰而调整，但 `evidence_ledger.md` 的 loop header 必须保留稳定 ID。
+
 ---
 
 ## Stage 2: Evidence Frontier Loop（核心引擎）{#stage-2}
 
 ### 核心原则
 
-**同一 frontier 内必须做 2-3 轮 loop**，直到 Frontier Gate Scorecard 显示 Stop 或 Blocked。
+**每个 pursued frontier 必须跑到 3-loop Frontier Review**，然后通过 `frontier_review.py` 记录为 `Continued` 或 review-based `Retired`。
 
-**禁止**：在单个 frontier 未完成 2 轮 loop 前，切换到下一个 frontier。
+**禁止**：未通过 lifecycle command 记录状态前切换或进入 Stage 3。Ticker Dive 在 3 loops 前只能用 standalone `retire` 提前结束 `blocked` 或 `invalidated` frontier；Sector Hunt 还允许 barren mapping direction 用 `barren` 提前结束。
 
 ### 每轮 Loop 的 6 步
 
@@ -175,7 +184,7 @@ Demand slowdown risk: [需求放缓风险]
 
 追加到 `evidence_ledger.md`：
 ```markdown
-## Loop {N}: {Frontier Name}
+## Loop {N}: F{id} - {Frontier Name}
 
 ### Frontier Packet
 - Frontier: [本轮要推进的具体边界]
@@ -218,10 +227,34 @@ Demand slowdown risk: [需求放缓风险]
 
 **Step 6 — Continue/Stop Decision**（主线程决策）
 
-- **Continue**: Map Delta ≥ Material 或 Evidence Upgrade，且 Next Yield ≥ Medium → 回到 Step 1 写下一轮（同一 frontier）
-- **Pivot**: 当前 frontier Next Yield = Low → 切换到更高价值 frontier
-- **Stop**: 连续两轮无 Map/Evidence/Claim/Decision Delta，或关键证据 Blocked
-- **Escalate to Red Team**: 已有 coherent thesis → 进入 Stage 3
+- **Continue current frontier**: 如果 Frontier Review 不 due，且 Map Delta ≥ Material 或 Evidence Upgrade，且 Next Yield ≥ Medium，可以回到 Step 1 写同一 frontier 的下一轮。
+- **Review gate**: 如果当前 frontier 已到 3 loops，必须先记录 `Continued` 或 review-based `Retired`，不得直接切换、开启下一轮或进入 Stage 3。
+- **Switch frontier**: 只有当前 frontier 已有 lifecycle resolution（`Continued`、`Retired`，或允许的 early standalone `retire`）时，才可以启动另一个 `New` frontier 或 `reactivate` 一个 `Continued` frontier。
+- **Early out-of-band retire**: 3 loops 前只能用 standalone `retire` 处理允许的 early categories；Ticker Dive 允许 `blocked`、`invalidated`，Sector Hunt 还允许 `barren`。
+- **Escalate to Stage 3**: 只有 `gate_check.py "{WORKSPACE}" stage_2 stage_3` lifecycle gate 通过后才能进入 Stage 3；这要求没有 `Active` 或 `New` frontier，至少一个 `Continued` frontier，且每个 `Continued` frontier 都有 >=3 derived loops。
+
+Step 6 后立即运行 Frontier Review 检查：
+
+```bash
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" check-review
+```
+
+如果 `check-review` 显示某个 frontier due，下一轮 loop 必须暂停，直到记录 review decision：
+
+```bash
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Continued --rationale "[why this frontier still creates material evidence yield]"
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Retired --category answered_out --rationale "[why the 3-loop review retires it]"
+```
+
+3-loop review-based retirement 只允许 `answered_out`、`bad_pick`、`superseded`。如果使用 `bad_pick` 或 `superseded`，替换上例中的 category 值即可。
+
+3-loop review 之外的提前结束使用 standalone `retire`：
+
+```bash
+python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category blocked --reason "[why this frontier cannot be pursued before review]"
+```
+
+Ticker Dive early standalone retire 允许 `blocked`、`invalidated`。Sector Hunt early standalone retire 允许 `blocked`、`invalidated`、`barren`。`Continued` 是 durable 状态；之后如果要继续推进这个 frontier，必须显式运行 `reactivate F{id}`。不要把 early categories 写成 review-based `record --decision Retired` category。
 
 ### Serendipity Loop（每 3 个 frontier 后执行）
 
@@ -252,11 +285,11 @@ Demand slowdown risk: [需求放缓风险]
 
 **循环次数是下限，不是目标。** 证据薄弱时主动延长。Gate Scorecard 的 "Stop" 必须基于连续两轮无实质 delta。
 
-### Loop 数量要求
+### Lifecycle 数量要求
 
-- **Ticker Dive**: 最少 3 个 frontier，每个 frontier 最少 2 轮 loop；总计最少 3 轮（可跨 frontier）
-- **Sector Hunt**: 最少 3 个 frontier，每个 frontier 最少 2 轮 loop；总计最少 3 轮
-- 连续 3 轮无实质 delta → 自动建议 Stop
+- **Ticker Dive**: 3-8 个 frontier；每个 pursued frontier 必须跑到 3-loop Frontier Review，然后 `Continued` 或 `Retired`。3 loops 前只能用 standalone `retire` 提前结束，category 允许 `blocked` 或 `invalidated`。
+- **Sector Hunt**: 3-5 个 mapping direction；kept direction 必须跑到 3-loop Frontier Review 并成为 `Continued`。Barren direction 可在 1-2 loops 后用 standalone `retire --category barren` 提前结束。
+- 进入 Stage 3 前必须没有 `Active` 或 `New` frontier，至少有一个 `Continued` frontier，且每个 `Continued` frontier 都有不少于 3 个 derived loops。
 
 ---
 
@@ -652,6 +685,8 @@ Red Team 给出：
 |------|------|---------|
 | `evidence_ledger.md` | 证据台账（What was found） | 每轮 Step 3 |
 | `research_workflow.md` 综合分析笔记 | 推理过程（What it means） | 每轮 Step 3、Stage 3/4/5 |
+| `frontier_registry.json` | Machine-readable lifecycle authority；不要手工编辑 | 由 `frontier_review.py` 管理 |
+| `research_workflow.md` Frontier Review / Discovery managed blocks | Human-readable lifecycle narration；由 `frontier_review.py` 在 `record` review flows 和 portfolio discovery actions 中渲染 | Standalone `retire` 更新 registry；之后的 managed block render 可能反映该状态 |
 | Host progress tracker | 进度跟踪（Where we are） | 每个 Stage 开始/结束、每次决策 |
 
 **为什么强制**：长研究会话可能跨越多次上下文压缩。如果分析推理只存在于上下文中而不落盘，压缩后将无法理解"为什么得出了这个 thesis"。
@@ -708,8 +743,8 @@ Red Team 给出：
 
 ⛔ 以下为**最低要求，不是建议**。主线程不得低于以下预算。
 
-- Ticker Dive: 3-8 个 frontier，每个 frontier 2-3 轮 loop
-- Sector Hunt: 3-5 个 frontier，每个 frontier 2-3 轮 loop
+- Ticker Dive: 3-8 个 frontier；每个 pursued frontier 跑到 3-loop Frontier Review，除非提前 standalone `retire` 为 `blocked` 或 `invalidated`
+- Sector Hunt: 3-5 个 mapping direction；kept direction 跑到 3-loop Frontier Review，barren direction 可提前 `retire --category barren`
 - 每轮 Scout: 5-15 个独立搜索
 - 每轮 Challenge Probe: 不超过 5 个验证性搜索
 - Red Team: 1-3 轮，每轮 5-10 个搜索

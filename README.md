@@ -36,6 +36,7 @@ SOFA is inspired by that public research pattern. It is not affiliated with Sere
 - **Decomposes technology sectors.** Start from end demand and work backward into materials, equipment, qualification, customers, and regulatory constraints.
 - **Translates stories into evidence.** Every material claim must land in an evidence ledger before it can support a thesis.
 - **Separates discovery from conviction.** Sector Hunt produces maps and ranked queues only; a later Ticker Dive or Ultra Dive is required before any action-class language.
+- **Manages frontier lifecycle.** Stage 2 frontiers can be added, retired, continued, and reactivated through deterministic checks instead of staying as a frozen Stage 1 list.
 - **Keeps the research trail visible.** Each workspace stores `research_workflow.md`, `evidence_ledger.md`, `claim_ledger.md`, `search_log.md`, gate checks, method-card traces, and final reports.
 - **Writes for decision makers.** Reports start with the conclusion, key evidence, strongest counterargument, and next step, then move the audit trail into the body and appendix.
 
