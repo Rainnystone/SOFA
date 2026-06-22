@@ -808,6 +808,40 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertEqual(review_md, self.module.render_review_log_md(registry))
         self.assertEqual(discovery_md, self.module.render_discovery_log_md(registry))
 
+    def test_review_and_discovery_rendering_covers_empty_and_unknown_actions(self):
+        empty_registry = self.registry()
+        self.assertIn("_No frontier reviews recorded._", self.module.render_review_log_md(empty_registry))
+        self.assertIn("_No discovery actions recorded._", self.module.render_discovery_log_md(empty_registry))
+
+        registry = self.registry()
+        registry["frontiers"][0]["review_decisions"].append(
+            {
+                "review_number": 1,
+                "at_loop": 3,
+                "decision": "Retired",
+                "retire_category": "answered_out",
+                "rationale_short": "answered by evidence",
+                "portfolio_actions": [],
+            }
+        )
+        registry["frontiers"][0]["review_decisions"].append(
+            {
+                "review_number": 2,
+                "at_loop": 6,
+                "decision": "Continued",
+                "retire_category": None,
+                "rationale_short": "new path remains useful",
+                "portfolio_actions": [{"action": "custom", "reason": "manual audit marker"}],
+            }
+        )
+
+        review_md = self.module.render_review_log_md(registry)
+        discovery_md = self.module.render_discovery_log_md(registry)
+
+        self.assertIn("**Retire category**: answered_out", review_md)
+        self.assertIn("custom: manual audit marker", review_md)
+        self.assertIn("custom: manual audit marker", discovery_md)
+
     def test_replace_managed_block_uses_v4_markers_and_rejects_malformed(self):
         original = "\n".join(
             [
