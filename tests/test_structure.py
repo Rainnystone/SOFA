@@ -63,6 +63,7 @@ class TestSofaStructure(unittest.TestCase):
             "docs/capability-setup.md",
             "docs/report-guide.md",
             "docs/architecture.md",
+            "docs/codemap.md",
             "docs/adapters/codex.md",
             "docs/adapters/claude-code.md",
             "docs/adapters/qoder-work.md",

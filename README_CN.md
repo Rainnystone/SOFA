@@ -155,6 +155,7 @@ SOFA 辅助研究，不构成投资建议。它不自动交易，不代替你的
 - [能力配置](docs/capability-setup.md)
 - [报告指南](docs/report-guide.md)
 - [架构说明](docs/architecture.md)
+- [代码地图](docs/codemap.md)
 - [Codex adapter](docs/adapters/codex.md)
 - [Claude Code adapter](docs/adapters/claude-code.md)
 - [Generic agent adapter](docs/adapters/generic-agent.md)

@@ -155,6 +155,7 @@ SOFA supports research. It is not investment advice. It does not trade, replace 
 - [Capability setup](docs/capability-setup.md)
 - [Report guide](docs/report-guide.md)
 - [Architecture](docs/architecture.md)
+- [Codemap](docs/codemap.md)
 - [Codex adapter](docs/adapters/codex.md)
 - [Claude Code adapter](docs/adapters/claude-code.md)
 - [Generic agent adapter](docs/adapters/generic-agent.md)

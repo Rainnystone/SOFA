@@ -1,22 +1,132 @@
 # Architecture
 
-SOFA is a host-neutral framework repo with thin host adapters.
+SOFA is a host-neutral research harness. It is not one large prompt and not a single host-agent integration. The core repo defines research workflow, durable workspace state, deterministic validation, and reusable worker methods. Host-specific behavior stays in adapters.
 
-## Layers
+## Design Principles
 
-| Layer | Purpose |
-|-------|---------|
-| SOFA Analyze | Router and main-thread orchestration for Ticker Dive, Sector Hunt, and Sector-to-Ultra. |
-| Mode guides | Detailed workflow steps for each research mode. |
-| Method cards | Subagent-private methods for mapping, customer graph, financial bridge, and red-team work. |
-| Prompt templates | Standalone worker instructions in `scripts/prompts/`. |
-| Deterministic scripts | Workspace setup, gates, capability checks, validators, and Ultra packet generation. |
-| Adapters | Host-specific mapping for Codex, Claude Code, Qoder-compatible workspaces, and generic agents. |
+| Principle | Meaning |
+|-----------|---------|
+| Host-neutral core | Core guides, method cards, prompts, scripts, and tests avoid depending on one agent runtime or one tool name. |
+| Durable workspace | Research state lives in files that can be reviewed, resumed, challenged, and tested. |
+| Deterministic gates | Validation, schema checks, path checks, lifecycle legality, and report gates are handled by scripts. |
+| Agent judgment boundary | Evidence interpretation, frontier decisions, and final research judgment remain with the main analyst thread. |
+| Progressive disclosure | The entry skill routes the work; mode guides, method cards, prompts, and references are loaded only when needed. |
+| Audit before polish | A readable report is allowed only after evidence, claim, challenge, and lifecycle trails exist. |
 
-## Boundary
+## System Layers
 
-Core files must not depend on a single host tool name, host todo tracker, host web search tool, host web fetch tool, or host-specific config path. Those details belong in adapter docs or this architecture overview.
+| Layer | Primary files | Responsibility |
+|-------|---------------|----------------|
+| Entry router | `skills/sofa-analyze/SKILL.md` | Classify the user's request and route to Ticker Dive, Sector Hunt, or Sector-to-Ultra. |
+| Mode guides | `skills/sofa-analyze/references/*-guide.md` | Define the stage sequence, loop rhythm, required artifacts, and mode-specific constraints. |
+| Method cards | `skills/sofa-analyze/method-cards/*/METHOD.md` | Provide private worker methods for mapping, customer discovery, financial bridge, and red-team analysis. |
+| Prompt templates | `scripts/prompts/*.md` | Give worker agents bounded instructions for scout, challenge, mapper, review, and red-team tasks. |
+| Deterministic scripts | `scripts/*.py` | Initialize workspaces, enforce lifecycle and stage gates, validate reports, and create Ultra packets. |
+| Documentation | `docs/*.md`, `docs/adapters/*.md` | Explain setup, capabilities, architecture, repo navigation, reports, and host mappings. |
+| Tests | `tests/test_*.py` | Lock down repo structure, workspace initialization, lifecycle rules, CLI behavior, and gates. |
 
-Search and financial capabilities are optional. SOFA detects them, recommends setup, and records missing capability effects on confidence.
+## Main Control Flow
 
-Sector Hunt ends with a map and ranked queue. Ticker Dive or Ultra Dive is required before action-class conclusions.
+```text
+User research request
+  -> SOFA Analyze router
+  -> mode guide selection
+  -> workspace initialization
+  -> Stage 0 framing
+  -> Stage 1 frontier plan
+  -> Stage 2 evidence / mapping loops
+       -> worker products
+       -> evidence and claim ledgers
+       -> frontier lifecycle review
+       -> deterministic gate checks
+  -> Stage 3 thesis / scoring / red team
+  -> final report and watch protocol
+```
+
+Ticker Dive and Sector Hunt share the same harness shape but enforce different outputs. Ticker Dive can eventually produce action-class language after the financial bridge and formal red team. Sector Hunt stops at a dependency map and ranked queue; any action-class work must continue through Ticker Dive or Ultra Dive.
+
+## Workspace State
+
+A SOFA workspace is the durable research ledger. The important files are:
+
+| Workspace file | Role |
+|----------------|------|
+| `state.json` | Coarse workspace mode and stage state. It is not the source of truth for per-frontier loop counts. |
+| `frontier_registry.json` | Machine-readable frontier lifecycle state: IDs, status, source, lifecycle history, review decisions, and limits. |
+| `research_workflow.md` | Human-readable stage log, decision log, and managed Frontier Review / Discovery blocks. |
+| `evidence_ledger.md` | Evidence loop record. Stable headers like `## Loop N: F{id} - {name}` are the source of truth for per-frontier loop counts. |
+| `claim_ledger.md` | Important claims, status, evidence grade, and unresolved gaps. |
+| `search_log.md` | Search trail and capability limitations. |
+| worker output folders | Scout, challenge, mapper, coverage, financial bridge, red-team, and review products. |
+
+The architecture intentionally keeps machine constraints and human narration separate: JSON carries lifecycle state; Markdown carries reviewable reasoning and evidence trails.
+
+## Frontier Lifecycle Architecture
+
+Frontiers are first-class research objects. Stage 1 proposes the initial set, but Stage 2 can add, start, continue, retire, reprioritize, and reactivate them through the lifecycle CLI.
+
+```text
+evidence_ledger.md
+  -> derive loop counts from stable F{id} headers
+  -> check whether Active frontiers crossed an unrecorded review boundary
+  -> record Continued or Retired decisions
+  -> update frontier_registry.json
+  -> render managed review/discovery logs into research_workflow.md
+  -> gate_check.py blocks Stage 3 until no Active or New frontier remains
+```
+
+The review trigger is boundary-window based: a frontier is review-due when `derived_loop_count // every_loops > review_count` and `review_count < max_reviews`. Counts 3, 6, and 9 open review windows; if the main thread overshoots to loop 4 or 5 without recording the review, the frontier remains due until the review is recorded.
+
+## Deterministic Boundary
+
+Scripts enforce rules that should not depend on agent memory:
+
+| Script | Deterministic responsibility |
+|--------|------------------------------|
+| `init_workspace.py` | Create a workspace with required files, registry, and managed Markdown blocks. |
+| `frontier_lifecycle.py` | Pure lifecycle state machine, loop binding, review due checks, portfolio limits, and Markdown rendering. |
+| `frontier_review.py` | Main-thread CLI for lifecycle mutations and managed review log updates. |
+| `loop_enforcer.py` | Validate evidence ledger loop headers against stable frontier IDs. |
+| `gate_check.py` | Enforce stage transition gates, including lifecycle convergence before Stage 3. |
+| `scorecard_validator.py` / `timeliness_checker.py` / `synthesis_checker.py` | Validate stage artifacts and freshness requirements. |
+| `validate_dossier.py` / `redteam_debate_validator.py` | Validate final report and red-team artifacts. |
+| `capability_check.py` | Detect optional search and financial-data capabilities without silently installing them. |
+| `generate_ultra_packet.py` | Convert Sector Hunt outputs into bounded Ticker Dive packets. |
+
+The main analyst thread may decide whether a frontier should continue or retire. The scripts decide whether that decision is legal, persisted, and gate-compatible.
+
+## Agent And Subagent Boundary
+
+The main analyst thread owns orchestration and lifecycle mutation. Worker agents receive bounded packets and write product Markdown. They do not hand-edit `frontier_registry.json`, skip gates, or decide final action-class conclusions.
+
+This boundary keeps the research auditable:
+
+- worker products are evidence inputs;
+- lifecycle decisions are centralized through `frontier_review.py`;
+- stage transitions are checked by `gate_check.py`;
+- final reports must pass validation before being treated as usable output.
+
+## Host Adapters
+
+Adapters map SOFA concepts to each host environment: main thread, worker dispatch, planning surface, search/fetch capability, file editing, and shell verification. The adapter layer may name host-specific tools. The core workflow and scripts should not.
+
+See:
+
+- [Codex adapter](adapters/codex.md)
+- [Claude Code adapter](adapters/claude-code.md)
+- [Generic agent adapter](adapters/generic-agent.md)
+- [Qoder-compatible adapter](adapters/qoder-work.md)
+
+## Extension Points
+
+Use these seams when extending SOFA:
+
+| Extension | Preferred landing zone |
+|-----------|------------------------|
+| New host runtime | Add an adapter under `docs/adapters/`; do not fork the core workflow. |
+| New research mode | Add a mode guide and tests before adding scripts. Keep Sector Hunt's no-action-class boundary intact. |
+| New deterministic rule | Put it in a script and add focused tests. Do not bury hard rules in prose only. |
+| New worker method | Add a private method card and prompt; keep it callable only through the main workflow. |
+| New optional capability | Add detection and recommendation. Do not silently install tools or write credentials. |
+
+For file-level navigation, see [Codemap](codemap.md).
