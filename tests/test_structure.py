@@ -58,6 +58,7 @@ class TestSofaStructure(unittest.TestCase):
         required_paths = [
             "README.md",
             "README_CN.md",
+            "requirements-dev.txt",
             "docs/installation.md",
             "docs/capability-setup.md",
             "docs/report-guide.md",
@@ -77,7 +78,11 @@ class TestSofaStructure(unittest.TestCase):
             "skills/sofa-analyze/references/knowledge/methodology.md",
             "skills/sofa-analyze/method-cards/index.md",
             "scripts/capability_check.py",
+            "scripts/frontier_lifecycle.py",
+            "scripts/frontier_review.py",
             "scripts/generate_ultra_packet.py",
+            "scripts/run_coverage.sh",
+            "scripts/prompts/frontier_review_prompt.md",
         ]
         missing = [path for path in required_paths if not (ROOT / path).exists()]
         self.assertEqual(
