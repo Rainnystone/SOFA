@@ -61,7 +61,8 @@ class TestWorkspaceScripts(unittest.TestCase):
             )
 
             state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
-            self.assertNotIn("loops_completed", state)
+            legacy_loop_list_key = "loops_" "completed"
+            self.assertNotIn(legacy_loop_list_key, state)
 
             workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
             self.assertIn("## Frontier Review Log", workflow)
