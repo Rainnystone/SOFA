@@ -10,6 +10,14 @@ from typing import Any
 STATUSES = ("New", "Active", "Continued", "Retired")
 SUPPORTED_MODES = ("sector", "ticker")
 FRONTIER_SOURCES = ("initial", "discovery", "serendipity")
+VALID_RETIRE_CATEGORIES = frozenset(
+    {"blocked", "invalidated", "barren", "superseded", "bad_pick", "answered_out"}
+)
+REVIEW_RETIRE_CATEGORIES = frozenset({"answered_out", "bad_pick", "superseded"})
+EARLY_RETIRE_CATEGORIES_BY_MODE = {
+    "ticker": frozenset({"blocked", "invalidated"}),
+    "sector": frozenset({"blocked", "invalidated", "barren"}),
+}
 KNOWN_STAGES = frozenset(f"stage_{index}" for index in range(7))
 LOOP_HEADER_RE = re.compile(r"^## Loop (?P<loop>[1-9][0-9]*): (?P<frontier_id>F[1-9][0-9]*) - (?P<name>.+)$")
 FRONTIER_ID_RE = re.compile(r"^F(?P<number>[1-9][0-9]*)$")
@@ -480,7 +488,10 @@ def _validate_transition_request(
     if to_status == "Retired":
         if action not in {"retire", "review"}:
             raise InvalidTransition("Retired requires action='retire' or action='review'")
-        reason = _retire_validation_error(mode=mode, loop_count=loop_count, retire_category=retire_category)
+        if action == "review":
+            reason = _review_retire_validation_error(retire_category)
+        else:
+            reason = _retire_validation_error(mode=mode, loop_count=loop_count, retire_category=retire_category)
         if reason is not None:
             raise InvalidTransition(reason)
         return
@@ -518,8 +529,24 @@ def _retire_validation_error(mode: str, loop_count: int, retire_category: str | 
     if not retire_category:
         return "retire_category is required"
 
-    if mode != "sector" and retire_category == "barren" and loop_count < 3:
-        return "barren early retire before three loops is only allowed in sector mode"
+    if retire_category not in VALID_RETIRE_CATEGORIES:
+        return f"unsupported retire_category: {retire_category}"
+
+    early_categories = EARLY_RETIRE_CATEGORIES_BY_MODE.get(mode, frozenset())
+    if loop_count < 3 and retire_category not in early_categories:
+        allowed = ", ".join(sorted(early_categories))
+        return f"{mode} early retire before three loops only allows: {allowed}"
+
+    return None
+
+
+def _review_retire_validation_error(retire_category: str | None) -> str | None:
+    if not retire_category:
+        return "retire_category is required"
+
+    if retire_category not in REVIEW_RETIRE_CATEGORIES:
+        allowed = ", ".join(sorted(REVIEW_RETIRE_CATEGORIES))
+        return f"review retire only allows: {allowed}"
 
     return None
 

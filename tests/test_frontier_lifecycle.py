@@ -509,6 +509,139 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertEqual("Retired", self.module.get_frontier(retired, "F1")["status"])
         self.assertEqual("barren", self.module.get_frontier(retired, "F1")["retire_category"])
 
+    def test_retire_rejects_unknown_category_without_mutating_input(self):
+        for mode in ["ticker", "sector"]:
+            with self.subTest(mode=mode):
+                registry = self.registry(mode=mode)
+                original = copy.deepcopy(registry)
+
+                with self.assertRaises(self.module.InvalidTransition):
+                    self.module.transition(
+                        registry,
+                        "F1",
+                        "Retired",
+                        {"F1": 3, "F2": 0},
+                        mode=mode,
+                        action="retire",
+                        retire_category="nonsense",
+                        rationale="invalid category",
+                        at_loop=3,
+                    )
+
+                self.assertEqual(original, registry)
+                self.assertEqual("Active", self.module.get_frontier(registry, "F1")["status"])
+
+    def test_early_retire_category_matrix_is_mode_aware(self):
+        cases = [
+            ("ticker", {"blocked", "invalidated"}, {"answered_out", "bad_pick", "superseded", "barren"}),
+            ("sector", {"blocked", "invalidated", "barren"}, {"answered_out", "bad_pick", "superseded"}),
+        ]
+
+        for mode, allowed, rejected in cases:
+            for category in allowed:
+                with self.subTest(mode=mode, category=category, allowed=True):
+                    registry = self.registry(mode=mode)
+                    retired = self.module.transition(
+                        registry,
+                        "F1",
+                        "Retired",
+                        {"F1": 1, "F2": 0},
+                        mode=mode,
+                        action="retire",
+                        retire_category=category,
+                        rationale="early stop",
+                        at_loop=1,
+                    )
+                    self.assertEqual("Retired", self.module.get_frontier(retired, "F1")["status"])
+                    self.assertEqual(category, self.module.get_frontier(retired, "F1")["retire_category"])
+
+            for category in rejected:
+                with self.subTest(mode=mode, category=category, allowed=False):
+                    registry = self.registry(mode=mode)
+                    original = copy.deepcopy(registry)
+
+                    with self.assertRaises(self.module.InvalidTransition):
+                        self.module.transition(
+                            registry,
+                            "F1",
+                            "Retired",
+                            {"F1": 1, "F2": 0},
+                            mode=mode,
+                            action="retire",
+                            retire_category=category,
+                            rationale="premature",
+                            at_loop=1,
+                        )
+
+                    self.assertEqual(original, registry)
+
+    def test_valid_retire_categories_are_allowed_at_three_or_more_loops(self):
+        valid_categories = ["blocked", "invalidated", "barren", "superseded", "bad_pick", "answered_out"]
+
+        for mode in ["ticker", "sector"]:
+            for category in valid_categories:
+                with self.subTest(mode=mode, category=category):
+                    registry = self.registry(mode=mode)
+                    retired = self.module.transition(
+                        registry,
+                        "F1",
+                        "Retired",
+                        {"F1": 3, "F2": 0},
+                        mode=mode,
+                        action="retire",
+                        retire_category=category,
+                        rationale="resolved after sufficient loops",
+                        at_loop=3,
+                    )
+                    self.assertEqual("Retired", self.module.get_frontier(retired, "F1")["status"])
+                    self.assertEqual(category, self.module.get_frontier(retired, "F1")["retire_category"])
+
+    def test_review_retire_accepts_only_review_categories_without_mutating_input(self):
+        allowed = ["answered_out", "bad_pick", "superseded"]
+        rejected = ["blocked", "invalidated", "barren", "nonsense"]
+
+        for category in allowed:
+            with self.subTest(category=category, allowed=True):
+                registry = self.registry(mode="ticker")
+                retired = self.module.transition(
+                    registry,
+                    "F1",
+                    "Retired",
+                    {"F1": 3, "F2": 0},
+                    mode="ticker",
+                    action="review",
+                    retire_category=category,
+                    rationale="review decision",
+                    at_loop=3,
+                )
+                f1 = self.module.get_frontier(retired, "F1")
+                self.assertEqual("Retired", f1["status"])
+                self.assertEqual(category, f1["retire_category"])
+                self.assertEqual(1, f1["review_count"])
+                self.assertEqual(category, f1["review_decisions"][0]["retire_category"])
+
+        for category in rejected:
+            with self.subTest(category=category, allowed=False):
+                registry = self.registry(mode="ticker")
+                original = copy.deepcopy(registry)
+
+                with self.assertRaises(self.module.InvalidTransition):
+                    self.module.transition(
+                        registry,
+                        "F1",
+                        "Retired",
+                        {"F1": 3, "F2": 0},
+                        mode="ticker",
+                        action="review",
+                        retire_category=category,
+                        rationale="invalid review category",
+                        at_loop=3,
+                    )
+
+                self.assertEqual(original, registry)
+                self.assertEqual("Active", self.module.get_frontier(registry, "F1")["status"])
+                self.assertEqual(0, self.module.get_frontier(registry, "F1")["review_count"])
+
     def test_transition_rejects_mode_mismatch_before_sector_retire_rules(self):
         registry = self.registry(mode="ticker")
         original = copy.deepcopy(registry)
