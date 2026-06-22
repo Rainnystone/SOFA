@@ -36,6 +36,7 @@ class TestWorkspaceScripts(unittest.TestCase):
                 "claim_ledger.md",
                 "search_log.md",
                 "state.json",
+                "frontier_registry.json",
                 "capability_report.md",
                 "maps/dependency_ladder.md",
                 "coverage",
@@ -46,6 +47,29 @@ class TestWorkspaceScripts(unittest.TestCase):
                 path for path in expected_paths if not (workspace / path).exists()
             ]
             self.assertEqual([], missing)
+
+            registry = json.loads(
+                (workspace / "frontier_registry.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(2, registry["version"])
+            self.assertEqual("AI Optical Interconnect", registry["subject"])
+            self.assertEqual("sector", registry["mode"])
+            self.assertEqual([], registry["frontiers"])
+            self.assertEqual(
+                {"max_active": 3, "max_active_plus_new": 5},
+                registry["portfolio_limits"],
+            )
+
+            state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+            self.assertNotIn("loops_completed", state)
+
+            workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+            self.assertIn("## Frontier Review Log", workflow)
+            self.assertIn("<!-- SOFA:frontier-review-log:start -->", workflow)
+            self.assertIn("<!-- SOFA:frontier-review-log:end -->", workflow)
+            self.assertIn("## Frontier Discovery Log", workflow)
+            self.assertIn("<!-- SOFA:frontier-discovery-log:start -->", workflow)
+            self.assertIn("<!-- SOFA:frontier-discovery-log:end -->", workflow)
 
     def test_init_workspace_ticker_mode_does_not_print_or_create_coverage(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -92,6 +116,20 @@ class TestWorkspaceScripts(unittest.TestCase):
                 json.dumps(sentinel_state, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            registry_path = workspace / "frontier_registry.json"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "subject": "AI Optical Interconnect",
+                        "mode": "sector",
+                        "frontiers": [{"id": "sentinel-frontier"}],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
 
             result = subprocess.run(
                 command,
@@ -103,7 +141,12 @@ class TestWorkspaceScripts(unittest.TestCase):
             preserved = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual("preserve-existing-state", preserved["sentinel"])
             self.assertEqual(7, preserved["loop_count"])
+            preserved_registry = json.loads(
+                registry_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual([{"id": "sentinel-frontier"}], preserved_registry["frontiers"])
             self.assertRegex(result.stdout, r"(?i)(skipped|existing)")
+            self.assertIn("frontier_registry.json", result.stdout)
 
     def test_generate_ultra_packet_writes_reader_ready_packet(self):
         candidates = [
