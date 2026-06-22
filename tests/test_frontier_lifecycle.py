@@ -1,4 +1,6 @@
 import copy
+import json
+import tempfile
 import unittest
 from pathlib import Path
 import importlib.util
@@ -6,10 +8,18 @@ import importlib.util
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/frontier_lifecycle.py"
+LOOP_ENFORCER_SCRIPT = ROOT / "scripts/loop_enforcer.py"
 
 
 def load_module():
     spec = importlib.util.spec_from_file_location("frontier_lifecycle", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_loop_enforcer():
+    spec = importlib.util.spec_from_file_location("loop_enforcer", LOOP_ENFORCER_SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -177,6 +187,68 @@ class TestFrontierLifecycle(unittest.TestCase):
                         f"## Loop 1: {malformed_id} - malformed persisted frontier",
                         registry,
                     )
+
+    def test_loop_enforcer_wrapper_normalizes_known_frontier_ids(self):
+        loop_enforcer = load_loop_enforcer()
+        ledger = "\n".join(
+            [
+                "## Loop 1: F1 - InP substrate supply concentration",
+                "## Loop 2: F1 - changed display text",
+            ]
+        )
+
+        passed, counts, violations = loop_enforcer.check_ledger_binding(ledger, self.registry())
+
+        self.assertTrue(passed, violations)
+        self.assertEqual({"F1": 2, "F2": 0}, counts)
+        self.assertEqual([], violations)
+
+    def test_loop_enforcer_wrapper_returns_binding_violations(self):
+        loop_enforcer = load_loop_enforcer()
+
+        passed, counts, violations = loop_enforcer.check_ledger_binding(
+            "## Loop 1: F9 - Unknown frontier",
+            self.registry(),
+        )
+
+        self.assertFalse(passed)
+        self.assertEqual({}, counts)
+        self.assertEqual(1, len(violations))
+        self.assertIn("F9", violations[0])
+
+    def test_check_loop_depth_binds_ledger_to_frontier_registry(self):
+        loop_enforcer = load_loop_enforcer()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "frontier_registry.json").write_text(
+                json.dumps(self.registry(), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (workspace / "evidence_ledger.md").write_text(
+                "## Loop 1: F1 - InP substrate supply concentration\n",
+                encoding="utf-8",
+            )
+
+            passed, violations = loop_enforcer.check_loop_depth(str(workspace))
+            self.assertTrue(passed, violations)
+            self.assertEqual([], violations)
+
+            (workspace / "evidence_ledger.md").write_text(
+                "# Evidence Ledger\n",
+                encoding="utf-8",
+            )
+            passed, violations = loop_enforcer.check_loop_depth(str(workspace))
+            self.assertFalse(passed)
+            self.assertTrue(violations)
+
+            (workspace / "evidence_ledger.md").write_text(
+                "## Loop 1: F9 - Unknown frontier\n",
+                encoding="utf-8",
+            )
+            passed, violations = loop_enforcer.check_loop_depth(str(workspace))
+            self.assertFalse(passed)
+            self.assertTrue(any("F9" in violation for violation in violations))
 
     def test_get_frontier_rejects_malformed_requested_ids_even_if_registered(self):
         for malformed_id in ["F0", "F01"]:
