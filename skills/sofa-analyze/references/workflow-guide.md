@@ -228,7 +228,7 @@ python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 **Step 6 — Continue/Stop Decision**（主线程决策）
 
 - **Continue current frontier**: 如果 Frontier Review 不 due，且 Map Delta ≥ Material 或 Evidence Upgrade，且 Next Yield ≥ Medium，可以回到 Step 1 写同一 frontier 的下一轮。
-- **Review gate**: 如果当前 frontier 已到 3 loops，必须先记录 `Continued` 或 review-based `Retired`，不得直接切换、开启下一轮或进入 Stage 3。
+- **Review gate**: 如果当前 frontier 已达到或超过一个未记录的 3-loop review boundary，必须先记录 `Continued` 或 review-based `Retired`，不得直接切换、开启下一轮或进入 Stage 3。
 - **Switch frontier**: 只有当前 frontier 已有 lifecycle resolution（`Continued`、`Retired`，或允许的 early standalone `retire`）时，才可以启动另一个 `New` frontier 或 `reactivate` 一个 `Continued` frontier。
 - **Early out-of-band retire**: 3 loops 前只能用 standalone `retire` 处理允许的 early categories；Ticker Dive 允许 `blocked`、`invalidated`，Sector Hunt 还允许 `barren`。
 - **Escalate to Stage 3**: 只有 `gate_check.py "{WORKSPACE}" stage_2 stage_3` lifecycle gate 通过后才能进入 Stage 3；这要求没有 `Active` 或 `New` frontier，至少一个 `Continued` frontier，且每个 `Continued` frontier 都有 >=3 derived loops。
@@ -239,7 +239,7 @@ Step 6 后立即运行 Frontier Review 检查：
 python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" check-review
 ```
 
-如果 `check-review` 显示某个 frontier due，下一轮 loop 必须暂停，直到记录 review decision：
+如果 `check-review` 显示某个 frontier due，下一轮 loop 必须暂停，直到记录 review decision。即使 ledger 已经写到 loop 4/5，只要对应 3-loop boundary 尚未记录 review，它仍然 due：
 
 ```bash
 python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Continued --rationale "[why this frontier still creates material evidence yield]"
@@ -254,7 +254,7 @@ python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --dec
 python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category blocked --reason "[why this frontier cannot be pursued before review]"
 ```
 
-Ticker Dive early standalone retire 允许 `blocked`、`invalidated`。Sector Hunt early standalone retire 允许 `blocked`、`invalidated`、`barren`。`Continued` 是 durable 状态；之后如果要继续推进这个 frontier，必须显式运行 `reactivate F{id}`。不要把 early categories 写成 review-based `record --decision Retired` category。
+Ticker Dive early standalone retire 允许 `blocked`、`invalidated`。Sector Hunt early standalone retire 允许 `blocked`、`invalidated`、`barren`。一旦 frontier 已经 review-due，不要用 standalone `retire` 绕过 review；必须用 `record --decision Retired`（或 review 事务里的 `--retire`，由 CLI 给目标 frontier 留下 review decision）。`Continued` 是 durable 状态；之后如果要继续推进这个 frontier，必须显式运行 `reactivate F{id}`。不要把 early categories 写成 review-based `record --decision Retired` category。
 
 ### Serendipity Loop（每 3 个 frontier 后执行）
 

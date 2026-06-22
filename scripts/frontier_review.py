@@ -314,13 +314,14 @@ def apply_portfolio_actions(
         frontier_id, category, reason = parse_retire_action(raw)
         if frontier_id == args.frontier_id:
             raise ValueError("portfolio --retire cannot target the reviewed frontier; use --decision Retired")
+        due_action = frontier_id in check_review_due(updated, loop_counts)
         updated = transition(
             updated,
             frontier_id,
             "Retired",
             loop_counts,
             mode=updated["mode"],
-            action="retire",
+            action="review" if due_action else "retire",
             rationale=reason,
             retire_category=category,
             at_loop=loop_counts.get(frontier_id, at_loop),

@@ -160,11 +160,11 @@ def check_review_due(registry: dict[str, Any], loop_counts: dict[str, int]) -> l
         review_count = int(frontier.get("review_count", 0))
         max_reviews = int(frontier.get("max_reviews", 0))
 
-        if (
-            count > 0
-            and count % every_loops == 0
-            and count // every_loops > review_count
-            and review_count < max_reviews
+        if _has_unrecorded_review_boundary(
+            loop_count=count,
+            every_loops=every_loops,
+            review_count=review_count,
+            max_reviews=max_reviews,
         ):
             due.append(frontier_id)
 
@@ -194,6 +194,7 @@ def transition(
     from_status = frontier.get("status")
 
     _validate_transition_request(
+        registry=updated,
         frontier=frontier,
         frontier_id=frontier_id,
         from_status=from_status,
@@ -215,7 +216,12 @@ def transition(
 
     frontier["status"] = to_status
     frontier["retire_category"] = retire_category if to_status == "Retired" else None
-    frontier.setdefault("lifecycle", []).append({"to": to_status, "at_loop": at_loop, "ts": ts})
+    lifecycle_entry = {"to": to_status, "at_loop": at_loop, "ts": ts}
+    if rationale:
+        lifecycle_entry["rationale"] = rationale
+    if to_status == "Retired" and retire_category:
+        lifecycle_entry["retire_category"] = retire_category
+    frontier.setdefault("lifecycle", []).append(lifecycle_entry)
 
     violations = enforce_portfolio_limits(updated)
     if violations:
@@ -444,17 +450,18 @@ def _validate_review_due(
 
     review_count = int(frontier.get("review_count", 0))
     max_reviews = int(frontier.get("max_reviews", 0))
-    if not (
-        loop_count > 0
-        and loop_count % every_loops == 0
-        and loop_count // every_loops > review_count
-        and review_count < max_reviews
+    if not _has_unrecorded_review_boundary(
+        loop_count=loop_count,
+        every_loops=every_loops,
+        review_count=review_count,
+        max_reviews=max_reviews,
     ):
         raise InvalidTransition(f"frontier {frontier_id} is not review-due at loop count {loop_count}")
 
 
 def _validate_transition_request(
     *,
+    registry: dict[str, Any],
     frontier: dict[str, Any],
     frontier_id: str,
     from_status: str,
@@ -497,6 +504,16 @@ def _validate_transition_request(
         if action == "review":
             reason = _review_retire_validation_error(retire_category)
         else:
+            every_loops = _review_every_loops(registry)
+            if from_status == "Active" and _has_unrecorded_review_boundary(
+                loop_count=loop_count,
+                every_loops=every_loops,
+                review_count=int(frontier.get("review_count", 0)),
+                max_reviews=int(frontier.get("max_reviews", 0)),
+            ):
+                raise InvalidTransition(
+                    f"frontier {frontier_id} has a review due; use record --decision Retired"
+                )
             reason = _retire_validation_error(mode=mode, loop_count=loop_count, retire_category=retire_category)
         if reason is not None:
             raise InvalidTransition(reason)
@@ -557,6 +574,20 @@ def _review_retire_validation_error(retire_category: str | None) -> str | None:
     return None
 
 
+def _has_unrecorded_review_boundary(
+    *,
+    loop_count: int,
+    every_loops: int,
+    review_count: int,
+    max_reviews: int,
+) -> bool:
+    return (
+        loop_count > 0
+        and loop_count // every_loops > review_count
+        and review_count < max_reviews
+    )
+
+
 def _render_portfolio_action(action: dict[str, Any]) -> str:
     action_type = action.get("action")
     reason = action.get("reason")
@@ -580,6 +611,26 @@ def _render_portfolio_action(action: dict[str, Any]) -> str:
     if action_type == "reject":
         candidate = action.get("candidate")
         text = f"Rejected {candidate}"
+        if reason:
+            text = f"{text}: {reason}"
+        return text
+
+    if action_type == "retire":
+        frontier = action.get("frontier")
+        category = action.get("category")
+        text = f"Retired {frontier}"
+        if category:
+            text = f"{text} (category={category})"
+        if reason:
+            text = f"{text}: {reason}"
+        return text
+
+    if action_type == "reprioritize":
+        frontier = action.get("frontier")
+        priority = action.get("priority")
+        text = f"Reprioritized {frontier}"
+        if priority:
+            text = f"{text} to {priority}"
         if reason:
             text = f"{text}: {reason}"
         return text

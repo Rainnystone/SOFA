@@ -58,7 +58,7 @@ Read scout + challenge 文件，在 `research_workflow.md` Evidence Loop Tracker
 **Step 6 — Continue/Stop Decision**（主线程决策）
 
 - **Continue**: Map Delta ≥ Material 且 Next Yield ≥ Medium → 同一 frontier 下一轮
-- **Review**: frontier 达到 3 loops → 暂停下一轮，先记录 Frontier Review decision
+- **Review**: frontier 达到或超过一个未记录的 3-loop review boundary → 暂停下一轮，先记录 Frontier Review decision
 - **Early retire**: 3 loops 前只有 `blocked` 或 `invalidated` 可用 standalone `retire` 提前结束
 - **Escalate to Red Team**: 没有 `Active` 或 `New` frontier，至少一个 `Continued` frontier，且每个 `Continued` frontier 都有 >=3 derived loops → Stage 3
 
@@ -70,7 +70,7 @@ Step 6 后立即运行：
 python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" check-review
 ```
 
-如果有 due frontier，下一轮 loop 必须阻塞，直到记录 3-loop Frontier Review：
+如果有 due frontier，下一轮 loop 必须阻塞，直到记录 3-loop Frontier Review。loop 4/5 仍可能 due：只要 loop 3 boundary 还没有 review record，就不能继续绕过：
 
 ```bash
 python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Continued --rationale "[why this frontier should stay in the durable queue]"
@@ -85,7 +85,7 @@ python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --dec
 python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category blocked --reason "[why this frontier cannot be pursued before review]"
 ```
 
-Ticker Dive early standalone retire 只允许 `blocked`、`invalidated`。如果使用 `invalidated`，替换上例中的 category 值即可。
+Ticker Dive early standalone retire 只允许 `blocked`、`invalidated`。如果使用 `invalidated`，替换上例中的 category 值即可。一旦 frontier 已经 review-due，不要用 standalone `retire` 绕过 review；必须用 `record --decision Retired`（或 review 事务里的 `--retire`，由 CLI 给目标 frontier 留下 review decision）。
 
 Do not use `blocked` or `invalidated` as `record --decision Retired` categories.
 

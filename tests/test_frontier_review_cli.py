@@ -140,6 +140,31 @@ class TestFrontierReviewCli(unittest.TestCase):
         self.assertIn("F1 -> Active", reactivate.stdout)
         self.assertEqual("Active", self.registry(workspace)["frontiers"][0]["status"])
 
+    def test_overdue_review_can_still_be_recorded(self):
+        workspace = self.make_workspace("ticker")
+        self.add_and_start_frontier(workspace)
+        self.write_loops(workspace, count=4)
+
+        due = self.run_cli(workspace, "check-review")
+        self.assertEqual(1, due.returncode)
+        self.assertIn("F1 reached loop 4", due.stdout)
+
+        record = self.run_cli(
+            workspace,
+            "record",
+            "F1",
+            "--decision",
+            "Continued",
+            "--rationale",
+            "Evidence remains material after overrun",
+        )
+
+        self.assertEqual(0, record.returncode, record.stderr)
+        f1 = self.registry(workspace)["frontiers"][0]
+        self.assertEqual("Continued", f1["status"])
+        self.assertEqual(1, f1["review_count"])
+        self.assertEqual(4, f1["review_decisions"][0]["at_loop"])
+
     def test_record_actions_mutate_registry_and_store_structured_metadata(self):
         workspace = self.make_workspace("ticker")
         self.add_and_start_frontier(workspace)
@@ -185,6 +210,11 @@ class TestFrontierReviewCli(unittest.TestCase):
         self.assertEqual("Continued", by_id["F1"]["status"])
         self.assertEqual("Retired", by_id["F2"]["status"])
         self.assertEqual("answered_out", by_id["F2"]["retire_category"])
+        self.assertEqual(1, by_id["F2"]["review_count"])
+        self.assertEqual("Retired", by_id["F2"]["review_decisions"][0]["decision"])
+        self.assertEqual("answered_out", by_id["F2"]["review_decisions"][0]["retire_category"])
+        self.assertEqual("legacy branch answered", by_id["F2"]["review_decisions"][0]["rationale_short"])
+        self.assertEqual(3, by_id["F2"]["review_decisions"][0]["at_loop"])
         self.assertEqual("New", by_id["F3"]["status"])
         self.assertEqual("Export license risk", by_id["F3"]["name"])
         self.assertEqual("discovery", by_id["F3"]["source"])
@@ -294,7 +324,7 @@ class TestFrontierReviewCli(unittest.TestCase):
 
         def traced_transition(registry, frontier_id, to_status, loop_counts, **kwargs):
             if kwargs.get("action") == "review":
-                call_order.append("review")
+                call_order.append(f"review:{frontier_id}")
             elif kwargs.get("action") == "retire":
                 call_order.append(f"retire:{frontier_id}")
             return original_transition(registry, frontier_id, to_status, loop_counts, **kwargs)
@@ -326,7 +356,7 @@ class TestFrontierReviewCli(unittest.TestCase):
             )
 
         self.assertEqual(0, result)
-        self.assertEqual(["review", "retire:F2", "add"], call_order)
+        self.assertEqual(["review:F1", "review:F2", "add"], call_order)
         actions = self.registry(workspace)["frontiers"][0]["review_decisions"][0]["portfolio_actions"]
         self.assertEqual(["add", "retire"], [action["action"] for action in actions])
 
@@ -549,6 +579,26 @@ class TestFrontierReviewCli(unittest.TestCase):
         f1 = self.registry(sector)["frontiers"][0]
         self.assertEqual("Retired", f1["status"])
         self.assertEqual("barren", f1["retire_category"])
+        self.assertEqual("mapping branch is exhausted", f1["lifecycle"][-1]["rationale"])
+
+        due_workspace = self.make_workspace("ticker")
+        self.add_and_start_frontier(due_workspace)
+        self.write_loops(due_workspace, count=3)
+        blocked = self.run_cli(
+            due_workspace,
+            "retire",
+            "F1",
+            "--category",
+            "answered_out",
+            "--reason",
+            "claims answered without review",
+        )
+
+        self.assertNotEqual(0, blocked.returncode)
+        self.assertIn("review due", blocked.stderr)
+        f1_due = self.registry(due_workspace)["frontiers"][0]
+        self.assertEqual("Active", f1_due["status"])
+        self.assertEqual(0, f1_due["review_count"])
 
 
 if __name__ == "__main__":

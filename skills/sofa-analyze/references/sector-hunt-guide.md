@@ -80,7 +80,7 @@ Read mapper + coverage 文件，在 `research_workflow.md` Evidence Loop Tracker
 **Step 6 — Continue/Stop Decision**（主线程决策）
 
 - **Continue**: 发现新层级/新瓶颈节点 且 Next Yield ≥ Medium → 同方向继续
-- **Review**: kept mapping direction 达到 3 loops → 暂停下一轮，先记录 Frontier Review decision
+- **Review**: kept mapping direction 达到或超过一个未记录的 3-loop review boundary → 暂停下一轮，先记录 Frontier Review decision
 - **Early retire**: barren direction 可在 1-2 loops 后用 standalone `retire --category barren` 提前结束；`blocked` 或 `invalidated` 也必须走 standalone `retire`
 
 记录到 Decision Log。
@@ -91,7 +91,7 @@ Step 6 后立即运行：
 python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" check-review
 ```
 
-如果有 due direction，下一轮 loop 必须阻塞，直到记录 3-loop Frontier Review：
+如果有 due direction，下一轮 loop 必须阻塞，直到记录 3-loop Frontier Review。loop 4/5 仍可能 due：只要 loop 3 boundary 还没有 review record，就不能继续绕过：
 
 ```bash
 python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Continued --rationale "[why this mapping direction should remain in the durable queue]"
@@ -107,7 +107,7 @@ python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --cat
 python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category blocked --reason "[why this direction cannot be pursued before review]"
 ```
 
-Sector Hunt early standalone retire 允许 `barren`、`blocked`、`invalidated`。如果使用 `invalidated`，替换上例中的 second command category 值即可。
+Sector Hunt early standalone retire 允许 `barren`、`blocked`、`invalidated`。如果使用 `invalidated`，替换上例中的 second command category 值即可。一旦 direction 已经 review-due，不要用 standalone `retire` 绕过 review；必须用 `record --decision Retired`（或 review 事务里的 `--retire`，由 CLI 给目标 frontier 留下 review decision）。
 
 Do not use `barren`, `blocked`, or `invalidated` as `record --decision Retired` categories.
 

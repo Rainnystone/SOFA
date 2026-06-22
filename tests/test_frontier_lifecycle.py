@@ -282,8 +282,10 @@ class TestFrontierLifecycle(unittest.TestCase):
     def test_check_review_due_prevents_duplicate_boundary_review(self):
         registry = self.registry()
         self.assertEqual(["F1"], self.module.check_review_due(registry, {"F1": 3, "F2": 2}))
+        self.assertEqual(["F1"], self.module.check_review_due(registry, {"F1": 4, "F2": 2}))
         registry["frontiers"][0]["review_count"] = 1
         self.assertEqual([], self.module.check_review_due(registry, {"F1": 3, "F2": 2}))
+        self.assertEqual([], self.module.check_review_due(registry, {"F1": 5, "F2": 2}))
         self.assertEqual(["F1"], self.module.check_review_due(registry, {"F1": 6, "F2": 2}))
         registry["frontiers"][0]["review_count"] = 3
         self.assertEqual([], self.module.check_review_due(registry, {"F1": 9, "F2": 2}))
@@ -298,11 +300,12 @@ class TestFrontierLifecycle(unittest.TestCase):
         registry = self.registry()
         registry["review_trigger"] = {"every_loops": 2}
         self.assertEqual(["F1"], self.module.check_review_due(registry, {"F1": 2, "F2": 1}))
-        self.assertEqual([], self.module.check_review_due(registry, {"F1": 3, "F2": 1}))
+        self.assertEqual(["F1"], self.module.check_review_due(registry, {"F1": 3, "F2": 1}))
 
         registry["frontiers"][0]["review_count"] = 1
         self.assertEqual([], self.module.check_review_due(registry, {"F1": 2, "F2": 1}))
         self.assertEqual(["F1"], self.module.check_review_due(registry, {"F1": 4, "F2": 1}))
+        self.assertEqual(["F1"], self.module.check_review_due(registry, {"F1": 5, "F2": 1}))
 
     def test_check_review_due_rejects_invalid_review_trigger(self):
         for every_loops in [0, -1, "2", 1.5, True]:
@@ -353,26 +356,45 @@ class TestFrontierLifecycle(unittest.TestCase):
         )
         self.assertEqual("Active", self.module.get_frontier(reactivated, "F1")["status"])
 
-    def test_review_action_rejects_off_boundary_loops_without_mutating_input(self):
-        for loop_count in [1, 4]:
-            with self.subTest(loop_count=loop_count):
-                registry = self.registry()
-                original = copy.deepcopy(registry)
+    def test_review_action_rejects_before_boundary_without_mutating_input(self):
+        registry = self.registry()
+        original = copy.deepcopy(registry)
 
-                with self.assertRaises(self.module.InvalidTransition):
-                    self.module.transition(
-                        registry,
-                        "F1",
-                        "Continued",
-                        {"F1": loop_count, "F2": 0},
-                        mode="ticker",
-                        action="review",
-                        rationale="not actually due",
-                        at_loop=loop_count,
-                    )
+        with self.assertRaises(self.module.InvalidTransition):
+            self.module.transition(
+                registry,
+                "F1",
+                "Continued",
+                {"F1": 1, "F2": 0},
+                mode="ticker",
+                action="review",
+                rationale="not actually due",
+                at_loop=1,
+            )
 
-                self.assertEqual(original, registry)
-                self.assertEqual(0, self.module.get_frontier(registry, "F1")["review_count"])
+        self.assertEqual(original, registry)
+        self.assertEqual(0, self.module.get_frontier(registry, "F1")["review_count"])
+
+    def test_review_action_accepts_overdue_loop_without_mutating_input(self):
+        registry = self.registry()
+        original = copy.deepcopy(registry)
+
+        updated = self.module.transition(
+            registry,
+            "F1",
+            "Continued",
+            {"F1": 4, "F2": 0},
+            mode="ticker",
+            action="review",
+            rationale="review recorded after one extra loop",
+            at_loop=4,
+        )
+
+        self.assertEqual(original, registry)
+        f1 = self.module.get_frontier(updated, "F1")
+        self.assertEqual("Continued", f1["status"])
+        self.assertEqual(1, f1["review_count"])
+        self.assertEqual(4, f1["review_decisions"][0]["at_loop"])
 
     def test_review_action_rejects_duplicate_boundary_without_mutating_input(self):
         registry = self.registry()
@@ -508,6 +530,27 @@ class TestFrontierLifecycle(unittest.TestCase):
         )
         self.assertEqual("Retired", self.module.get_frontier(retired, "F1")["status"])
         self.assertEqual("barren", self.module.get_frontier(retired, "F1")["retire_category"])
+        self.assertEqual("dead mapping direction", self.module.get_frontier(retired, "F1")["lifecycle"][-1]["rationale"])
+
+    def test_standalone_retire_rejects_frontier_with_due_review_without_mutating_input(self):
+        registry = self.registry(mode="ticker")
+        original = copy.deepcopy(registry)
+
+        with self.assertRaises(self.module.InvalidTransition):
+            self.module.transition(
+                registry,
+                "F1",
+                "Retired",
+                {"F1": 3, "F2": 0},
+                mode="ticker",
+                action="retire",
+                retire_category="answered_out",
+                rationale="claims answered without review",
+                at_loop=3,
+            )
+
+        self.assertEqual(original, registry)
+        self.assertEqual("Active", self.module.get_frontier(registry, "F1")["status"])
 
     def test_retire_rejects_unknown_category_without_mutating_input(self):
         for mode in ["ticker", "sector"]:
@@ -575,23 +618,24 @@ class TestFrontierLifecycle(unittest.TestCase):
 
                     self.assertEqual(original, registry)
 
-    def test_valid_retire_categories_are_allowed_at_three_or_more_loops(self):
+    def test_valid_retire_categories_are_allowed_after_recorded_review_boundary(self):
         valid_categories = ["blocked", "invalidated", "barren", "superseded", "bad_pick", "answered_out"]
 
         for mode in ["ticker", "sector"]:
             for category in valid_categories:
                 with self.subTest(mode=mode, category=category):
                     registry = self.registry(mode=mode)
+                    registry["frontiers"][0]["review_count"] = 1
                     retired = self.module.transition(
                         registry,
                         "F1",
                         "Retired",
-                        {"F1": 3, "F2": 0},
+                        {"F1": 4, "F2": 0},
                         mode=mode,
                         action="retire",
                         retire_category=category,
-                        rationale="resolved after sufficient loops",
-                        at_loop=3,
+                        rationale="resolved after first review window",
+                        at_loop=4,
                     )
                     self.assertEqual("Retired", self.module.get_frontier(retired, "F1")["status"])
                     self.assertEqual(category, self.module.get_frontier(retired, "F1")["retire_category"])
@@ -795,6 +839,8 @@ class TestFrontierLifecycle(unittest.TestCase):
                 "rationale_short": "yield high",
                 "portfolio_actions": [
                     {"action": "add", "frontier": "F3", "source": "discovery", "source_frontier": "F1", "reason": "export permit gate"},
+                    {"action": "retire", "frontier": "F2", "category": "answered_out", "reason": "legacy branch answered"},
+                    {"action": "reprioritize", "frontier": "F1", "priority": "high", "reason": "raise review priority"},
                     {"action": "reject", "candidate": "Silicon photonics tangent", "reason": "does not change Layer 0 demand"},
                 ],
             }
@@ -804,6 +850,8 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertIn("## Frontier Review: F1 @ loop 3 (review 1/3)", review_md)
         self.assertIn("**Decision**: Continued", review_md)
         self.assertIn("Added F3", review_md)
+        self.assertIn("Retired F2 (category=answered_out): legacy branch answered", review_md)
+        self.assertIn("Reprioritized F1 to high: raise review priority", review_md)
         self.assertIn("Silicon photonics tangent", discovery_md)
         self.assertEqual(review_md, self.module.render_review_log_md(registry))
         self.assertEqual(discovery_md, self.module.render_discovery_log_md(registry))
