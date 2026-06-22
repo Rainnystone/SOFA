@@ -19,6 +19,9 @@ import os
 import sys
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from frontier_lifecycle import make_registry
+
 
 def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> None:
     # Normalize workspace path
@@ -84,6 +87,14 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
 ## Decision Log
 | Time | Decision | Reason | Based On |
 |------|----------|--------|----------|
+
+## Frontier Review Log
+<!-- SOFA:frontier-review-log:start -->
+<!-- SOFA:frontier-review-log:end -->
+
+## Frontier Discovery Log
+<!-- SOFA:frontier-discovery-log:start -->
+<!-- SOFA:frontier-discovery-log:end -->
 
 ## Current Claim Ledger (summary)
 (See evidence_ledger.md for full content)
@@ -220,7 +231,6 @@ python3 SOFA/scripts/capability_check.py --json
             "started": datetime.now(timezone.utc).isoformat(),
             "current_stage": "stage_0",
             "loop_count": 0,
-            "loops_completed": [],
             "stages_completed": [],
             "subagent_dispatches": [],
             "decisions": [],
@@ -230,6 +240,16 @@ python3 SOFA/scripts/capability_check.py --json
         created.append("state.json")
     else:
         skipped_existing.append("state.json")
+
+    # Create frontier_registry.json for v4 frontier lifecycle state.
+    registry_path = os.path.join(workspace_path, "frontier_registry.json")
+    if not os.path.exists(registry_path):
+        registry = make_registry(ticker_or_theme, mode)
+        with open(registry_path, "w", encoding="utf-8") as f:
+            json.dump(registry, f, indent=2, ensure_ascii=False)
+        created.append("frontier_registry.json")
+    else:
+        skipped_existing.append("frontier_registry.json")
 
     # Output success
     print(f"WORKSPACE INITIALIZED")

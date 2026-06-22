@@ -1,53 +1,58 @@
 #!/usr/bin/env python3
-"""
-Loop Enforcer: Validates each frontier has at least 2 completed loops.
-Parses evidence_ledger.md "## Loop N: Frontier Name" entries and groups by frontier.
+"""Ledger-to-frontier registry binding checks for SOFA.
 
 Usage: python3 loop_enforcer.py <workspace_path>
 
 Called by gate_check.py during stage_2 -> stage_3 transition.
 """
+import json
 import os
 import sys
-import re
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from frontier_lifecycle import BindingError, derive_loop_counts
+
+
+def check_ledger_binding(
+    ledger_text: str,
+    registry: dict,
+) -> tuple[bool, dict[str, int], list[str]]:
+    """Check that ledger loop headers bind to known stable frontier IDs."""
+    try:
+        counts = derive_loop_counts(ledger_text, registry)
+    except BindingError as exc:
+        return False, {}, [str(exc)]
+
+    for frontier in registry.get("frontiers", []):
+        counts.setdefault(frontier["id"], 0)
+
+    return True, counts, []
 
 
 def check_loop_depth(workspace_path: str) -> tuple[bool, list[str]]:
-    """
-    Check that each frontier in evidence_ledger.md has at least 2 loops.
-    Returns: (passed, violations)
-    """
+    """Backward-compatible gate_check entrypoint for ledger binding checks."""
     ledger_path = os.path.join(workspace_path, "evidence_ledger.md")
     if not os.path.exists(ledger_path):
         return False, ["evidence_ledger.md not found"]
 
+    registry_path = os.path.join(workspace_path, "frontier_registry.json")
+    if not os.path.exists(registry_path):
+        return False, ["frontier_registry.json not found"]
+
     with open(ledger_path, "r", encoding="utf-8") as f:
-        content = f.read()
+        ledger_text = f.read()
 
-    # Parse "## Loop N: Frontier Name" format
-    loop_pattern = re.compile(r"^## Loop \d+:\s*(.+)$", re.MULTILINE)
-    loops = loop_pattern.findall(content)
+    with open(registry_path, "r", encoding="utf-8") as f:
+        registry = json.load(f)
 
-    if not loops:
-        return False, ["No loop entries found in evidence_ledger.md"]
+    passed, counts, violations = check_ledger_binding(ledger_text, registry)
+    if not passed:
+        return False, violations
 
-    # Group by frontier name
-    frontier_loops: dict[str, int] = {}
-    for frontier_name in loops:
-        frontier = frontier_name.strip()
-        if frontier not in frontier_loops:
-            frontier_loops[frontier] = 0
-        frontier_loops[frontier] += 1
+    if registry.get("frontiers") and not any(counts.values()):
+        return False, ["No ledger loop entries found for registered frontiers"]
 
-    violations = []
-    for frontier, count in frontier_loops.items():
-        if count < 2:
-            violations.append(
-                f"Frontier '{frontier}' only has {count} loop(s) - minimum 2 required per frontier"
-            )
-
-    passed = len(violations) == 0
-    return passed, violations
+    return True, []
 
 
 if __name__ == "__main__":
@@ -58,10 +63,10 @@ if __name__ == "__main__":
     workspace = sys.argv[1]
     passed, violations = check_loop_depth(workspace)
     if passed:
-        print("LOOP ENFORCER PASSED: All frontiers have >= 2 loops")
+        print("LOOP ENFORCER PASSED: Ledger loop headers bind to frontier_registry.json")
         sys.exit(0)
     else:
-        print("LOOP ENFORCER FAILED")
+        print("LOOP ENFORCER FAILED: Ledger binding check failed")
         for v in violations:
             print(f"  [FAIL] {v}")
         sys.exit(1)

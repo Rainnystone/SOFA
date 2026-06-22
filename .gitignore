@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
 # Local environments and credentials
 .env
@@ -14,6 +16,7 @@ __pycache__/
 *.pfx
 
 # Local research workspaces and generated outputs
+.worktrees/
 workspace/
 workspaces/
 reports/
