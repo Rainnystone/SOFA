@@ -10,9 +10,9 @@ Integrates loop_enforcer, scorecard_validator, timeliness_checker,
 synthesis_checker, and redteam_debate_validator.
 
 Usage:
-    python3 gate_check.py <WORKSPACE_PATH> <FROM_STAGE> <TO_STAGE>
-    python3 gate_check.py <WORKSPACE_PATH> complete <STAGE>
-    python3 gate_check.py <WORKSPACE_PATH> loop
+    python gate_check.py <WORKSPACE_PATH> <FROM_STAGE> <TO_STAGE>
+    python gate_check.py <WORKSPACE_PATH> complete <STAGE>
+    python gate_check.py <WORKSPACE_PATH> loop
 
 Stage names: stage_0, stage_1, stage_2, stage_3, stage_4, stage_5, stage_6
 """
@@ -336,9 +336,9 @@ def increment_loop(workspace_path: str) -> int:
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python3 gate_check.py <workspace> <from_stage> <to_stage>")
-        print("  python3 gate_check.py <workspace> complete <stage>")
-        print("  python3 gate_check.py <workspace> loop")
+        print("  python gate_check.py <workspace> <from_stage> <to_stage>")
+        print("  python gate_check.py <workspace> complete <stage>")
+        print("  python gate_check.py <workspace> loop")
         print("")
         print("Stage names: stage_0, stage_1, stage_2, stage_3, stage_4, stage_5, stage_6")
         sys.exit(1)

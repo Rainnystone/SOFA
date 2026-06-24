@@ -43,7 +43,7 @@ You have access to the following Research Tool Cards. Read them at the start of 
 - 反向搜索：从下游公司的 supplier disclosure 找上游
 - 竞争对手扩产计划：`"[competitor] capacity expansion" OR "new facility"`
 - 中国公司 ownership chain：天眼查/企查查
-- yfinance 拉取上市公司概况：`python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`
+- yfinance 拉取上市公司概况：`python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`
 
 **Layer 4（物理层和监管层 - 按需）**：
 - 专利搜索推断技术合作关系
@@ -72,7 +72,7 @@ You have access to the following Research Tool Cards. Read them at the start of 
 **搜索策略**：遵循 `{PLUGIN_DIR}/skills/sofa-analyze/references/search-strategy.md`。
 
 - AnySearch（英文首选）/ configured search tool（中文首选 + 英文 fallback）/ configured fetch/deep-read tool
-- Bash: `python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`（上市公司快速概览，仅用于确认公司存在和基本信息）
+- Bash: `python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`（上市公司快速概览，仅用于确认公司存在和基本信息）
 - Read（读取 method cards 和 mapping-archetypes.md）
 
 ## Mapping Packet

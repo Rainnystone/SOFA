@@ -162,8 +162,8 @@ Demand slowdown risk: [需求放缓风险]
 用户接受初始 frontier set 后，立即为每个方向注册 lifecycle ID，并启动第一个要执行的 frontier：
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --at-loop 1
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --at-loop 1
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 ```
 
 对每个 accepted frontier 重复 `add`；只对当前要执行的第一个 frontier 运行 `start`。Registry ID（如 `F1`, `F2`, `F3`）是机器绑定 key。Display name 可以随着研究理解变清晰而调整，但 `evidence_ledger.md` 的 loop header 必须保留稳定 ID。
@@ -236,14 +236,14 @@ python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 Step 6 后立即运行 Frontier Review 检查：
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" check-review
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" check-review
 ```
 
 如果 `check-review` 显示某个 frontier due，下一轮 loop 必须暂停，直到记录 review decision。即使 ledger 已经写到 loop 4/5，只要对应 3-loop boundary 尚未记录 review，它仍然 due：
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Continued --rationale "[why this frontier still creates material evidence yield]"
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Retired --category answered_out --rationale "[why the 3-loop review retires it]"
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Continued --rationale "[why this frontier still creates material evidence yield]"
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Retired --category answered_out --rationale "[why the 3-loop review retires it]"
 ```
 
 3-loop review-based retirement 只允许 `answered_out`、`bad_pick`、`superseded`。如果使用 `bad_pick` 或 `superseded`，替换上例中的 category 值即可。
@@ -251,7 +251,7 @@ python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --dec
 3-loop review 之外的提前结束使用 standalone `retire`：
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category blocked --reason "[why this frontier cannot be pursued before review]"
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category blocked --reason "[why this frontier cannot be pursued before review]"
 ```
 
 Ticker Dive early standalone retire 允许 `blocked`、`invalidated`。Sector Hunt early standalone retire 允许 `blocked`、`invalidated`、`barren`。一旦 frontier 已经 review-due，不要用 standalone `retire` 绕过 review；必须用 `record --decision Retired`（或 review 事务里的 `--retire`，由 CLI 给目标 frontier 留下 review decision）。`Continued` 是 durable 状态；之后如果要继续推进这个 frontier，必须显式运行 `reactivate F{id}`。不要把 early categories 写成 review-based `record --decision Retired` category。
@@ -373,7 +373,7 @@ Ticker Dive early standalone retire 允许 `blocked`、`invalidated`。Sector Hu
 
 ⛔ Financial Bridge 和 Red Team 不可在同一消息中派遣。
 
-**财务数据获取（三路分流）**：结构化数据 → `python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER`（yfinance，10 模块：quote/profile/income/balance/cashflow/valuation/holders/recommendations/earnings/dividends）；英文定性信息 → AnySearch + configured fetch/deep-read tool 获取 filings、transcripts、IR slides；中文定性信息 → configured search tool + configured fetch/deep-read tool 获取 A 股公告、港股年报。详见 [search-strategy.md](search-strategy.md)。
+**财务数据获取（三路分流）**：结构化数据 → `python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER`（yfinance，10 模块：quote/profile/income/balance/cashflow/valuation/holders/recommendations/earnings/dividends）；英文定性信息 → AnySearch + configured fetch/deep-read tool 获取 filings、transcripts、IR slides；中文定性信息 → configured search tool + configured fetch/deep-read tool 获取 A 股公告、港股年报。详见 [search-strategy.md](search-strategy.md)。
 
 ---
 

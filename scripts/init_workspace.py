@@ -6,11 +6,11 @@ Creates a SOFA workspace directory structure and initializes all required
 state files. Must be called as the FIRST action in any SOFA research session.
 
 Usage:
-    python3 init_workspace.py <TICKER_OR_THEME> <WORKSPACE_PATH> [--mode ticker|sector]
+    python init_workspace.py <TICKER_OR_THEME> <WORKSPACE_PATH> [--mode ticker|sector]
 
 Example:
-    python3 init_workspace.py MXL /path/to/workspace --mode ticker
-    python3 init_workspace.py "AI Optical Interconnect" /path/to/workspace --mode sector
+    python init_workspace.py MXL /path/to/workspace --mode ticker
+    python init_workspace.py "AI Optical Interconnect" /path/to/workspace --mode sector
 """
 
 import argparse
@@ -165,7 +165,7 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
 Run from the project root:
 
 ```bash
-python3 SOFA/scripts/capability_check.py --json
+python SOFA/scripts/capability_check.py --json
 ```
 
 | Capability | Mode | Status | Notes |
@@ -263,7 +263,7 @@ python3 SOFA/scripts/capability_check.py --json
     print(f"")
 
     print(f"  Capability check:")
-    print(f"    Run python3 SOFA/scripts/capability_check.py --json from the project root.")
+    print(f"    Run python SOFA/scripts/capability_check.py --json from the project root.")
     print(f"    SOFA recommends AnySearch -> Exa -> Tavily -> host-agent built-ins for general search.")
     print(f"    SOFA recommends Wind for Chinese financial data and yfinance for English/global public-market data.")
     print(f"")

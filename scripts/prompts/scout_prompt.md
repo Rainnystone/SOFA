@@ -85,7 +85,7 @@ You have access to the following Research Tool Cards. Load only the card(s) rele
   - Wayback Machine 检查历史页面变更
   - HTML inspection 检查隐藏的元数据、alt text、data attributes
   - SPA 页面（需要 JavaScript 渲染的内容）
-- yfinance 快速获取财务数据辅助验证：`python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`
+- yfinance 快速获取财务数据辅助验证：`python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`
 
 ### Phase 4: 自我审查（输出前必做）
 在写输出前，逐一检查：
@@ -108,11 +108,11 @@ You have access to the following Research Tool Cards. Load only the card(s) rele
 
 **搜索策略**：遵循 `{PLUGIN_DIR}/skills/sofa-analyze/references/search-strategy.md`（全框架统一规则）。核心：英文/非中文检索 → AnySearch 优先，configured search tool 仅在 AnySearch 不可用或失败时 fallback；中文检索（天眼查/企查查/工商）→ configured search tool 优先。
 
-- AnySearch（**英文/非中文检索首选**）：`python3 {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"` / `batch_search --query "q1" --query "q2"` / `extract "URL"`
+- AnySearch（**英文/非中文检索首选**）：`python {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"` / `batch_search --query "q1" --query "q2"` / `extract "URL"`
 - configured search tool（中文 OSINT 首选 + 英文 fallback）：天眼查/企查查/工商信息/巨潮资讯，以及 AnySearch 不可用时的通用搜索
 - configured fetch/deep-read tool（深入阅读）：IR 页面、SEC filings、天眼查/企查查详情页
 - Browser：Wayback Machine、HTML inspection、SPA 页面渲染
-- Bash: `python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`（上市公司快速财务概览）
+- Bash: `python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`（上市公司快速财务概览）
 - Read（读取 Method Cards）
 - 中国非上市公司工商信息 OSINT 查询（见下方方法）
 

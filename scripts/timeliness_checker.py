@@ -3,7 +3,7 @@
 Timeliness Checker: Validates that evidence_ledger.md and research_workflow.md
 contain records of timeliness-aware searches (Stage 0 framing, recent events).
 
-Usage: python3 timeliness_checker.py <workspace_path>
+Usage: python timeliness_checker.py <workspace_path>
 
 Called by gate_check.py during stage_2 -> stage_3 transition.
 """
@@ -58,7 +58,7 @@ def check_timeliness(workspace_path: str) -> tuple[bool, list[str]]:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 timeliness_checker.py <workspace_path>")
+        print("Usage: python timeliness_checker.py <workspace_path>")
         sys.exit(1)
 
     workspace = sys.argv[1]

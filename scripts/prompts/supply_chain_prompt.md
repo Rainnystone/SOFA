@@ -42,7 +42,7 @@ You have access to the following Research Tool Card. Read it at the start of you
 - 搜索目标公司的客户（反向搜索）：`"[company]" "customer" OR "design win" OR "qualified"`
 - 搜索竞争对手的扩产计划：`"[competitor] capacity expansion" OR "capex" OR "new facility"`
 - 中国公司的 ownership chain：天眼查/企查查查股东和对外投资 → 识别上下游持股关系
-- yfinance 拉取目标公司财务概况：`python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`
+- yfinance 拉取目标公司财务概况：`python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`
 
 **Layer 4（深层 - 按需）：物理层和监管层**
 - 专利搜索：`site:patents.google.com "[company]"` → 从专利引用网络推断技术合作关系
@@ -75,9 +75,9 @@ You have access to the following Research Tool Card. Read it at the start of you
 
 **搜索策略**：遵循 `{PLUGIN_DIR}/skills/sofa-analyze/references/search-strategy.md`。核心：英文检索 → AnySearch 优先，中文检索 → configured search tool 优先。
 
-- AnySearch（**英文/非中文检索首选**）：`python3 {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"` / `batch_search --query "q1" --query "q2"`
+- AnySearch（**英文/非中文检索首选**）：`python {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"` / `batch_search --query "q1" --query "q2"`
 - configured search tool（中文 OSINT 首选 + 英文 fallback）、configured fetch/deep-read tool（深入阅读）、Browser
-- Bash: `python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`（上市公司快速概览）
+- Bash: `python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote`（上市公司快速概览）
 - Read（读取知识库中的 mapping-archetypes.md 了解 8 种瓶颈原型）
 - 中国非上市公司工商信息 OSINT 查询（方法见 Role 1 的工具列表）
 

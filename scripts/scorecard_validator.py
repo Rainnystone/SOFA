@@ -3,7 +3,7 @@
 Scorecard Validator: Validates Gate Scorecard table in research_workflow.md.
 Checks that Evidence Loop Tracker has filled Gate Score and Decision columns.
 
-Usage: python3 scorecard_validator.py <workspace_path>
+Usage: python scorecard_validator.py <workspace_path>
 
 Called by gate_check.py during stage_2 -> stage_3 transition.
 """
@@ -60,7 +60,7 @@ def validate_scorecards(workspace_path: str) -> tuple[bool, list[str]]:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 scorecard_validator.py <workspace_path>")
+        print("Usage: python scorecard_validator.py <workspace_path>")
         sys.exit(1)
 
     workspace = sys.argv[1]

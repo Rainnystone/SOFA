@@ -12,7 +12,7 @@
 
 **搜索策略**：遵循 `{PLUGIN_DIR}/skills/sofa-analyze/references/search-strategy.md`。核心：英文检索 → AnySearch 优先，中文检索 → configured search tool 优先。
 
-- AnySearch（**英文/非中文检索首选**）：`python3 {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"`
+- AnySearch（**英文/非中文检索首选**）：`python {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"`
 - configured search tool（中文 OSINT 首选 + 英文 fallback）：搜索替代解释和反向证据
 - Read（读取知识库中的 evidence-grading.md 了解证据等级定义）
 

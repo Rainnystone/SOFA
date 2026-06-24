@@ -113,7 +113,7 @@ def scan_environment(
             "evidence": yfinance_evidence,
             "recommendation": (
                 "English/global public-market users can install yfinance with "
-                "python3 -m pip install yfinance and treat it as a research aid, "
+                "python -m pip install yfinance and treat it as a research aid, "
                 "not an authoritative filing source."
             ),
         },

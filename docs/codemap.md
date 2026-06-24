@@ -42,7 +42,7 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 | `scripts/gate_check.py` | `tests/test_frontier_gate.py` | Enforce stage transition gates, including lifecycle convergence before Stage 3. |
 | `scripts/capability_check.py` | `tests/test_capability_check.py` | Detect optional search and financial-data capability availability. |
 | `scripts/generate_ultra_packet.py` | structure and workspace tests | Generate bounded Ultra Dive packets from Sector Hunt outputs. |
-| `scripts/run_coverage.sh` | manual verification gate | Run coverage for the lifecycle module. |
+| `scripts/run_coverage.py` | manual verification gate | Run cross-platform coverage for the lifecycle module. |
 | report and score validators | structure and targeted validator tests | Validate scorecards, freshness, synthesis, red-team debate, and final dossiers. |
 
 If a script enforces a rule that appears in a guide, update both the script tests and the guide text in the same change.
@@ -80,26 +80,34 @@ Keep README concise. If a section grows into implementation detail, move it to `
 
 ## Verification Commands
 
-Use the narrowest useful command while editing, then run the full checks before committing:
+Use the narrowest useful command while editing, then run the full checks before committing.
+
+> **Interpreter name:** commands use `python`. On Windows use `python` or `py`; on the rare Linux distro that only ships `python3`, use that. The `-B` flag (equivalent to `PYTHONDONTWRITEBYTECODE=1`) avoids writing `.pyc` files and works on every OS without shell-specific env syntax.
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_structure
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_frontier_lifecycle
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_frontier_review_cli
-PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/*.py tests/*.py
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
+python -B -m unittest tests.test_structure
+python -B -m unittest tests.test_frontier_lifecycle
+python -B -m unittest tests.test_frontier_review_cli
+python -B -m compileall -q scripts tests
+python -B -m unittest discover -s tests -p "test_*.py"
 git diff --check
 ```
 
 For lifecycle coverage:
 
 ```bash
-python3 -m venv /tmp/sofa-coverage-venv
-/tmp/sofa-coverage-venv/bin/python -m pip install -r requirements-dev.txt
-PATH="/tmp/sofa-coverage-venv/bin:$PATH" ./scripts/run_coverage.sh
+python scripts/run_coverage.py
 ```
 
-Use a temporary venv for coverage in externally managed Python installations.
+`run_coverage.py` is cross-platform (Windows, macOS, Linux) and invokes coverage through `sys.executable`. If your environment is an externally managed Python (PEP 668), install `coverage` from `requirements-dev.txt` into a virtual environment first:
+
+```bash
+python -m venv .venv-coverage
+# Windows: .venv-coverage\Scripts\activate
+# macOS/Linux: source .venv-coverage/bin/activate
+python -m pip install -r requirements-dev.txt
+python scripts/run_coverage.py
+```
 
 ## Boundaries To Preserve
 

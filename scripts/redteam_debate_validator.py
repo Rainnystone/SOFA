@@ -3,7 +3,7 @@
 Red Team Debate Validator: Validates Socratic Debate completeness in Stage 4.
 Checks: round files, defense files, round pairing, minimum 2 rounds, thesis revision.
 
-Usage: python3 redteam_debate_validator.py <workspace_path>
+Usage: python redteam_debate_validator.py <workspace_path>
 
 Called by gate_check.py during stage_4 -> stage_5 transition.
 """
@@ -76,7 +76,7 @@ def validate_debate(workspace_path: str) -> tuple[bool, list[str]]:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 redteam_debate_validator.py <workspace_path>")
+        print("Usage: python redteam_debate_validator.py <workspace_path>")
         sys.exit(1)
 
     workspace = sys.argv[1]

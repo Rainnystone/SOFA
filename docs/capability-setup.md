@@ -5,8 +5,8 @@ SOFA detects optional tools and prints recommendations. It never silently instal
 Run the capability check when you want to see what is available:
 
 ```bash
-python3 SOFA/scripts/capability_check.py
-python3 SOFA/scripts/capability_check.py --json
+python SOFA/scripts/capability_check.py
+python SOFA/scripts/capability_check.py --json
 ```
 
 ## General Search Chain
@@ -47,7 +47,7 @@ SOFA must ask before writing `WIND_API_KEY` or any other credential.
 For English/global public-market snapshots:
 
 ```bash
-python3 -m pip install yfinance
+python -m pip install yfinance
 ```
 
 `yfinance` is useful for quote, profile, financial statement, valuation, holder, recommendation, earnings, and dividend snapshots. Filings, exchange announcements, and company disclosures remain authoritative.
