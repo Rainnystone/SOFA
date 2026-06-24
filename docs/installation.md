@@ -17,6 +17,24 @@ python SOFA/scripts/init_workspace.py "THEME" "./workspace" --mode sector
 
 4. Run gates and validators from `SOFA/scripts/` as the workflow progresses.
 
+## Optional Native Subagent Setup
+
+SOFA works without native subagent configuration. The default path is still for the main SOFA thread to read the prompt templates, assemble a fresh dispatch packet, and send bounded work to the host agent's subagent mechanism when needed.
+
+Native subagents are optional for frequent users who repeatedly run the same SOFA worker roles, such as Frontier Scout, Sector Mapper, Financial Bridge Analyst, or Red Team. Codex supports custom agents under `.codex/agents/*.toml`, and Claude Code supports custom subagents under `.claude/agents/*.md`. These files can make stable worker roles easier to reuse, but they should be created deliberately and kept reviewable.
+
+Use this decision rule:
+
+| Situation | Recommendation |
+| --- | --- |
+| First-time use, cross-agent use, or lowest setup friction | Keep the default prompt-template dispatch path. |
+| Frequent SOFA use with the same worker roles | Consider native Codex or Claude Code subagents. |
+| Asking the host agent to invent subagents during installation | Avoid this; use explicit, reviewable definitions instead. |
+
+If you enable native subagents, keep only stable behavior in the agent definition: role identity, tool or permission boundaries, forbidden conclusions, file-output discipline, and output expectations. The current company, sector, frontier packet, evidence summary, delivery path, method-card paths, and search capability status must still come from the main SOFA thread in each dispatch packet.
+
+Native subagents do not change SOFA's control boundaries. The main thread still owns orchestration, ledgers, gates, workspace state, and final verdicts. Future SOFA releases may provide official Codex and Claude Code subagent templates, but this installation guide does not install or overwrite any local agent configuration.
+
 ## Boundaries
 
 SOFA does not silently install optional tools, write credentials, or assume one host runtime. Host-specific mapping belongs in `docs/adapters/`.
