@@ -25,7 +25,7 @@ SOFA does not silently install optional tools, write credentials, or assume one 
 
 ```bash
 python -m compileall -q SOFA/scripts SOFA/tests
-python -m unittest discover -s SOFA/tests -p 'test_*.py'
+python -m unittest discover -s SOFA/tests -p "test_*.py"
 ```
 
 ## Next Steps

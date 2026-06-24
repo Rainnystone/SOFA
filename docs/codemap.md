@@ -89,7 +89,7 @@ python -B -m unittest tests.test_structure
 python -B -m unittest tests.test_frontier_lifecycle
 python -B -m unittest tests.test_frontier_review_cli
 python -B -m compileall -q scripts tests
-python -B -m unittest discover -s tests -p 'test_*.py'
+python -B -m unittest discover -s tests -p "test_*.py"
 git diff --check
 ```
 
