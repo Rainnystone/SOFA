@@ -82,7 +82,7 @@ class TestSofaStructure(unittest.TestCase):
             "scripts/frontier_lifecycle.py",
             "scripts/frontier_review.py",
             "scripts/generate_ultra_packet.py",
-            "scripts/run_coverage.sh",
+            "scripts/run_coverage.py",
             "scripts/prompts/frontier_review_prompt.md",
         ]
         missing = [path for path in required_paths if not (ROOT / path).exists()]

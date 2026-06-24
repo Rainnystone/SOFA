@@ -42,7 +42,7 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 | `scripts/gate_check.py` | `tests/test_frontier_gate.py` | Enforce stage transition gates, including lifecycle convergence before Stage 3. |
 | `scripts/capability_check.py` | `tests/test_capability_check.py` | Detect optional search and financial-data capability availability. |
 | `scripts/generate_ultra_packet.py` | structure and workspace tests | Generate bounded Ultra Dive packets from Sector Hunt outputs. |
-| `scripts/run_coverage.sh` | manual verification gate | Run coverage for the lifecycle module. |
+| `scripts/run_coverage.py` | manual verification gate | Run cross-platform coverage for the lifecycle module. |
 | report and score validators | structure and targeted validator tests | Validate scorecards, freshness, synthesis, red-team debate, and final dossiers. |
 
 If a script enforces a rule that appears in a guide, update both the script tests and the guide text in the same change.
@@ -94,12 +94,18 @@ git diff --check
 For lifecycle coverage:
 
 ```bash
-python3 -m venv /tmp/sofa-coverage-venv
-/tmp/sofa-coverage-venv/bin/python -m pip install -r requirements-dev.txt
-PATH="/tmp/sofa-coverage-venv/bin:$PATH" ./scripts/run_coverage.sh
+python scripts/run_coverage.py
 ```
 
-Use a temporary venv for coverage in externally managed Python installations.
+`run_coverage.py` is cross-platform (Windows, macOS, Linux) and invokes coverage through `sys.executable`. If your environment is an externally managed Python (PEP 668), install `coverage` from `requirements-dev.txt` into a virtual environment first:
+
+```bash
+python -m venv .venv-coverage
+# Windows: .venv-coverage\Scripts\activate
+# macOS/Linux: source .venv-coverage/bin/activate
+python -m pip install -r requirements-dev.txt
+python scripts/run_coverage.py
+```
 
 ## Boundaries To Preserve
 
