@@ -474,6 +474,43 @@ def read_required_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def replace_with_retry(
+    src: Path,
+    dst: Path,
+    *,
+    retries: int = 3,
+    delay: float = 0.05,
+    is_windows: bool | None = None,
+) -> None:
+    """Atomically replace ``dst`` with ``src``, tolerating Windows file locks.
+
+    On Windows, ``os.replace`` raises ``PermissionError`` when the destination
+    is held open by another process (OneDrive sync, antivirus, an editor).
+    This helper retries transient ``PermissionError`` a bounded number of times
+    on Windows only. On POSIX it is a single attempt — identical to a bare
+    ``os.replace`` — so behavior there is unchanged.
+
+    Like ``os.replace`` itself, this does not clean up ``src`` on failure; the
+    caller (``write_text``) owns temp-file cleanup. ``delay`` grows slightly
+    between attempts (linear backoff) to give the lock holder time to release.
+    """
+    if is_windows is None:
+        is_windows = sys.platform == "win32"
+
+    attempts = retries + 1 if is_windows else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if not is_windows or attempt == attempts - 1:
+                raise
+            # Brief backoff before retrying on Windows.
+            import time
+
+            time.sleep(delay * (attempt + 1))
+
+
 def write_text(path: Path, text: str) -> None:
     path = Path(path)
     temp_path = None
@@ -483,7 +520,7 @@ def write_text(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_path, path)
+        replace_with_retry(temp_path, path)
     except Exception:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
