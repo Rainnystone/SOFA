@@ -37,7 +37,7 @@ Three non-negotiable rules:
 ## Mandatory First Action
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/init_workspace.py "{SUBJECT}" "{WORKSPACE_PATH}" --mode {ticker|sector}
+python {PLUGIN_DIR}/scripts/init_workspace.py "{SUBJECT}" "{WORKSPACE_PATH}" --mode {ticker|sector}
 ```
 
 No search, worker dispatch, or thesis formation is allowed before `WORKSPACE INITIALIZED`.
@@ -67,8 +67,8 @@ Mandatory outputs:
 Gate:
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_0
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_0 stage_1
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_0
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_0 stage_1
 ```
 
 ## Stage 1: Provisional Frontier or Mapping Plan
@@ -83,8 +83,8 @@ Show the options to the user and ask for priority selection when the choice mate
 After the user accepts the frontier set, register each accepted frontier before Stage 2:
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --at-loop 1
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --at-loop 1
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 ```
 
 Repeat `add` for each accepted frontier, start only the first active frontier, and keep all loop headers in `## Loop {N}: F{id} - {name}` format.
@@ -92,7 +92,7 @@ Repeat `add` for each accepted frontier, start only the first active frontier, a
 Gate:
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_1
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_1
 ```
 
 ## Stages 2-5: Mode-Specific Execution
@@ -106,8 +106,8 @@ Load the relevant guide and follow it as the operational source of truth:
 After each stage:
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_N
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_N stage_N+1
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_N
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_N stage_N+1
 ```
 
 ## Stage 6: Watch Protocol and Deliverable

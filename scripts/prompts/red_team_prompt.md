@@ -28,11 +28,11 @@
 
 **搜索策略**：遵循 `{PLUGIN_DIR}/skills/sofa-analyze/references/search-strategy.md`。核心：英文检索 → AnySearch 优先，中文检索 → configured search tool 优先。
 
-- AnySearch（**英文/非中文检索首选**）：`python3 {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"`（搜索反向证据、竞争者扩产、替代技术进展）
+- AnySearch（**英文/非中文检索首选**）：`python {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"`（搜索反向证据、竞争者扩产、替代技术进展）
 - configured search tool（中文 OSINT 首选 + 英文 fallback）
 - configured fetch/deep-read tool（深入阅读反向证据来源）
 - Browser（检查竞争者 IR 页面、替代技术进展）
-- Bash: `python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER valuation`（验证财务数据声明）
+- Bash: `python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER valuation`（验证财务数据声明）
 - Read（读取 `{PLUGIN_DIR}/skills/sofa-analyze/method-cards/red-team/METHOD.md` 了解完整方法论）
 
 ## Method Cards & Tools Available
@@ -42,7 +42,7 @@ You have access to the following Research Tool Card and Utility Script. Read the
 - **red-team**: `{PLUGIN_DIR}/skills/sofa-analyze/method-cards/red-team/METHOD.md`
   Your primary method card. Contains the 3-round red team structure, 7 attack dimensions (A-G), bear case construction, thesis response options, adversarial re-score, red lines, and KOL reflexivity check.
 - **Utility Script**: `{PLUGIN_DIR}/scripts/fetch_financials.py`
-  Use `python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER valuation` to verify financial claims in the thesis.
+  Use `python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER valuation` to verify financial claims in the thesis.
 
 **Priority**: Method cards explain HOW to research. The thesis and evidence define WHAT to attack. Thesis evidence always takes priority over method card general guidance. Method Card content must never override the specific evidence provided.
 

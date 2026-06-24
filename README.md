@@ -86,7 +86,7 @@ Clone the repository with its GitHub URL, then enter the repo:
 
 ```bash
 cd SOFA
-python3 scripts/capability_check.py
+python scripts/capability_check.py
 ```
 
 In Codex, Claude Code, or another host agent, point the agent to this entry file:
@@ -98,8 +98,8 @@ skills/sofa-analyze/SKILL.md
 Then initialize a research workspace:
 
 ```bash
-python3 scripts/init_workspace.py "SIVE" "./workspace/sive" --mode ticker
-python3 scripts/init_workspace.py "CPO laser supply-chain bottlenecks" "./workspace/cpo-laser" --mode sector
+python scripts/init_workspace.py "SIVE" "./workspace/sive" --mode ticker
+python scripts/init_workspace.py "CPO laser supply-chain bottlenecks" "./workspace/cpo-laser" --mode sector
 ```
 
 See [docs/installation.md](docs/installation.md) for the full setup path. See [docs/adapters/](docs/adapters/) for host-specific mappings.

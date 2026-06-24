@@ -93,7 +93,7 @@ Layer 5: Geography / Regulation (export permits, mines, refineries, JVs...)
 
 #### 3.4 yfinance 快速查询
 ```bash
-python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote
+python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER quote
 ```
 获取市值、行情概览，用于 Market Materiality Test。
 

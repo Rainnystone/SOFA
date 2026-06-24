@@ -4,17 +4,17 @@ fetch_financials.py - SOFA Financial Data Fetcher
 Uses yfinance to pull structured financial data for SOFA financial bridge work.
 
 Usage:
-  python3 fetch_financials.py TICKER                    # full snapshot (all modules)
-  python3 fetch_financials.py TICKER quote              # quote + fast_info only
-  python3 fetch_financials.py TICKER income             # income statement
-  python3 fetch_financials.py TICKER balance             # balance sheet
-  python3 fetch_financials.py TICKER cashflow            # cash flow statement
-  python3 fetch_financials.py TICKER valuation           # valuation multiples + comps hint
-  python3 fetch_financials.py TICKER holders             # institutional holders
-  python3 fetch_financials.py TICKER recommendations     # analyst recommendations
-  python3 fetch_financials.py TICKER earnings            # earnings history + dates
-  python3 fetch_financials.py TICKER dividends           # dividend history
-  python3 fetch_financials.py TICKER profile             # company profile
+  python fetch_financials.py TICKER                    # full snapshot (all modules)
+  python fetch_financials.py TICKER quote              # quote + fast_info only
+  python fetch_financials.py TICKER income             # income statement
+  python fetch_financials.py TICKER balance             # balance sheet
+  python fetch_financials.py TICKER cashflow            # cash flow statement
+  python fetch_financials.py TICKER valuation           # valuation multiples + comps hint
+  python fetch_financials.py TICKER holders             # institutional holders
+  python fetch_financials.py TICKER recommendations     # analyst recommendations
+  python fetch_financials.py TICKER earnings            # earnings history + dates
+  python fetch_financials.py TICKER dividends           # dividend history
+  python fetch_financials.py TICKER profile             # company profile
 
 Ticker format:
   US stocks:    AAPL, MSFT, NVDA
@@ -477,7 +477,7 @@ MODULE_MAP = {
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 fetch_financials.py TICKER [module]")
+        print("Usage: python fetch_financials.py TICKER [module]")
         print("Modules: quote, profile, income, balance, cashflow, valuation, holders, recommendations, earnings, dividends")
         print("Default: full snapshot (all modules)")
         sys.exit(1)

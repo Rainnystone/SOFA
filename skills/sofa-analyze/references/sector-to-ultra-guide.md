@@ -64,7 +64,7 @@ Each packet should contain:
 ## Recommended Script
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/generate_ultra_packet.py --workspace "{WORKSPACE}" --candidate-json "{CANDIDATES_JSON}"
+python {PLUGIN_DIR}/scripts/generate_ultra_packet.py --workspace "{WORKSPACE}" --candidate-json "{CANDIDATES_JSON}"
 ```
 
 Use `--force` only when the user intentionally wants to replace existing packets.

@@ -36,13 +36,13 @@ Before analysis, pull a full financial snapshot via the bundled `fetch_financial
 
 ```bash
 # Full snapshot (recommended) -- quote + profile + income + balance + cashflow + valuation + holders + analyst recommendations + earnings + dividends
-python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER
+python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER
 
 # Single module on demand
-python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER valuation
-python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER income
-python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER balance
-python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER cashflow
+python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER valuation
+python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER income
+python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER balance
+python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER cashflow
 ```
 
 **Ticker format**:

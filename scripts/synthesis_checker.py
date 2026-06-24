@@ -3,7 +3,7 @@
 Synthesis Checker: Validates that research_workflow.md Synthesis Notes section
 has substantive analytical content (minimum 3 substantive lines).
 
-Usage: python3 synthesis_checker.py <workspace_path>
+Usage: python synthesis_checker.py <workspace_path>
 
 Called by gate_check.py during stage_3 -> stage_4 transition.
 """
@@ -56,7 +56,7 @@ def check_synthesis(workspace_path: str) -> tuple[bool, list[str]]:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 synthesis_checker.py <workspace_path>")
+        print("Usage: python synthesis_checker.py <workspace_path>")
         sys.exit(1)
 
     workspace = sys.argv[1]

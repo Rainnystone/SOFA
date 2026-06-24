@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ledger-to-frontier registry binding checks for SOFA.
 
-Usage: python3 loop_enforcer.py <workspace_path>
+Usage: python loop_enforcer.py <workspace_path>
 
 Called by gate_check.py during stage_2 -> stage_3 transition.
 """
@@ -57,7 +57,7 @@ def check_loop_depth(workspace_path: str) -> tuple[bool, list[str]]:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 loop_enforcer.py <workspace_path>")
+        print("Usage: python loop_enforcer.py <workspace_path>")
         sys.exit(1)
 
     workspace = sys.argv[1]

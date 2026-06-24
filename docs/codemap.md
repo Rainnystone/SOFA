@@ -80,14 +80,16 @@ Keep README concise. If a section grows into implementation detail, move it to `
 
 ## Verification Commands
 
-Use the narrowest useful command while editing, then run the full checks before committing:
+Use the narrowest useful command while editing, then run the full checks before committing.
+
+> **Interpreter name:** commands use `python`. On Windows use `python` or `py`; on the rare Linux distro that only ships `python3`, use that. The `-B` flag (equivalent to `PYTHONDONTWRITEBYTECODE=1`) avoids writing `.pyc` files and works on every OS without shell-specific env syntax.
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_structure
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_frontier_lifecycle
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_frontier_review_cli
-PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/*.py tests/*.py
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
+python -B -m unittest tests.test_structure
+python -B -m unittest tests.test_frontier_lifecycle
+python -B -m unittest tests.test_frontier_review_cli
+python -B -m compileall -q scripts tests
+python -B -m unittest discover -s tests -p 'test_*.py'
 git diff --check
 ```
 

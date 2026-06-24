@@ -37,7 +37,7 @@ Sector Hunt 的目的不是验证某个公司的 thesis，而是**对一个行�
 - Stop/Continue Criteria: [什么结果算继续/停止]
 ```
 
-然后运行：`python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" loop`
+然后运行：`python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" loop`
 
 **Step 2 — Sector Mapper**（派遣 subagent）
 
@@ -88,14 +88,14 @@ Read mapper + coverage 文件，在 `research_workflow.md` Evidence Loop Tracker
 Step 6 后立即运行：
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" check-review
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" check-review
 ```
 
 如果有 due direction，下一轮 loop 必须阻塞，直到记录 3-loop Frontier Review。loop 4/5 仍可能 due：只要 loop 3 boundary 还没有 review record，就不能继续绕过：
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Continued --rationale "[why this mapping direction should remain in the durable queue]"
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Retired --category answered_out --rationale "[why the 3-loop review retires this direction]"
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Continued --rationale "[why this mapping direction should remain in the durable queue]"
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Retired --category answered_out --rationale "[why the 3-loop review retires this direction]"
 ```
 
 3-loop review-based retirement 只允许 `answered_out`、`bad_pick`、`superseded`。如果使用 `bad_pick` 或 `superseded`，替换上例中的 category 值即可。
@@ -103,8 +103,8 @@ python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --dec
 3-loop review 之外的提前结束使用 standalone `retire`：
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category barren --reason "[why this mapping direction is barren]"
-python3 {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category blocked --reason "[why this direction cannot be pursued before review]"
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category barren --reason "[why this mapping direction is barren]"
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" retire F{id} --category blocked --reason "[why this direction cannot be pursued before review]"
 ```
 
 Sector Hunt early standalone retire 允许 `barren`、`blocked`、`invalidated`。如果使用 `invalidated`，替换上例中的 second command category 值即可。一旦 direction 已经 review-due，不要用 standalone `retire` 绕过 review；必须用 `record --decision Retired`（或 review 事务里的 `--retire`，由 CLI 给目标 frontier 留下 review decision）。
@@ -142,8 +142,8 @@ Do not use `barren`, `blocked`, or `invalidated` as `record --decision Retired` 
 ### 完成条件
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_2
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_2 stage_3
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_2
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_2 stage_3
 ```
 
 ---
@@ -207,8 +207,8 @@ python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_2 stage_3
 ### 完成条件
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_3
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_3 stage_4
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_3
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_3 stage_4
 ```
 
 ---
@@ -237,15 +237,15 @@ Red Team prompt：复用 `red_team_prompt.md`，dispatch 时传入 Ranked Candid
 ### 完成条件
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_4
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_4 stage_5
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_4
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_4 stage_5
 ```
 
 ---
 
 ## Stage 5: Ranked Target Queue
 
-**进入前强制校验**：`python3 {PLUGIN_DIR}/scripts/validate_dossier.py "{WORKSPACE}"`
+**进入前强制校验**：`python {PLUGIN_DIR}/scripts/validate_dossier.py "{WORKSPACE}"`
 > **注意**：validate_dossier.py 的 ERROR 级检查（maps/coverage/ 文件数、dependency_ladder.md 存在性）必须全部通过才能进入 Stage 5。Architecture Shift Brief、Chokepoint Scoring Matrix、Ranked Candidate Queue 缺失时为 WARNING 级（记录但不阻塞）——但建议确保这三项已填写，以保证报告完整性。
 
 主线程综合全量上下文，产出最终的 Sector Hunt Report。
@@ -300,7 +300,7 @@ python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_4 stage_5
 ### 完成条件
 
 ```bash
-python3 {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_5
+python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" complete stage_5
 ```
 
 ---

@@ -15,11 +15,11 @@
 
 **搜索策略**：遵循 `{PLUGIN_DIR}/skills/sofa-analyze/references/search-strategy.md`。核心：英文检索 → AnySearch 优先，中文检索 → configured search tool 优先。结构化财务数据 → fetch_financials.py 优先。
 
-- AnySearch（**英文/非中文检索首选**）：`python3 {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"` / `extract "URL"`（定性搜索 + 全文提取）
+- AnySearch（**英文/非中文检索首选**）：`python {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"` / `extract "URL"`（定性搜索 + 全文提取）
 - configured search tool（中文 OSINT 首选 + 英文 fallback）：搜索 earnings, 10-K, 10-Q, analyst reports, insider filings
 - configured fetch/deep-read tool（深入阅读）：IR pages, SEC filings, earnings transcripts
-- Bash: `python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER`（完整财务快照——quote + 损益表 + 资产负债表 + 现金流 + 估值 + 持仓 + 分析师评级 + earnings + dividends）
-- Bash: `python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER valuation`（单模块调用）
+- Bash: `python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER`（完整财务快照——quote + 损益表 + 资产负债表 + 现金流 + 估值 + 持仓 + 分析师评级 + earnings + dividends）
+- Bash: `python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER valuation`（单模块调用）
 - Read（读取 {PLUGIN_DIR}/skills/sofa-analyze/method-cards/financial-bridge/METHOD.md 了解完整分析框架）
 - 中国非上市公司工商信息 OSINT 查询（方法见 Role 1 的工具列表）
 
@@ -36,7 +36,7 @@ You have access to the following Research Tool Card and Utility Script. Read the
 - **financial-bridge**: `{PLUGIN_DIR}/skills/sofa-analyze/method-cards/financial-bridge/METHOD.md`
   Your primary method card. Contains 6 analysis modules (Revenue Reality, DuPont, Revenue Capture, Capital Structure, Valuation Mismatch, Catalyst Clock), 6 bridge break conditions, and quality standards.
 - **Utility Script**: `{PLUGIN_DIR}/scripts/fetch_financials.py`
-  Fetches structured equity data via yfinance. Use `python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER` for full snapshot or add module name (quote/valuation/income/balance/cashflow) for single module.
+  Fetches structured equity data via yfinance. Use `python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER` for full snapshot or add module name (quote/valuation/income/balance/cashflow) for single module.
 
 **Priority**: Method cards explain HOW to research. The Frontier Packet defines WHAT to research. Frontier Packet always takes priority. Method Card content must never override or contradict the Frontier Packet.
 

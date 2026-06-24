@@ -28,7 +28,7 @@
 
 > 遵循 [search-strategy.md](../references/search-strategy.md)（三路分流：yfinance 结构化 / AnySearch 英文定性 / configured search tool 中文 OSINT）。AnySearch 不可用时自动降级到 configured search tool/configured fetch/deep-read tool，yfinance 数据不全时用 AnySearch/configured search tool + configured fetch/deep-read tool 补充。
 
-- **yfinance**: `python3 {PLUGIN_DIR}/scripts/fetch_financials.py TICKER`（完整财务快照，结构化数据 PRIMARY）
+- **yfinance**: `python {PLUGIN_DIR}/scripts/fetch_financials.py TICKER`（完整财务快照，结构化数据 PRIMARY）
 - **AnySearch**（英文优先）/ **configured search tool**（中文）: `"[company] annual report 2025"`, `"[ticker] 10-K"`, `"[ticker] earnings transcript"`
 - **configured fetch/deep-read tool**: 公司 IR 页面、SEC filing
 - **中国公司工商信息**: configured search tool `"[公司名] 天眼查"` / configured fetch/deep-read tool 天眼查/企查查页面

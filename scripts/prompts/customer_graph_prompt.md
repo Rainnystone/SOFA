@@ -20,7 +20,7 @@ You have access to the following Research Tool Card. Read it at the start of you
 
 **搜索策略**：遵循 `{PLUGIN_DIR}/skills/sofa-analyze/references/search-strategy.md`。核心：英文检索 → AnySearch 优先，中文检索 → configured search tool 优先。
 
-- AnySearch（**英文/非中文检索首选**）：`python3 {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"` / `extract "URL"`
+- AnySearch（**英文/非中文检索首选**）：`python {PLUGIN_DIR}/skills/anysearch/scripts/anysearch_cli.py search "query"` / `extract "URL"`
 - configured search tool（中文 OSINT 首选 + 英文 fallback）、configured fetch/deep-read tool（深入阅读）、Browser（Wayback Machine, HTML inspection）
 - Read（读取知识库中的 `{PLUGIN_DIR}/skills/sofa-analyze/references/knowledge/sive-case.md` 学习 OSINT 技术）
 - 中国公司工商信息 OSINT 查询（方法见 Role 1 的工具列表）
