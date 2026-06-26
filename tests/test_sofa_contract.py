@@ -131,6 +131,40 @@ def write_base_workspace(workspace: Path, *, stages_completed=None, current_stag
     (workspace / "evidence_ledger.md").write_text("# Evidence Ledger\n", encoding="utf-8")
 
 
+def write_valid_search_log(workspace: Path):
+    (workspace / "search_log.jsonl").write_text(
+        json.dumps(
+            {
+                "loop_id": "loop_1",
+                "actor": "main",
+                "tool_tier": "AnySearch",
+                "query": "customer qualification",
+                "result_status": "completed",
+                "evidence_refs": ["evidence_ledger.md#loop-1"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_valid_dispatch_log(workspace: Path):
+    (workspace / "dispatch_log.jsonl").write_text(
+        json.dumps(
+            {
+                "dispatch_id": "dispatch_0001",
+                "loop_id": "loop_1",
+                "role": "scout",
+                "mechanism": "host_subagent",
+                "delivery_path": "scouts/loop_1_scout.md",
+                "status": "delivered",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 class TestWorkspaceStateAndReportContract(unittest.TestCase):
     def test_early_stage_transition_does_not_require_final_report(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -140,6 +174,7 @@ class TestWorkspaceStateAndReportContract(unittest.TestCase):
                 stages_completed=["stage_0", "stage_1", "stage_2"],
                 current_stage="stage_3",
             )
+            write_valid_search_log(workspace)
 
             result = evaluate_workspace(
                 workspace,
@@ -208,6 +243,7 @@ class TestWorkspaceStateAndReportContract(unittest.TestCase):
                 stages_completed=["stage_0", "stage_1", "stage_2", "stage_3", "stage_4"],
                 current_stage="stage_5",
             )
+            write_valid_search_log(workspace)
             reports = workspace / "reports"
             reports.mkdir()
             (reports / "sector.md").write_text(
@@ -234,6 +270,506 @@ class TestWorkspaceStateAndReportContract(unittest.TestCase):
 
             self.assertNotIn("SECTOR_REPORT_FORBIDDEN_ACTION_LANGUAGE", [issue.code for issue in result.failures])
             self.assertTrue(result.passed)
+
+
+def write_completed_loop_workspace(workspace: Path):
+    write_base_workspace(
+        workspace,
+        stages_completed=["stage_0", "stage_1", "stage_2"],
+        current_stage="stage_3",
+    )
+    state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+    state["loop_count"] = 3
+    (workspace / "state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+    (workspace / "scouts").mkdir()
+    (workspace / "scouts" / "loop_1_scout.md").write_text(
+        "# Scout\n\nMethod cards loaded: supply-chain-mapping\n\nSources consulted: company filing.\n",
+        encoding="utf-8",
+    )
+    reports = workspace / "reports"
+    reports.mkdir()
+    (reports / "final.md").write_text(
+        "\n".join(
+            [
+                "# Final Report",
+                "Conclusion: research status is constructive watch.",
+                "Confidence: medium.",
+                "Time horizon: 12 months.",
+                "Top supporting evidence: evidence_ledger.md#loop-1.",
+                "Strongest counter evidence: customer qualification risk.",
+                "Evidence map: evidence_ledger.md.",
+                "Financial bridge: revenue bridge is constrained by qualification timing.",
+                "Catalyst clock: next filing and customer update.",
+                "Red-team results: unresolved substitution risk.",
+                "Invalidation triggers: lost customer qualification.",
+                "Watch protocol: monitor customer updates.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+class TestSearchAndDispatchContract(unittest.TestCase):
+    def test_completed_loops_without_search_log_fail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("SEARCH_LOG_MISSING", [issue.code for issue in result.failures])
+
+    def test_legacy_markdown_search_log_warns_but_does_not_satisfy_search_compliance(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            (workspace / "search_log.md").write_text(
+                "\n".join(
+                    [
+                        "# Search Log",
+                        "| Time | Query | Tool Tier | Result | Notes |",
+                        "|------|-------|-----------|--------|-------|",
+                        "| 2026-06-26 | customer qualification | AnySearch | completed | evidence_ledger.md#loop-1 |",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("SEARCH_LOG_MISSING", [issue.code for issue in result.failures])
+            self.assertIn("LEGACY_SEARCH_LOG_USED", [issue.code for issue in result.warnings])
+
+    def test_malformed_search_jsonl_returns_missing_failure_and_legacy_warning(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_dispatch_log(workspace)
+            (workspace / "search_log.jsonl").write_text("{not valid json\n", encoding="utf-8")
+            (workspace / "search_log.md").write_text(
+                "\n".join(
+                    [
+                        "# Search Log",
+                        "| Time | Query | Tool Tier | Result | Notes |",
+                        "|------|-------|-----------|--------|-------|",
+                        "| 2026-06-26 | customer qualification | AnySearch | completed | evidence_ledger.md#loop-1 |",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            try:
+                result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+            except Exception as exc:
+                self.fail(f"evaluate_workspace raised {type(exc).__name__}: {exc}")
+
+            self.assertFalse(result.passed)
+            self.assertIn("SEARCH_LOG_MISSING", [issue.code for issue in result.failures])
+            self.assertIn("LEGACY_SEARCH_LOG_USED", [issue.code for issue in result.warnings])
+
+    def test_non_object_search_jsonl_record_returns_missing_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_dispatch_log(workspace)
+            (workspace / "search_log.jsonl").write_text(json.dumps([1, 2, 3]) + "\n", encoding="utf-8")
+
+            try:
+                result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+            except Exception as exc:
+                self.fail(f"evaluate_workspace raised {type(exc).__name__}: {exc}")
+
+            self.assertFalse(result.passed)
+            self.assertIn("SEARCH_LOG_MISSING", [issue.code for issue in result.failures])
+
+    def test_valid_first_search_jsonl_line_with_later_malformed_line_returns_missing_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_dispatch_log(workspace)
+            (workspace / "search_log.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "loop_id": "loop_1",
+                                "actor": "main",
+                                "tool_tier": "AnySearch",
+                                "query": "customer qualification",
+                                "result_status": "completed",
+                                "evidence_refs": ["evidence_ledger.md#loop-1"],
+                            }
+                        ),
+                        "{not valid json",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            try:
+                result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+            except Exception as exc:
+                self.fail(f"evaluate_workspace raised {type(exc).__name__}: {exc}")
+
+            self.assertFalse(result.passed)
+            self.assertIn("SEARCH_LOG_MISSING", [issue.code for issue in result.failures])
+
+    def test_valid_first_search_jsonl_line_with_later_non_object_line_returns_missing_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_dispatch_log(workspace)
+            (workspace / "search_log.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "loop_id": "loop_1",
+                                "actor": "main",
+                                "tool_tier": "AnySearch",
+                                "query": "customer qualification",
+                                "result_status": "completed",
+                                "evidence_refs": ["evidence_ledger.md#loop-1"],
+                            }
+                        ),
+                        json.dumps([1, 2, 3]),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            try:
+                result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+            except Exception as exc:
+                self.fail(f"evaluate_workspace raised {type(exc).__name__}: {exc}")
+
+            self.assertFalse(result.passed)
+            self.assertIn("SEARCH_LOG_MISSING", [issue.code for issue in result.failures])
+
+    def test_completed_loop_workspace_with_valid_search_jsonl_passes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_search_log(workspace)
+            write_valid_dispatch_log(workspace)
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertTrue(result.passed)
+
+    def test_worker_output_without_dispatch_ledger_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            (workspace / "search_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "loop_id": "loop_1",
+                        "actor": "main",
+                        "tool_tier": "AnySearch",
+                        "query": "customer qualification",
+                        "result_status": "completed",
+                        "evidence_refs": ["evidence_ledger.md#loop-1"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("DISPATCH_LOG_MISSING", [issue.code for issue in result.failures])
+
+    def test_degraded_single_agent_cannot_be_labeled_subagent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            (workspace / "search_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "loop_id": "loop_1",
+                        "actor": "main",
+                        "tool_tier": "AnySearch",
+                        "query": "customer qualification",
+                        "result_status": "completed",
+                        "evidence_refs": ["evidence_ledger.md#loop-1"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "degraded_single_agent",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                        "degraded_mode_approved": True,
+                        "label": "subagent dispatch",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("DEGRADED_MODE_MISLABELED", [issue.code for issue in result.failures])
+
+    def test_completed_search_record_requires_binding_and_trace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            (workspace / "search_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "degraded_reason": "tool unavailable",
+                        "result_status": "completed",
+                        "gaps": ["missing customer qualification trace"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("SEARCH_LOG_MISSING", [issue.code for issue in result.failures])
+
+    def test_degraded_dispatch_requires_explicit_approval(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_search_log(workspace)
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "degraded_single_agent",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("DEGRADED_MODE_NOT_APPROVED", [issue.code for issue in result.failures])
+
+    def test_dispatch_record_without_identity_fields_does_not_count_as_proof(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_search_log(workspace)
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            failure_codes = [issue.code for issue in result.failures]
+            self.assertFalse(result.passed)
+            self.assertIn("DISPATCH_RECORD_INCOMPLETE", failure_codes)
+            self.assertIn("WORKER_OUTPUT_WITHOUT_DISPATCH", failure_codes)
+
+    def test_host_subagent_dispatch_requires_core_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_search_log(workspace)
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            failure_codes = [issue.code for issue in result.failures]
+            self.assertFalse(result.passed)
+            self.assertIn("DISPATCH_RECORD_INCOMPLETE", failure_codes)
+            self.assertIn("WORKER_OUTPUT_WITHOUT_DISPATCH", failure_codes)
+
+    def test_delivered_dispatch_requires_mechanism(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_search_log(workspace)
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            failure_codes = [issue.code for issue in result.failures]
+            self.assertFalse(result.passed)
+            self.assertIn("DISPATCH_RECORD_INCOMPLETE", failure_codes)
+            self.assertIn("WORKER_OUTPUT_WITHOUT_DISPATCH", failure_codes)
+
+    def test_unsupported_dispatch_mechanism_does_not_count_as_proof(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_search_log(workspace)
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "single_agent",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            failure_codes = [issue.code for issue in result.failures]
+            self.assertFalse(result.passed)
+            self.assertIn("DISPATCH_MECHANISM_UNSUPPORTED", failure_codes)
+            self.assertIn("WORKER_OUTPUT_WITHOUT_DISPATCH", failure_codes)
+
+    def test_delivered_dispatch_record_requires_existing_delivery_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(
+                workspace,
+                stages_completed=["stage_0", "stage_1", "stage_2"],
+                current_stage="stage_3",
+            )
+            state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+            state["loop_count"] = 1
+            (workspace / "state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+            write_valid_search_log(workspace)
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "scouts/missing.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="stage_transition", from_stage="stage_2", to_stage="stage_3"),
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn("DISPATCH_DELIVERY_MISSING", [issue.code for issue in result.failures])
+
+    def test_header_only_legacy_markdown_search_log_does_not_warn(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            (workspace / "search_log.md").write_text(
+                "\n".join(
+                    [
+                        "# Search Log",
+                        "| Time | Query | Tool Tier | Result | Notes |",
+                        "|------|-------|-----------|--------|-------|",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("SEARCH_LOG_MISSING", [issue.code for issue in result.failures])
+            self.assertNotIn("LEGACY_SEARCH_LOG_USED", [issue.code for issue in result.warnings])
 
 
 if __name__ == "__main__":

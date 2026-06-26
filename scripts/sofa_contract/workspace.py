@@ -33,6 +33,43 @@ def iter_jsonl_records(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
         yield line_number, value
 
 
+WORKER_OUTPUT_DIRS = ("scouts", "challenges", "financials", "redteam", "maps", "coverage")
+
+
+def find_worker_outputs(workspace_path: Path) -> list[Path]:
+    outputs: list[Path] = []
+    for dirname in WORKER_OUTPUT_DIRS:
+        directory = workspace_path / dirname
+        if not directory.exists():
+            continue
+        outputs.extend(sorted(path for path in directory.iterdir() if path.suffix == ".md"))
+    return outputs
+
+
+def markdown_table_has_data_row(text: str | None) -> bool:
+    if not text:
+        return False
+    after_separator = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            after_separator = False
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if _is_markdown_table_separator(cells):
+            after_separator = True
+            continue
+        if after_separator and any(cells):
+            return True
+    return False
+
+
+def _is_markdown_table_separator(cells: list[str]) -> bool:
+    if not cells:
+        return False
+    return all(cell and set(cell) <= {"-", ":"} and "-" in cell for cell in cells)
+
+
 def parse_stage_progress(workflow_text: str | None) -> dict[str, str]:
     if not workflow_text:
         return {}
