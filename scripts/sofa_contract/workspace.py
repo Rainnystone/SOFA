@@ -44,7 +44,7 @@ def find_worker_outputs(workspace_path: Path) -> list[Path]:
         for path in sorted(directory.iterdir()):
             if path.suffix != ".md" or not path.is_file():
                 continue
-            relative_path = path.relative_to(workspace_path)
+            relative_path = path.relative_to(workspace_path).as_posix()
             if is_main_thread_artifact(relative_path):
                 continue
             outputs.append(path)
