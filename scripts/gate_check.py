@@ -316,7 +316,42 @@ def complete_stage(workspace_path: str, stage: str) -> None:
         state["current_stage"] = stage_order[idx + 1]
 
     save_state(workspace_path, state)
+    # Keep the human-readable Stage Progress mirror in sync; otherwise the
+    # dossier contract's STATE_WORKFLOW_STAGE_CONFLICT check rejects any
+    # workspace advanced purely via this CLI (init_workspace.py starts every
+    # row as pending).
+    _set_workflow_stage_status(workspace_path, stage, "complete")
     print(f"STAGE COMPLETED: {stage}")
+
+
+def _set_workflow_stage_status(workspace_path: str, stage: str, status: str) -> None:
+    """Flip one Stage Progress row's status cell in research_workflow.md.
+
+    Mirrors parse_stage_progress: matches '| Stage N: ... | <status> | ...'.
+    Only the status cell is rewritten; the rest of the row is preserved.
+    Silently no-ops if the workflow file or the row is absent.
+    """
+    wf_path = os.path.join(workspace_path, "research_workflow.md")
+    if not os.path.exists(wf_path):
+        return
+    try:
+        stage_num = stage.split("_", 1)[1]
+    except IndexError:
+        return
+    with open(wf_path, "r", encoding="utf-8") as handle:
+        content = handle.read()
+    pattern = re.compile(
+        r"^(\|\s*Stage\s+" + re.escape(stage_num) + r"\b[^\n|]*\|\s*)([^\n|]+?)(\s*\|[^\n]*)$",
+        re.MULTILINE,
+    )
+    match = pattern.search(content)
+    if not match:
+        return
+    if match.group(2).strip().lower() == status.lower():
+        return
+    new_row = match.group(1) + status + match.group(3)
+    with open(wf_path, "w", encoding="utf-8") as handle:
+        handle.write(content[: match.start()] + new_row + content[match.end():])
 
 
 def increment_loop(workspace_path: str) -> int:
