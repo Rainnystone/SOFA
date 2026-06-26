@@ -64,6 +64,15 @@ SCOUT_FORBIDDEN_PATTERN = re.compile(
     r"(?:\baction\s+class\b|(?<![\w-])strong\s+buy(?![\w-])|(?<![\w-])(?:buy|sell)(?![\w-])|强烈买入|卖出)",
     re.IGNORECASE,
 )
+SECTOR_FORBIDDEN_ACTION_PATTERN = re.compile(
+    r"(?:"
+    r"\baction\s+class\b|"
+    r"\btarget\s+price\b|"
+    r"(?<![\w-])(?:buy|sell|hold|long|short|accumulate|reduce)(?![\w-])|"
+    r"强烈买入|买入|卖出|持有|增持|减持|目标价"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> ContractResult:
@@ -285,20 +294,22 @@ def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: Cont
                     path="dispatch_log.jsonl",
                     evidence=", ".join(missing_fields),
                 )
-            elif not (workspace / str(record.get("delivery_path"))).is_file():
-                result.fail(
-                    code="DISPATCH_DELIVERY_MISSING",
-                    message="delivered dispatch record points to a missing delivery_path",
-                    path="dispatch_log.jsonl",
-                    evidence=str(record.get("delivery_path")),
-                )
-            elif mechanism not in SUPPORTED_DISPATCH_MECHANISMS:
-                result.fail(
-                    code="DISPATCH_MECHANISM_UNSUPPORTED",
-                    message="delivered dispatch record uses an unsupported mechanism",
-                    path="dispatch_log.jsonl",
-                    evidence=mechanism,
-                )
+            else:
+                normalized_delivery_path = _normalize_delivery_path(workspace, record.get("delivery_path", ""))
+                if normalized_delivery_path is None or not (workspace / normalized_delivery_path).is_file():
+                    result.fail(
+                        code="DISPATCH_DELIVERY_MISSING",
+                        message="delivered dispatch record points to a missing delivery_path",
+                        path="dispatch_log.jsonl",
+                        evidence=str(record.get("delivery_path")),
+                    )
+                elif mechanism not in SUPPORTED_DISPATCH_MECHANISMS:
+                    result.fail(
+                        code="DISPATCH_MECHANISM_UNSUPPORTED",
+                        message="delivered dispatch record uses an unsupported mechanism",
+                        path="dispatch_log.jsonl",
+                        evidence=mechanism,
+                    )
         if mechanism == "degraded_single_agent" and record.get("degraded_mode_approved") is not True:
             result.fail(
                 code="DEGRADED_MODE_NOT_APPROVED",
@@ -314,9 +325,11 @@ def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: Cont
                 evidence=str(record.get("dispatch_id", "")),
             )
     delivered_paths = {
-        _normalize_delivery_path(workspace, record.get("delivery_path", ""))
+        normalized_path
         for record in records
         if _dispatch_record_counts_as_delivery(record)
+        for normalized_path in [_normalize_delivery_path(workspace, record.get("delivery_path", ""))]
+        if normalized_path is not None
     }
     for output in worker_outputs:
         rel = output.relative_to(workspace).as_posix()
@@ -329,22 +342,25 @@ def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: Cont
             )
 
 
-def _normalize_delivery_path(workspace: Path, delivery_path) -> str:
+def _normalize_delivery_path(workspace: Path, delivery_path) -> str | None:
     """Normalize a dispatch delivery_path to a workspace-relative posix string.
 
     Guides pass workers the same absolute ``{WORKSPACE}/...`` path they write
     to, so dispatch_log.jsonl often records absolute paths. Worker outputs are
-    compared as workspace-relative paths; without normalization a genuinely
-    delivered file is falsely flagged as WORKER_OUTPUT_WITHOUT_DISPATCH.
+    compared as workspace-relative paths. Relative paths may also include
+    harmless ``./`` or ``..`` segments. Paths that escape the workspace are not
+    accepted as delivered outputs.
     """
     raw = str(delivery_path)
     try:
         candidate = Path(raw)
         if candidate.is_absolute():
-            return candidate.resolve().relative_to(workspace.resolve()).as_posix()
+            resolved = candidate.resolve()
+        else:
+            resolved = (workspace / candidate).resolve()
+        return resolved.relative_to(workspace.resolve()).as_posix()
     except (ValueError, OSError):
-        pass
-    return raw
+        return None
 
 
 def _dispatch_missing_evidence(worker_outputs: list[Path], workflow_claims_delivery: bool) -> str:
@@ -432,13 +448,13 @@ def _check_worker_outputs(workspace: Path, result: ContractResult) -> None:
                 message="worker output must declare Method cards loaded",
                 path=rel,
             )
+        requires_source_trace = _requires_source_trace(rel)
         is_scout = rel.startswith("scouts/")
         if not _has_source_trace(text):
-            if is_scout:
-                # Scouts perform search; their audit trail is mandatory.
+            if requires_source_trace:
                 result.fail(
                     code="WORKER_SOURCE_TRACE_MISSING",
-                    message="scout output must include a source or search trace section",
+                    message="search worker output must include a source or search trace section",
                     path=rel,
                     evidence=", ".join(SOURCE_TRACE_MARKERS),
                 )
@@ -465,6 +481,10 @@ def _has_source_trace(text: str) -> bool:
     return any(SOURCE_TRACE_LABEL_PATTERN.search(line.strip()) for line in text.splitlines())
 
 
+def _requires_source_trace(rel: str) -> bool:
+    return rel.startswith(("scouts/", "maps/"))
+
+
 def _has_scout_forbidden_language(text: str) -> bool:
     return SCOUT_FORBIDDEN_PATTERN.search(text) is not None
 
@@ -479,20 +499,21 @@ def _check_final_report(workspace: Path, profile: ContractProfile, result: Contr
         )
         return
     report_texts = [(path, path.read_text(encoding="utf-8").lower()) for path in reports]
+    if profile.mode == "sector":
+        for report_path, report_text in report_texts:
+            if _contains_sector_action_language(report_text):
+                result.fail(
+                    code="SECTOR_REPORT_FORBIDDEN_ACTION_LANGUAGE",
+                    message="Sector Hunt output must not contain action-class style conclusions",
+                    path=report_path.relative_to(workspace).as_posix(),
+                    evidence="found buy/sell/hold/target-price/action-class language",
+                )
     complete_reports = [
         (path, text)
         for path, text in report_texts
         if not _missing_final_report_requirements(text, profile)
     ]
     if complete_reports:
-        report_path, report_text = complete_reports[0]
-        if profile.mode == "sector" and _contains_sector_action_language(report_text):
-            result.fail(
-                code="SECTOR_REPORT_FORBIDDEN_ACTION_LANGUAGE",
-                message="Sector Hunt output must not contain action-class style conclusions",
-                path=report_path.relative_to(workspace).as_posix(),
-                evidence="found buy/sell/action class language",
-            )
         return
     best_path, best_text = min(
         report_texts, key=lambda item: len(_missing_final_report_requirements(item[1], profile))
@@ -523,4 +544,4 @@ def _missing_final_report_requirements(report_text: str, profile: ContractProfil
 
 
 def _contains_sector_action_language(text: str) -> bool:
-    return "action class" in text or re.search(r"\b(?:buy|sell)\b", text) is not None
+    return SECTOR_FORBIDDEN_ACTION_PATTERN.search(text) is not None
