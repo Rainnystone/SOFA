@@ -1200,6 +1200,7 @@ class TestDossierValidatorContractIntegration(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(VALIDATE_DOSSIER_SCRIPT), str(workspace)],
                 text=True,
+                encoding="utf-8",
                 capture_output=True,
             )
 
@@ -1214,6 +1215,7 @@ class TestDossierValidatorContractIntegration(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(VALIDATE_DOSSIER_SCRIPT), str(workspace)],
                 text=True,
+                encoding="utf-8",
                 capture_output=True,
             )
 
