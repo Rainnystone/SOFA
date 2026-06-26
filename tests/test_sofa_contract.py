@@ -50,6 +50,11 @@ class TestContractResultModel(unittest.TestCase):
 
 
 class TestWorkspaceReaders(unittest.TestCase):
+    def test_sofa_contract_does_not_own_worker_output_directory_facts(self):
+        import sofa_contract.workspace as workspace_module
+
+        self.assertFalse(hasattr(workspace_module, "WORKER_OUTPUT_DIRS"))
+
     def test_json_and_text_readers_return_none_for_missing_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -1471,6 +1476,20 @@ class TestCodexCloudReviewRegressions(unittest.TestCase):
             self.assertNotIn("dependency_ladder.md", names)
             self.assertIn("mapping_1.md", names)
             self.assertIn("mapping_2.md", names)
+
+    def test_find_worker_outputs_returns_only_worker_map_outputs(self):
+        from sofa_contract.workspace import find_worker_outputs
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            maps = workspace / "maps"
+            maps.mkdir()
+            (maps / "dependency_ladder.md").write_text("# Dependency Ladder\n", encoding="utf-8")
+            (maps / "sector_mapper_loop1.md").write_text("# Sector Mapper\n", encoding="utf-8")
+
+            outputs = [path.relative_to(workspace).as_posix() for path in find_worker_outputs(workspace)]
+
+            self.assertEqual(["maps/sector_mapper_loop1.md"], outputs)
 
     # --- #2: a workspace advanced via complete_stage() must not be rejected ---
     def test_complete_stage_updates_workflow_progress_row(self):

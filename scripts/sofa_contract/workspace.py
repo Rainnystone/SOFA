@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, Iterator
 
+from workspace_contract import all_worker_output_directories, is_main_thread_artifact
+
 
 def read_text_file(path: Path) -> str | None:
     if not path.exists():
@@ -33,24 +35,17 @@ def iter_jsonl_records(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
         yield line_number, value
 
 
-WORKER_OUTPUT_DIRS = ("scouts", "challenges", "financials", "redteam", "maps", "coverage")
-
-
 def find_worker_outputs(workspace_path: Path) -> list[Path]:
     outputs: list[Path] = []
-    for dirname in WORKER_OUTPUT_DIRS:
+    for dirname in all_worker_output_directories():
         directory = workspace_path / dirname
         if not directory.exists():
             continue
         for path in sorted(directory.iterdir()):
-            if path.suffix != ".md":
+            if path.suffix != ".md" or not path.is_file():
                 continue
-            # maps/dependency_ladder.md is a main-thread core artifact created
-            # by init_workspace.py and updated by the main thread after each
-            # mapping loop; it is NOT a subagent deliverable. gate_check.py
-            # already excludes it from loop-output counts; the contract must
-            # too, or it is falsely flagged for missing dispatch/source-trace.
-            if dirname == "maps" and path.name == "dependency_ladder.md":
+            relative_path = path.relative_to(workspace_path)
+            if is_main_thread_artifact(relative_path):
                 continue
             outputs.append(path)
     return outputs
