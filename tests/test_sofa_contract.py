@@ -1543,6 +1543,46 @@ class TestCodexCloudReviewRegressions(unittest.TestCase):
             self.assertEqual([], ticker_only_codes, ticker_only_codes)
             self.assertTrue(result.passed, [issue.display() for issue in result.failures])
 
+    def test_sector_report_rejects_chinese_action_language(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_sector_dossier_ready_workspace(workspace)
+            report = workspace / "reports" / "final.md"
+            report.write_text(
+                report.read_text(encoding="utf-8")
+                + "\n\n### 结论\n建议买入该板块龙头，卖出弱势票。\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="sector", target="dossier"))
+
+            self.assertIn(
+                "SECTOR_REPORT_FORBIDDEN_ACTION_LANGUAGE",
+                [issue.code for issue in result.failures],
+                [issue.display() for issue in result.failures],
+            )
+
+    def test_sector_report_rejects_action_language_in_any_complete_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_sector_dossier_ready_workspace(workspace)
+            reports = workspace / "reports"
+            clean_text = (reports / "final.md").read_text(encoding="utf-8")
+            (reports / "a_clean.md").write_text(clean_text, encoding="utf-8")
+            (reports / "z_bad.md").write_text(
+                clean_text + "\n\n### Action Class\nBuy this sector basket.\n",
+                encoding="utf-8",
+            )
+            (reports / "final.md").unlink()
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="sector", target="dossier"))
+
+            self.assertIn(
+                "SECTOR_REPORT_FORBIDDEN_ACTION_LANGUAGE",
+                [issue.code for issue in result.failures],
+                [issue.display() for issue in result.failures],
+            )
+
     # --- #4: absolute dispatch delivery paths must be normalized to workspace-relative ---
     def test_dispatch_absolute_delivery_path_is_accepted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1558,6 +1598,35 @@ class TestCodexCloudReviewRegressions(unittest.TestCase):
                         "role": "scout",
                         "mechanism": "host_subagent",
                         "delivery_path": absolute_delivery,
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertNotIn(
+                "WORKER_OUTPUT_WITHOUT_DISPATCH",
+                [issue.code for issue in result.failures],
+                [issue.display() for issue in result.failures],
+            )
+            self.assertTrue(result.passed, [issue.display() for issue in result.failures])
+
+    def test_dispatch_relative_delivery_path_is_normalized(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_search_log(workspace)
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "./scouts/../scouts/loop_1_scout.md",
                         "status": "delivered",
                     }
                 )
@@ -1639,6 +1708,23 @@ class TestCodexCloudReviewRegressions(unittest.TestCase):
                 [issue.code for issue in result.failures],
             )
 
+    def test_mapper_worker_output_without_source_trace_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_sector_dossier_ready_workspace(workspace)
+            (workspace / "maps" / "mapping_1.md").write_text(
+                "# Mapping\n\nMethod cards loaded: supply-chain-mapping.\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="sector", target="dossier"))
+
+            self.assertIn(
+                "WORKER_SOURCE_TRACE_MISSING",
+                [issue.code for issue in result.failures],
+                [issue.display() for issue in result.failures],
+            )
+
     # --- #6: every completed loop needs its own search record ---
     def test_completed_loops_need_per_loop_search_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1669,14 +1755,18 @@ class TestCodexCloudReviewRegressions(unittest.TestCase):
                 result.passed,
                 "workspace with loop_count=3 but only a loop_1 search record must be rejected",
             )
-            search_codes = [
-                code
-                for code in ("SEARCH_LOG_MISSING", "SEARCH_LOG_LOOP_COVERAGE_MISSING")
-                if code in [issue.code for issue in result.failures]
-            ]
-            self.assertTrue(
-                search_codes, [issue.display() for issue in result.failures]
+            self.assertIn(
+                "SEARCH_LOG_LOOP_COVERAGE_MISSING",
+                [issue.code for issue in result.failures],
+                [issue.display() for issue in result.failures],
             )
+            missing_issue = next(
+                issue
+                for issue in result.failures
+                if issue.code == "SEARCH_LOG_LOOP_COVERAGE_MISSING"
+            )
+            self.assertIn("loop_2", missing_issue.evidence)
+            self.assertIn("loop_3", missing_issue.evidence)
 
 
 if __name__ == "__main__":
