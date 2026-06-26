@@ -55,6 +55,7 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
     created = []
     skipped_existing = []
     contract = artifact_contract_for_mode(mode)
+    mode = contract.mode
 
     # Create directory structure (common)
     _create_directories(workspace_path, contract.directory_specs, created, skipped_existing)

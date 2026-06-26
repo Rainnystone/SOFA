@@ -43,6 +43,27 @@ class TestWorkspaceScripts(unittest.TestCase):
             self.assertIn("WORKSPACE INITIALIZED", captured_stdout.getvalue())
             self.assertTrue((workspace / "maps" / "dependency_ladder.md").exists())
 
+    def test_create_workspace_canonicalizes_direct_call_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "sector-workspace"
+
+            captured_stdout = io.StringIO()
+            with contextlib.redirect_stdout(captured_stdout):
+                init_workspace.create_workspace(
+                    "AI Optical Interconnect",
+                    str(workspace),
+                    " SECTOR ",
+                )
+
+            state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+            registry = json.loads(
+                (workspace / "frontier_registry.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("sector", state["mode"])
+            self.assertEqual("sector", registry["mode"])
+            self.assertTrue((workspace / "maps" / "dependency_ladder.md").exists())
+            self.assertIn("Mode: Sector Hunt", captured_stdout.getvalue())
+
     def test_init_workspace_creates_sofa_artifacts_for_sector_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "sector-workspace"
