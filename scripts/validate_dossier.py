@@ -21,6 +21,7 @@ import re
 # Import Socratic debate validator
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from redteam_debate_validator import validate_debate
+from sofa_contract import ContractProfile, evaluate_workspace
 
 
 def count_md_files(directory: str) -> int:
@@ -159,20 +160,13 @@ def validate(workspace_path: str) -> tuple[bool, list[str], list[str]]:
     else:
         errors.append("state.json not found")
 
-    # 8. Method cards loaded declaration check (warning only)
-    check_subdirs = ["scouts", "challenges", "financials", "redteam"]
-    if mode == "sector":
-        check_subdirs.extend(["maps", "coverage"])
-    for subdir in check_subdirs:
-        sub_path = os.path.join(workspace_path, subdir)
-        if os.path.exists(sub_path):
-            for fname in os.listdir(sub_path):
-                if fname.endswith(".md"):
-                    fpath = os.path.join(sub_path, fname)
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    if "Method cards loaded" not in content and "Method Cards Loaded" not in content:
-                        warnings.append(f"{subdir}/{fname} missing 'Method cards loaded' declaration")
+    # 8. Shared SOFA compliance contract checks.
+    contract = evaluate_workspace(
+        workspace_path,
+        ContractProfile(mode=mode, target="workspace"),
+    )
+    errors.extend(issue.display() for issue in contract.failures)
+    warnings.extend(issue.display() for issue in contract.warnings)
 
     # 8b. Workflow content checks (warnings)
     workflow_path = os.path.join(workspace_path, "research_workflow.md")

@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -899,6 +900,140 @@ class TestWorkerOutputContract(unittest.TestCase):
 
             self.assertFalse(result.passed)
             self.assertIn("WORKER_SOURCE_TRACE_MISSING", [issue.code for issue in result.failures])
+
+
+VALIDATE_DOSSIER_SCRIPT = ROOT / "scripts/validate_dossier.py"
+
+
+def write_dossier_ready_workspace(workspace: Path) -> None:
+    write_base_workspace(
+        workspace,
+        stages_completed=["stage_0", "stage_1", "stage_2", "stage_3", "stage_4"],
+        current_stage="stage_5",
+    )
+    state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+    state["loop_count"] = 3
+    (workspace / "state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    (workspace / "evidence_ledger.md").write_text(
+        "\n".join(
+            [
+                "# Evidence Ledger",
+                "",
+                "## Loop 1: Customer qualification",
+                "Evidence body with enough detail to keep the legacy dossier check focused on hard prerequisites. "
+                "The synthetic record cites filings, channel checks, and counter-evidence for the first loop.",
+                "",
+                "## Loop 2: Revenue bridge",
+                "Evidence body with enough detail to keep the legacy dossier check focused on hard prerequisites. "
+                "The synthetic record cites filings, channel checks, and counter-evidence for the second loop.",
+                "",
+                "## Loop 3: Competitive pressure",
+                "Evidence body with enough detail to keep the legacy dossier check focused on hard prerequisites. "
+                "The synthetic record cites filings, channel checks, and counter-evidence for the third loop.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    worker_files = []
+    for directory in ["scouts", "challenges", "financials", "redteam"]:
+        (workspace / directory).mkdir(exist_ok=True)
+
+    for loop in range(1, 4):
+        scout = workspace / "scouts" / f"loop_{loop}_scout.md"
+        scout.write_text(
+            "# Scout\n\nMethod cards loaded: supply-chain-mapping.\n\nSources consulted: company filing.\n",
+            encoding="utf-8",
+        )
+        worker_files.append(scout)
+
+        challenge = workspace / "challenges" / f"loop_{loop}_challenge.md"
+        challenge.write_text(
+            "# Challenge\n\nMethod cards loaded: red-team.\n\nSources consulted: company filing.\n",
+            encoding="utf-8",
+        )
+        worker_files.append(challenge)
+
+        redteam = workspace / "redteam" / f"round{loop}_redteam.md"
+        redteam.write_text(
+            "# Red Team\n\nMethod cards loaded: red-team.\n\nSources consulted: company filing.\n",
+            encoding="utf-8",
+        )
+        worker_files.append(redteam)
+
+        defense = workspace / "redteam" / f"round{loop}_defense.md"
+        defense.write_text(
+            "# Defense\n\nMethod cards loaded: main-thread-defense.\n\nSources consulted: company filing.\n",
+            encoding="utf-8",
+        )
+        worker_files.append(defense)
+
+    bridge = workspace / "financials" / "bridge.md"
+    bridge.write_text(
+        "# Financial Bridge\n\nMethod cards loaded: financial-bridge.\n\nSources consulted: company filing.\n",
+        encoding="utf-8",
+    )
+    worker_files.append(bridge)
+
+    revision = workspace / "redteam" / "thesis_revision.md"
+    revision.write_text(
+        "# Thesis Revision\n\nMethod cards loaded: thesis-revision.\n\nSources consulted: company filing.\n",
+        encoding="utf-8",
+    )
+    worker_files.append(revision)
+
+    write_valid_search_log(workspace)
+    dispatch_records = []
+    for index, path in enumerate(worker_files, start=1):
+        dispatch_records.append(
+            {
+                "dispatch_id": f"dispatch_{index:04d}",
+                "loop_id": "loop_1",
+                "role": path.parent.name,
+                "mechanism": "host_subagent",
+                "delivery_path": path.relative_to(workspace).as_posix(),
+                "status": "delivered",
+            }
+        )
+    (workspace / "dispatch_log.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in dispatch_records),
+        encoding="utf-8",
+    )
+
+
+class TestDossierValidatorContractIntegration(unittest.TestCase):
+    def test_validate_dossier_fails_when_contract_finds_bad_worker_output(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            (workspace / "scouts" / "loop_1_scout.md").write_text(
+                "# Scout\n\nSources consulted: company filing.\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(VALIDATE_DOSSIER_SCRIPT), str(workspace)],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertNotEqual(0, result.returncode, result.stdout)
+            self.assertIn("WORKER_METHOD_CARDS_MISSING", result.stdout)
+
+    def test_validate_dossier_does_not_require_final_report_before_generation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+
+            result = subprocess.run(
+                [sys.executable, str(VALIDATE_DOSSIER_SCRIPT), str(workspace)],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout)
+            self.assertNotIn("FINAL_REPORT_MISSING", result.stdout)
 
 
 if __name__ == "__main__":
