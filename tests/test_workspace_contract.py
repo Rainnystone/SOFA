@@ -1,6 +1,6 @@
 import sys
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +55,16 @@ class TestWorkspaceArtifactContract(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "workspace-relative path"):
             contract.resolve(workspace_root, "/tmp/outside.md")
+
+        windows_absolute_paths = (
+            PureWindowsPath("C:/tmp/outside.md"),
+            PureWindowsPath(r"\\server\share\outside.md"),
+            PureWindowsPath(r"\tmp\outside.md"),
+        )
+        for path in windows_absolute_paths:
+            with self.subTest(path=str(path)):
+                with self.assertRaisesRegex(ValueError, "workspace-relative path"):
+                    contract.resolve(workspace_root, path)
 
         with self.assertRaisesRegex(ValueError, "workspace-relative path"):
             contract.resolve(workspace_root, "../outside.md")

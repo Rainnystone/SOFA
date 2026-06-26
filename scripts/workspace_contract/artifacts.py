@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 VALID_MODES = ("ticker", "sector")
@@ -243,13 +243,15 @@ def is_main_thread_artifact(relative_path: str | Path) -> bool:
 
 
 def _normalize_relative_path(relative_path: str | Path) -> str:
-    raw_path = Path(str(relative_path))
-    if raw_path.is_absolute():
+    raw_text = str(relative_path)
+    raw_path = Path(raw_text)
+    windows_path = PureWindowsPath(raw_text)
+    if raw_path.is_absolute() or windows_path.drive or windows_path.root:
         raise ValueError(
             f"Expected workspace-relative path, got absolute path: {relative_path!r}"
         )
 
-    raw = raw_path.as_posix()
+    raw = raw_text.replace("\\", "/")
     if raw in {"", "."}:
         return "."
 
