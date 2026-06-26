@@ -133,18 +133,29 @@ def write_base_workspace(workspace: Path, *, stages_completed=None, current_stag
 
 
 def write_valid_search_log(workspace: Path):
-    (workspace / "search_log.jsonl").write_text(
-        json.dumps(
-            {
-                "loop_id": "loop_1",
-                "actor": "main",
-                "tool_tier": "AnySearch",
-                "query": "customer qualification",
-                "result_status": "completed",
-                "evidence_refs": ["evidence_ledger.md#loop-1"],
-            }
+    # A workspace that claims loop_count=3 must have one valid search record
+    # per loop, so this helper writes all three. Tests that intentionally
+    # want incomplete coverage must construct their own partial log.
+    records = []
+    for loop_id, query in (
+        ("loop_1", "customer qualification"),
+        ("loop_2", "supply chain mapping"),
+        ("loop_3", "competitive landscape"),
+    ):
+        records.append(
+            json.dumps(
+                {
+                    "loop_id": loop_id,
+                    "actor": "main",
+                    "tool_tier": "AnySearch",
+                    "query": query,
+                    "result_status": "completed",
+                    "evidence_refs": [f"evidence_ledger.md#{loop_id}"],
+                }
+            )
         )
-        + "\n",
+    (workspace / "search_log.jsonl").write_text(
+        "\n".join(records) + "\n",
         encoding="utf-8",
     )
 
@@ -276,24 +287,42 @@ class TestWorkspaceStateAndReportContract(unittest.TestCase):
                 stages_completed=["stage_0", "stage_1", "stage_2", "stage_3", "stage_4"],
                 current_stage="stage_5",
             )
+            state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+            state["mode"] = "sector"
+            (workspace / "state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
             write_valid_search_log(workspace)
             reports = workspace / "reports"
             reports.mkdir()
+            # Sector Hunt report following the sector-hunt-guide template. The
+            # body intentionally mentions "buyer qualification" — the substring
+            # "buy" must NOT be flagged as action-class language because the
+            # forbidden-language check uses word boundaries (\bbuy\b).
             (reports / "sector.md").write_text(
                 "\n".join(
                     [
-                        "# Sector Report",
-                        "Conclusion: sector map remains incomplete.",
-                        "Confidence: medium.",
-                        "Time horizon: 12 months.",
-                        "Top supporting evidence: evidence_ledger.md#loop-1.",
-                        "Strongest counter evidence: buyer qualification remains uneven.",
-                        "Evidence map: evidence_ledger.md.",
-                        "Financial bridge: revenue bridge is constrained by qualification timing.",
-                        "Catalyst clock: next filing and customer update.",
-                        "Red-team results: unresolved substitution risk.",
-                        "Invalidation triggers: weaker demand.",
-                        "Watch protocol: monitor customer updates.",
+                        "# Sector Hunt Report: Test Theme",
+                        "",
+                        "### Architecture Shift",
+                        "Stage 0 architecture shift brief summary.",
+                        "",
+                        "### Layered Dependency Map",
+                        "Stage 2 accumulated dependency ladder summary.",
+                        "Buyer qualification remains uneven across the cohort.",
+                        "",
+                        "### Chokepoint Scoring Matrix",
+                        "Stage 3 full 12-dimension scoring table.",
+                        "",
+                        "### Ranked Candidate Queue",
+                        "Tier 1 / Tier 2 / Tier 3 ranked candidates.",
+                        "",
+                        "### Red Team Summary",
+                        "Stage 4 key findings and revisions.",
+                        "",
+                        "### Recommended Next Steps",
+                        "- Priority Ticker Dive targets: list.",
+                        "",
+                        "### Dive Readiness Score",
+                        "- Evidence sufficiency: ready.",
                     ]
                 ),
                 encoding="utf-8",
@@ -302,7 +331,7 @@ class TestWorkspaceStateAndReportContract(unittest.TestCase):
             result = evaluate_workspace(workspace, ContractProfile(mode="sector", target="final_report"))
 
             self.assertNotIn("SECTOR_REPORT_FORBIDDEN_ACTION_LANGUAGE", [issue.code for issue in result.failures])
-            self.assertTrue(result.passed)
+            self.assertTrue(result.passed, [issue.display() for issue in result.failures])
 
     def test_split_report_fragments_do_not_satisfy_final_report_contract(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1221,6 +1250,433 @@ class TestDossierValidatorContractIntegration(unittest.TestCase):
 
             self.assertEqual(0, result.returncode, result.stdout)
             self.assertNotIn("FINAL_REPORT_MISSING", result.stdout)
+
+
+def write_sector_dossier_ready_workspace(workspace: Path) -> None:
+    """A sector-mode workspace that satisfies the dossier contract once the
+    final-report requirements are mode-aware. Worker outputs all carry
+    method cards + a source trace; maps/dependency_ladder.md is present as the
+    core main-thread artifact (it must NOT be treated as a worker output)."""
+    write_base_workspace(
+        workspace,
+        stages_completed=["stage_0", "stage_1", "stage_2", "stage_3", "stage_4"],
+        current_stage="stage_5",
+    )
+    state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+    state["mode"] = "sector"
+    state["loop_count"] = 3
+    (workspace / "state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    (workspace / "research_workflow.md").write_text(
+        "\n".join(
+            [
+                "# Research Workflow",
+                "",
+                "## Stage Progress",
+                "| Stage | Status | Output Files | Notes |",
+                "|-------|--------|--------------|-------|",
+                "| Stage 0: Intake + Framing | complete | | |",
+                "| Stage 1: Provisional Frontier Plan | complete | | |",
+                "| Stage 2: Mapping Loops | complete | maps/dependency_ladder.md | |",
+                "| Stage 3: Chokepoint Scoring + Financial Screen | complete | maps/ | |",
+                "| Stage 4: Mapping Integrity Review | complete | redteam/ | |",
+                "| Stage 5: Final Verdict | pending | reports/ | |",
+                "| Stage 6: Watch Protocol | pending | | |",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    (workspace / "evidence_ledger.md").write_text(
+        "\n".join(
+            [
+                "# Evidence Ledger",
+                "",
+                "## Loop 1: mapping node A",
+                "Evidence body for the first mapping loop citing channel checks and counter-evidence.",
+                "",
+                "## Loop 2: mapping node B",
+                "Evidence body for the second mapping loop citing channel checks and counter-evidence.",
+                "",
+                "## Loop 3: mapping node C",
+                "Evidence body for the third mapping loop citing channel checks and counter-evidence.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    for dirname in ("maps", "coverage", "financials", "redteam"):
+        (workspace / dirname).mkdir(exist_ok=True)
+
+    # Core main-thread artifact: NOT a subagent worker output.
+    (workspace / "maps" / "dependency_ladder.md").write_text(
+        "# Dependency Ladder\n\n- node A\n- node B\n- node C\n",
+        encoding="utf-8",
+    )
+
+    dispatch_records = []
+    for loop in range(1, 4):
+        (workspace / "maps" / f"mapping_{loop}.md").write_text(
+            "# Mapping\n\nMethod cards loaded: supply-chain-mapping.\n\nSearch Exhaustion Report: 3 sources consulted.\n",
+            encoding="utf-8",
+        )
+        dispatch_records.append(
+            {
+                "dispatch_id": f"dispatch_map_{loop:04d}",
+                "loop_id": f"loop_{loop}",
+                "role": "mapper",
+                "mechanism": "host_subagent",
+                "delivery_path": f"maps/mapping_{loop}.md",
+                "status": "delivered",
+            }
+        )
+        (workspace / "coverage" / f"coverage_{loop}.md").write_text(
+            "# Coverage Challenge\n\nMethod cards loaded: coverage-challenge.\n\nSources consulted: channel checks.\n",
+            encoding="utf-8",
+        )
+        dispatch_records.append(
+            {
+                "dispatch_id": f"dispatch_cov_{loop:04d}",
+                "loop_id": f"loop_{loop}",
+                "role": "coverage",
+                "mechanism": "host_subagent",
+                "delivery_path": f"coverage/coverage_{loop}.md",
+                "status": "delivered",
+            }
+        )
+
+    (workspace / "financials" / "screen.md").write_text(
+        "# Financial Screen\n\nMethod cards loaded: financial-bridge.\n\nSources consulted: filings.\n",
+        encoding="utf-8",
+    )
+    dispatch_records.append(
+        {
+            "dispatch_id": "dispatch_fin_0001",
+            "loop_id": "loop_1",
+            "role": "financial",
+            "mechanism": "host_subagent",
+            "delivery_path": "financials/screen.md",
+            "status": "delivered",
+        }
+    )
+
+    for loop in range(1, 4):
+        (workspace / "redteam" / f"round{loop}_redteam.md").write_text(
+            "# Red Team\n\nMethod cards loaded: red-team.\n\nSources consulted: filings.\n",
+            encoding="utf-8",
+        )
+        dispatch_records.append(
+            {
+                "dispatch_id": f"dispatch_rt_{loop:04d}",
+                "loop_id": f"loop_{loop}",
+                "role": "redteam",
+                "mechanism": "host_subagent",
+                "delivery_path": f"redteam/round{loop}_redteam.md",
+                "status": "delivered",
+            }
+        )
+    (workspace / "redteam" / "thesis_revision.md").write_text(
+        "# Thesis Revision\n\nMethod cards loaded: thesis-revision.\n\nSources consulted: filings.\n",
+        encoding="utf-8",
+    )
+    dispatch_records.append(
+        {
+            "dispatch_id": "dispatch_tr_0001",
+            "loop_id": "loop_1",
+            "role": "thesis-revision",
+            "mechanism": "host_subagent",
+            "delivery_path": "redteam/thesis_revision.md",
+            "status": "delivered",
+        }
+    )
+
+    (workspace / "search_log.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "loop_id": f"loop_{loop}",
+                    "actor": "main",
+                    "tool_tier": "AnySearch",
+                    "query": f"sector mapping loop {loop}",
+                    "result_status": "completed",
+                    "evidence_refs": [f"evidence_ledger.md#loop-{loop}"],
+                }
+            )
+            + "\n"
+            for loop in range(1, 4)
+        ),
+        encoding="utf-8",
+    )
+
+    (workspace / "dispatch_log.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in dispatch_records),
+        encoding="utf-8",
+    )
+
+    reports = workspace / "reports"
+    reports.mkdir(exist_ok=True)
+    (reports / "final.md").write_text(
+        "\n".join(
+            [
+                "# Sector Hunt Report: Test Theme",
+                "",
+                "### Architecture Shift",
+                "Stage 0 architecture shift brief summary.",
+                "",
+                "### Layered Dependency Map",
+                "Stage 2 accumulated dependency ladder summary.",
+                "",
+                "### Chokepoint Scoring Matrix",
+                "Stage 3 full 12-dimension scoring table.",
+                "",
+                "### Ranked Candidate Queue",
+                "Tier 1 / Tier 2 / Tier 3 ranked candidates.",
+                "",
+                "### Red Team Summary",
+                "Stage 4 key findings and revisions.",
+                "",
+                "### Recommended Next Steps",
+                "- Priority Ticker Dive targets: list.",
+                "- Basket candidates: list.",
+                "",
+                "### Dive Readiness Score",
+                "- Evidence sufficiency: ready.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+class TestCodexCloudReviewRegressions(unittest.TestCase):
+    """Regression guards for codex cloud review comments on PR #6.
+
+    Each test maps to one review comment and was written red (before the fix).
+    """
+
+    # --- #1: maps/dependency_ladder.md is a core artifact, not a worker output ---
+    def test_find_worker_outputs_excludes_dependency_ladder(self):
+        from sofa_contract.workspace import find_worker_outputs
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            maps = workspace / "maps"
+            maps.mkdir()
+            (maps / "dependency_ladder.md").write_text("# Dependency Ladder\n", encoding="utf-8")
+            (maps / "mapping_1.md").write_text("# Mapping 1\n", encoding="utf-8")
+            (maps / "mapping_2.md").write_text("# Mapping 2\n", encoding="utf-8")
+
+            names = [path.name for path in find_worker_outputs(workspace)]
+
+            self.assertNotIn("dependency_ladder.md", names)
+            self.assertIn("mapping_1.md", names)
+            self.assertIn("mapping_2.md", names)
+
+    # --- #2: a workspace advanced via complete_stage() must not be rejected ---
+    def test_complete_stage_updates_workflow_progress_row(self):
+        from gate_check import complete_stage
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace, stages_completed=[], current_stage="stage_0")
+            # Mimic init_workspace.py: Stage Progress rows start as pending, not
+            # pre-marked complete. complete_stage() must flip the row too.
+            (workspace / "research_workflow.md").write_text(
+                "\n".join(
+                    [
+                        "# Research Workflow",
+                        "",
+                        "## Stage Progress",
+                        "| Stage | Status | Output Files | Notes |",
+                        "|-------|--------|--------------|-------|",
+                        "| Stage 0: Intake + Framing | pending | | |",
+                        "| Stage 1: Provisional Frontier Plan | pending | | |",
+                        "| Stage 2: Evidence Frontier Loops | pending | evidence_ledger.md | |",
+                        "| Stage 3: Thesis + Financial Bridge | pending | financials/ | |",
+                        "| Stage 4: Formal Red Team | pending | redteam/ | |",
+                        "| Stage 5: Final Verdict | pending | reports/ | |",
+                        "| Stage 6: Watch Protocol | pending | | |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            complete_stage(str(workspace), "stage_0")
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(
+                    mode="ticker",
+                    target="stage_transition",
+                    from_stage="stage_0",
+                    to_stage="stage_1",
+                ),
+            )
+
+            self.assertNotIn(
+                "STATE_WORKFLOW_STAGE_CONFLICT",
+                [issue.code for issue in result.failures],
+                [issue.display() for issue in result.failures],
+            )
+            self.assertTrue(result.passed, [issue.display() for issue in result.failures])
+
+    # --- #3: sector final reports must be judged by sector requirements ---
+    def test_sector_final_report_passes_with_sector_template(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_sector_dossier_ready_workspace(workspace)
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="sector", target="dossier"))
+
+            ticker_only_codes = [
+                code
+                for code in (
+                    "FINAL_REPORT_MISSING_CONFIDENCE",
+                    "FINAL_REPORT_MISSING_TIME_HORIZON",
+                    "FINAL_REPORT_MISSING_FINANCIAL_BRIDGE",
+                    "FINAL_REPORT_MISSING_CATALYST_CLOCK",
+                    "FINAL_REPORT_MISSING_WATCH_PROTOCOL",
+                )
+                if code in [issue.code for issue in result.failures]
+            ]
+            self.assertEqual([], ticker_only_codes, ticker_only_codes)
+            self.assertTrue(result.passed, [issue.display() for issue in result.failures])
+
+    # --- #4: absolute dispatch delivery paths must be normalized to workspace-relative ---
+    def test_dispatch_absolute_delivery_path_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_search_log(workspace)
+            absolute_delivery = str(workspace / "scouts" / "loop_1_scout.md")
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "host_subagent",
+                        "delivery_path": absolute_delivery,
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertNotIn(
+                "WORKER_OUTPUT_WITHOUT_DISPATCH",
+                [issue.code for issue in result.failures],
+                [issue.display() for issue in result.failures],
+            )
+            self.assertTrue(result.passed, [issue.display() for issue in result.failures])
+
+    # --- #5: source trace is mandatory for scouts, optional for analysis roles ---
+    def test_non_scout_worker_output_without_source_trace_does_not_fail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace, stages_completed=[], current_stage="stage_0")
+            (workspace / "challenges").mkdir()
+            (workspace / "challenges" / "loop_1_challenge.md").write_text(
+                "# Challenge\n\nMethod cards loaded: red-team.\n",
+                encoding="utf-8",
+            )
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "challenge",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "challenges/loop_1_challenge.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="workspace"))
+
+            self.assertNotIn(
+                "WORKER_SOURCE_TRACE_MISSING",
+                [issue.code for issue in result.failures],
+                [issue.display() for issue in result.failures],
+            )
+
+    def test_scout_worker_output_without_source_trace_still_fails(self):
+        # Scouts perform search; their source trace stays mandatory.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace, stages_completed=[], current_stage="stage_0")
+            (workspace / "scouts").mkdir()
+            (workspace / "scouts" / "loop_1_scout.md").write_text(
+                "# Scout\n\nMethod cards loaded: supply-chain-mapping.\n",
+                encoding="utf-8",
+            )
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="workspace"))
+
+            self.assertIn(
+                "WORKER_SOURCE_TRACE_MISSING",
+                [issue.code for issue in result.failures],
+            )
+
+    # --- #6: every completed loop needs its own search record ---
+    def test_completed_loops_need_per_loop_search_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            # Intentionally provide only a loop_1 search record while
+            # loop_count=3 — the workspace must be rejected for missing
+            # per-loop coverage (SEARCH_LOG_LOOP_COVERAGE_MISSING).
+            (workspace / "search_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "loop_id": "loop_1",
+                        "actor": "main",
+                        "tool_tier": "AnySearch",
+                        "query": "customer qualification",
+                        "result_status": "completed",
+                        "evidence_refs": ["evidence_ledger.md#loop_1"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            write_valid_dispatch_log(workspace)
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(
+                result.passed,
+                "workspace with loop_count=3 but only a loop_1 search record must be rejected",
+            )
+            search_codes = [
+                code
+                for code in ("SEARCH_LOG_MISSING", "SEARCH_LOG_LOOP_COVERAGE_MISSING")
+                if code in [issue.code for issue in result.failures]
+            ]
+            self.assertTrue(
+                search_codes, [issue.display() for issue in result.failures]
+            )
 
 
 if __name__ == "__main__":

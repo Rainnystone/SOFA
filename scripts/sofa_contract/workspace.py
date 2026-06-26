@@ -42,7 +42,17 @@ def find_worker_outputs(workspace_path: Path) -> list[Path]:
         directory = workspace_path / dirname
         if not directory.exists():
             continue
-        outputs.extend(sorted(path for path in directory.iterdir() if path.suffix == ".md"))
+        for path in sorted(directory.iterdir()):
+            if path.suffix != ".md":
+                continue
+            # maps/dependency_ladder.md is a main-thread core artifact created
+            # by init_workspace.py and updated by the main thread after each
+            # mapping loop; it is NOT a subagent deliverable. gate_check.py
+            # already excludes it from loop-output counts; the contract must
+            # too, or it is falsely flagged for missing dispatch/source-trace.
+            if dirname == "maps" and path.name == "dependency_ladder.md":
+                continue
+            outputs.append(path)
     return outputs
 
 

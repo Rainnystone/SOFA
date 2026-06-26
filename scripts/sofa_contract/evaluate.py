@@ -16,7 +16,7 @@ from .workspace import (
 )
 
 
-REPORT_REQUIREMENTS = {
+TICKER_REPORT_REQUIREMENTS = {
     "CONCLUSION": ("conclusion", "action class", "research status", "结论"),
     "CONFIDENCE": ("confidence", "置信"),
     "TIME_HORIZON": ("time horizon", "时间"),
@@ -28,6 +28,22 @@ REPORT_REQUIREMENTS = {
     "RED_TEAM": ("red-team", "red team", "红队"),
     "INVALIDATION": ("invalidation", "invalidated", "失效"),
     "WATCH_PROTOCOL": ("watch protocol", "观察协议"),
+}
+# Sector Hunt final reports follow a different template (see
+# skills/sofa-analyze/references/sector-hunt-guide.md): architecture shift,
+# layered dependency map, chokepoint scoring, ranked candidate queue, red-team
+# summary, next steps, dive readiness. They are explicitly NOT action-class
+# verdicts, so the ticker-only areas (confidence, time horizon, financial
+# bridge, catalyst clock, watch protocol, ...) must not be required of them.
+SECTOR_REPORT_REQUIREMENTS = {
+    "SECTOR_HEADING": ("sector hunt report", "板块报告"),
+    "ARCHITECTURE_SHIFT": ("architecture shift", "架构迁移"),
+    "DEPENDENCY_MAP": ("layered dependency map", "dependency ladder", "依赖图谱", "依赖"),
+    "CHOKEPOINT_SCORING": ("chokepoint scoring", "扼点评分"),
+    "RANKED_CANDIDATE": ("ranked candidate", "排序候选"),
+    "RED_TEAM_SUMMARY": ("red team summary", "red-team summary", "红队"),
+    "NEXT_STEPS": ("recommended next steps", "next steps", "下一步"),
+    "DIVE_READINESS": ("dive readiness", "潜水就绪"),
 }
 DISPATCH_DELIVERY_REQUIRED_FIELDS = ("dispatch_id", "loop_id", "role", "mechanism", "delivery_path", "status")
 SUPPORTED_DISPATCH_MECHANISMS = ("host_subagent", "native_subagent", "degraded_single_agent")
@@ -135,20 +151,31 @@ def _workspace_claims_completed_loops(state: dict | None) -> bool:
     return bool({"stage_2", "stage_3", "stage_4", "stage_5"} & completed)
 
 
-def _has_valid_search_record(workspace: Path) -> bool:
-    import json
+def _valid_search_coverage(workspace: Path) -> tuple[set[str], bool]:
+    """Return (loop_ids with a valid search record, has_any_valid_record).
 
-    has_valid_record = False
+    A single valid record used to satisfy the whole workspace; now we collect
+    per-loop coverage so a workspace with loop_count=3 and only a loop_1 record
+    is rejected (SEARCH_LOG_LOOP_COVERAGE_MISSING).
+    """
+    loop_ids: set[str] = set()
+    has_any_valid = False
+    if not (workspace / "search_log.jsonl").exists():
+        return loop_ids, has_any_valid
     try:
         for _line_number, record in iter_jsonl_records(workspace / "search_log.jsonl"):
             status = str(record.get("result_status", "")).strip().lower()
-            if status == "completed" and _has_completed_search_record_shape(record):
-                has_valid_record = True
-            if status == "degraded_approved" and _has_degraded_search_record_shape(record):
-                has_valid_record = True
+            valid = (status == "completed" and _has_completed_search_record_shape(record)) or (
+                status == "degraded_approved" and _has_degraded_search_record_shape(record)
+            )
+            if valid:
+                has_any_valid = True
+                loop_id = record.get("loop_id")
+                if loop_id:
+                    loop_ids.add(str(loop_id))
     except (json.JSONDecodeError, ValueError):
-        return False
-    return has_valid_record
+        return set(), False
+    return loop_ids, has_any_valid
 
 
 def _has_completed_search_record_shape(record: dict) -> bool:
@@ -166,8 +193,32 @@ def _has_degraded_search_record_shape(record: dict) -> bool:
 def _check_search_log(workspace: Path, state: dict | None, result: ContractResult) -> None:
     if not _workspace_claims_completed_loops(state):
         return
-    search_jsonl = workspace / "search_log.jsonl"
-    if search_jsonl.exists() and _has_valid_search_record(workspace):
+    covered_loop_ids, has_any_valid = _valid_search_coverage(workspace)
+    if has_any_valid:
+        # At least one valid search_log.jsonl record exists. Now confirm that
+        # EVERY claimed loop (loop_count) is covered. A workspace with
+        # loop_count=3 but only a loop_1 search record must still be rejected.
+        loop_count = 0
+        if isinstance(state, dict):
+            try:
+                loop_count = int(state.get("loop_count", 0) or 0)
+            except (TypeError, ValueError):
+                loop_count = 0
+        expected_loop_ids = {f"loop_{i}" for i in range(1, loop_count + 1)}
+        missing_loop_ids = sorted(expected_loop_ids - covered_loop_ids)
+        if missing_loop_ids:
+            result.fail(
+                code="SEARCH_LOG_LOOP_COVERAGE_MISSING",
+                message=(
+                    "each completed loop requires its own valid search_log.jsonl record; "
+                    f"loops without a valid search record: {', '.join(missing_loop_ids)}"
+                ),
+                path="search_log.jsonl",
+                evidence=(
+                    f"covered loops: {sorted(covered_loop_ids) or 'none'}; "
+                    f"missing loops: {missing_loop_ids}"
+                ),
+            )
         return
     legacy_text = read_text_file(workspace / "search_log.md")
     if markdown_table_has_data_row(legacy_text):
@@ -263,7 +314,7 @@ def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: Cont
                 evidence=str(record.get("dispatch_id", "")),
             )
     delivered_paths = {
-        str(record.get("delivery_path", ""))
+        _normalize_delivery_path(workspace, record.get("delivery_path", ""))
         for record in records
         if _dispatch_record_counts_as_delivery(record)
     }
@@ -276,6 +327,24 @@ def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: Cont
                 path=rel,
                 evidence="dispatch_log.jsonl delivery_path mismatch",
             )
+
+
+def _normalize_delivery_path(workspace: Path, delivery_path) -> str:
+    """Normalize a dispatch delivery_path to a workspace-relative posix string.
+
+    Guides pass workers the same absolute ``{WORKSPACE}/...`` path they write
+    to, so dispatch_log.jsonl often records absolute paths. Worker outputs are
+    compared as workspace-relative paths; without normalization a genuinely
+    delivered file is falsely flagged as WORKER_OUTPUT_WITHOUT_DISPATCH.
+    """
+    raw = str(delivery_path)
+    try:
+        candidate = Path(raw)
+        if candidate.is_absolute():
+            return candidate.resolve().relative_to(workspace.resolve()).as_posix()
+    except (ValueError, OSError):
+        pass
+    return raw
 
 
 def _dispatch_missing_evidence(worker_outputs: list[Path], workflow_claims_delivery: bool) -> str:
@@ -363,14 +432,28 @@ def _check_worker_outputs(workspace: Path, result: ContractResult) -> None:
                 message="worker output must declare Method cards loaded",
                 path=rel,
             )
+        is_scout = rel.startswith("scouts/")
         if not _has_source_trace(text):
-            result.fail(
-                code="WORKER_SOURCE_TRACE_MISSING",
-                message="worker output must include a source or search trace section",
-                path=rel,
-                evidence=", ".join(SOURCE_TRACE_MARKERS),
-            )
-        if rel.startswith("scouts/") and _has_scout_forbidden_language(text):
+            if is_scout:
+                # Scouts perform search; their audit trail is mandatory.
+                result.fail(
+                    code="WORKER_SOURCE_TRACE_MISSING",
+                    message="scout output must include a source or search trace section",
+                    path=rel,
+                    evidence=", ".join(SOURCE_TRACE_MARKERS),
+                )
+            else:
+                # Analysis roles (challenge / red_team / coverage / financials)
+                # reason over claims the main thread pastes in; their prompts
+                # require Method Cards Loaded but no search-trace heading. Treat
+                # a missing trace as evidence-quality, not a contract block.
+                result.warn(
+                    code="WORKER_SOURCE_TRACE_RECOMMENDED",
+                    message="worker output is missing a source or search trace section (recommended for analysis roles)",
+                    path=rel,
+                    evidence=", ".join(SOURCE_TRACE_MARKERS),
+                )
+        if is_scout and _has_scout_forbidden_language(text):
             result.fail(
                 code="SCOUT_FORBIDDEN_CONCLUSION",
                 message="Scout output must not contain action-class style conclusion language",
@@ -399,7 +482,7 @@ def _check_final_report(workspace: Path, profile: ContractProfile, result: Contr
     complete_reports = [
         (path, text)
         for path, text in report_texts
-        if not _missing_final_report_requirements(text)
+        if not _missing_final_report_requirements(text, profile)
     ]
     if complete_reports:
         report_path, report_text = complete_reports[0]
@@ -411,9 +494,12 @@ def _check_final_report(workspace: Path, profile: ContractProfile, result: Contr
                 evidence="found buy/sell/action class language",
             )
         return
-    best_path, best_text = min(report_texts, key=lambda item: len(_missing_final_report_requirements(item[1])))
-    for label in _missing_final_report_requirements(best_text):
-        markers = REPORT_REQUIREMENTS[label]
+    best_path, best_text = min(
+        report_texts, key=lambda item: len(_missing_final_report_requirements(item[1], profile))
+    )
+    requirements = _report_requirements_for(profile)
+    for label in _missing_final_report_requirements(best_text, profile):
+        markers = requirements[label]
         result.fail(
             code=f"FINAL_REPORT_MISSING_{label}",
             message=f"final report is missing required area: {label.lower().replace('_', ' ')}",
@@ -422,9 +508,15 @@ def _check_final_report(workspace: Path, profile: ContractProfile, result: Contr
         )
 
 
-def _missing_final_report_requirements(report_text: str) -> list[str]:
+def _report_requirements_for(profile: ContractProfile) -> dict:
+    if profile.mode == "sector":
+        return SECTOR_REPORT_REQUIREMENTS
+    return TICKER_REPORT_REQUIREMENTS
+
+
+def _missing_final_report_requirements(report_text: str, profile: ContractProfile) -> list[str]:
     missing = []
-    for label, markers in REPORT_REQUIREMENTS.items():
+    for label, markers in _report_requirements_for(profile).items():
         if not any(marker.lower() in report_text for marker in markers):
             missing.append(label)
     return missing
