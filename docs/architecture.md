@@ -56,7 +56,9 @@ A SOFA workspace is the durable research ledger. The important files are:
 | `research_workflow.md` | Human-readable stage log, decision log, and managed Frontier Review / Discovery blocks. |
 | `evidence_ledger.md` | Evidence loop record. Stable headers like `## Loop N: F{id} - {name}` are the source of truth for per-frontier loop counts. |
 | `claim_ledger.md` | Important claims, status, evidence grade, and unresolved gaps. |
-| `search_log.md` | Search trail and capability limitations. |
+| `search_log.md` | Human-readable mirror for search trail and capability limitations. |
+| `search_log.jsonl` | Machine-readable authority for completed or approved degraded search records. |
+| `dispatch_log.jsonl` | Machine-readable authority for delivered subagent dispatch and approved degraded-mode delivery proof. |
 | worker output folders | Scout, challenge, mapper, coverage, financial bridge, red-team, and review products. |
 
 The architecture intentionally keeps machine constraints and human narration separate: JSON carries lifecycle state; Markdown carries reviewable reasoning and evidence trails.
@@ -94,6 +96,10 @@ Scripts enforce rules that should not depend on agent memory:
 | `generate_ultra_packet.py` | Convert Sector Hunt outputs into bounded Ticker Dive packets. |
 
 The main analyst thread may decide whether a frontier should continue or retire. The scripts decide whether that decision is legal, persisted, and gate-compatible.
+
+### Compliance Contract
+
+`scripts/sofa_contract/` is the deterministic authority for workspace completion checks shared by gate checks, dossier validation, report readiness, search logging, dispatch logging, and worker-output compliance. Existing CLI entry points keep their names, but same-purpose rules call this module instead of carrying duplicate rule tables. Markdown workflow files remain human-readable mirrors; machine-readable JSON and JSONL files are the authority where the contract defines one.
 
 ## Agent And Subagent Boundary
 

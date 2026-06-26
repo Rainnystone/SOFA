@@ -21,6 +21,7 @@ import re
 # Import Socratic debate validator
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from redteam_debate_validator import validate_debate
+from sofa_contract import ContractProfile, evaluate_workspace
 
 
 def count_md_files(directory: str) -> int:
@@ -159,20 +160,13 @@ def validate(workspace_path: str) -> tuple[bool, list[str], list[str]]:
     else:
         errors.append("state.json not found")
 
-    # 8. Method cards loaded declaration check (warning only)
-    check_subdirs = ["scouts", "challenges", "financials", "redteam"]
-    if mode == "sector":
-        check_subdirs.extend(["maps", "coverage"])
-    for subdir in check_subdirs:
-        sub_path = os.path.join(workspace_path, subdir)
-        if os.path.exists(sub_path):
-            for fname in os.listdir(sub_path):
-                if fname.endswith(".md"):
-                    fpath = os.path.join(sub_path, fname)
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    if "Method cards loaded" not in content and "Method Cards Loaded" not in content:
-                        warnings.append(f"{subdir}/{fname} missing 'Method cards loaded' declaration")
+    # 8. Shared SOFA compliance contract checks.
+    contract = evaluate_workspace(
+        workspace_path,
+        ContractProfile(mode=mode, target="workspace"),
+    )
+    errors.extend(issue.display() for issue in contract.failures)
+    warnings.extend(issue.display() for issue in contract.warnings)
 
     # 8b. Workflow content checks (warnings)
     workflow_path = os.path.join(workspace_path, "research_workflow.md")
@@ -252,6 +246,14 @@ def validate(workspace_path: str) -> tuple[bool, list[str], list[str]]:
 
 
 if __name__ == "__main__":
+    # Force UTF-8 on stdout/stderr so warning text containing non-ASCII (e.g.
+    # bilingual section names like "## 综合分析笔记") prints consistently on
+    # every platform. Without this, Windows pipes default to cp1252 and the
+    # subprocess crashes with UnicodeEncodeError mid-output (exit 1) even when
+    # validation itself passed.
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
     if len(sys.argv) < 2:
         print("Usage: python validate_dossier.py <workspace_path>")
         print("")

@@ -156,6 +156,15 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
     else:
         skipped_existing.append("search_log.md")
 
+    for ledger_name in ["search_log.jsonl", "dispatch_log.jsonl"]:
+        ledger_path = os.path.join(workspace_path, ledger_name)
+        if not os.path.exists(ledger_path):
+            with open(ledger_path, "w", encoding="utf-8"):
+                pass
+            created.append(ledger_name)
+        else:
+            skipped_existing.append(ledger_name)
+
     # Create capability_report.md
     capability_report_path = os.path.join(workspace_path, "capability_report.md")
     if not os.path.exists(capability_report_path):

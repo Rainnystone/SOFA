@@ -35,6 +35,8 @@ class TestWorkspaceScripts(unittest.TestCase):
                 "evidence_ledger.md",
                 "claim_ledger.md",
                 "search_log.md",
+                "search_log.jsonl",
+                "dispatch_log.jsonl",
                 "state.json",
                 "frontier_registry.json",
                 "capability_report.md",
@@ -148,6 +150,42 @@ class TestWorkspaceScripts(unittest.TestCase):
             self.assertEqual([{"id": "sentinel-frontier"}], preserved_registry["frontiers"])
             self.assertRegex(result.stdout, r"(?i)(skipped|existing)")
             self.assertIn("frontier_registry.json", result.stdout)
+
+    def test_init_workspace_preserves_machine_readable_ledgers_and_reports_skipped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "sector-workspace"
+            command = [
+                sys.executable,
+                str(INIT_SCRIPT),
+                "AI Optical Interconnect",
+                str(workspace),
+                "--mode",
+                "sector",
+            ]
+            subprocess.run(command, check=True, text=True, capture_output=True)
+
+            search_log_path = workspace / "search_log.jsonl"
+            dispatch_log_path = workspace / "dispatch_log.jsonl"
+            self.assertTrue(search_log_path.exists())
+            self.assertTrue(dispatch_log_path.exists())
+
+            search_sentinel = '{"sentinel":"preserve-search"}\n'
+            dispatch_sentinel = '{"sentinel":"preserve-dispatch"}\n'
+            search_log_path.write_text(search_sentinel, encoding="utf-8")
+            dispatch_log_path.write_text(dispatch_sentinel, encoding="utf-8")
+
+            result = subprocess.run(
+                command,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(search_sentinel, search_log_path.read_text(encoding="utf-8"))
+            self.assertEqual(dispatch_sentinel, dispatch_log_path.read_text(encoding="utf-8"))
+            self.assertRegex(result.stdout, r"(?i)(skipped|existing)")
+            self.assertIn("search_log.jsonl", result.stdout)
+            self.assertIn("dispatch_log.jsonl", result.stdout)
 
     def test_generate_ultra_packet_writes_reader_ready_packet(self):
         candidates = [

@@ -177,6 +177,78 @@ class TestFrontierGateIntegration(unittest.TestCase):
         self.assertNotEqual(0, blocked.returncode, blocked.stdout)
         self.assertEqual(1, blocked.stdout.count("unknown frontier id in loop header: F9"))
 
+    def test_stage_5_gate_uses_contract_for_missing_final_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "ticker-workspace"
+            workspace.mkdir()
+            (workspace / "scouts").mkdir()
+            (workspace / "scouts" / "loop_1_scout.md").write_text(
+                "# Scout\n\nMethod cards loaded: supply-chain-mapping\n\nSources consulted: company filing.\n",
+                encoding="utf-8",
+            )
+            (workspace / "research_workflow.md").write_text(
+                "\n".join(
+                    [
+                        "# Research Workflow",
+                        "## Stage Progress",
+                        "| Stage | Status | Output Files | Notes |",
+                        "|-------|--------|--------------|-------|",
+                        "| Stage 5: Final Verdict | complete | reports/ | |",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (workspace / "evidence_ledger.md").write_text("# Evidence Ledger\n", encoding="utf-8")
+            (workspace / "search_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "loop_id": "loop_1",
+                        "actor": "main",
+                        "tool_tier": "AnySearch",
+                        "query": "customer qualification",
+                        "result_status": "completed",
+                        "evidence_refs": ["evidence_ledger.md#loop-1"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (workspace / "state.json").write_text(
+                json.dumps(
+                    {
+                        "mode": "ticker",
+                        "current_stage": "stage_6",
+                        "loop_count": 3,
+                        "stages_completed": ["stage_0", "stage_1", "stage_2", "stage_3", "stage_4", "stage_5"],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(GATE_SCRIPT), str(workspace), "stage_5", "stage_6"],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertNotEqual(0, result.returncode, result.stdout)
+            self.assertIn("FINAL_REPORT_MISSING", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
