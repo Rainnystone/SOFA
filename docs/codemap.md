@@ -36,6 +36,7 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 | Script | Main tests | Responsibility |
 |--------|------------|----------------|
 | `scripts/init_workspace.py` | `tests/test_workspace_scripts.py` | Create workspace files, registry, managed Markdown blocks, and initial state. |
+| `scripts/sofa_contract/` | `tests/test_sofa_contract.py` | Shared compliance contract package for structured pass/fail/warn results and DSV4P-hardening checks. |
 | `scripts/frontier_lifecycle.py` | `tests/test_frontier_lifecycle.py` | Pure lifecycle model: stable ID loop binding, transition legality, review due, portfolio limits, and rendering. |
 | `scripts/frontier_review.py` | `tests/test_frontier_review_cli.py` | CLI for adding, starting, reviewing, retiring, reactivating, and reporting frontier status. |
 | `scripts/loop_enforcer.py` | `tests/test_frontier_lifecycle.py` | Validate ledger loop headers against registry IDs. |

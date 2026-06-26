@@ -95,6 +95,10 @@ Scripts enforce rules that should not depend on agent memory:
 
 The main analyst thread may decide whether a frontier should continue or retire. The scripts decide whether that decision is legal, persisted, and gate-compatible.
 
+### Compliance Contract
+
+`scripts/sofa_contract/` is the deterministic authority for workspace completion checks shared by gate checks, dossier validation, report readiness, search logging, dispatch logging, and worker-output compliance. Existing CLI entry points keep their names, but same-purpose rules call this module instead of carrying duplicate rule tables. Markdown workflow files remain human-readable mirrors; machine-readable JSON and JSONL files are the authority where the contract defines one.
+
 ## Agent And Subagent Boundary
 
 The main analyst thread owns orchestration and lifecycle mutation. Worker agents receive bounded packets and write product Markdown. They do not hand-edit `frontier_registry.json`, skip gates, or decide final action-class conclusions.
