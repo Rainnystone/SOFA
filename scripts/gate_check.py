@@ -30,6 +30,7 @@ from timeliness_checker import check_timeliness
 from synthesis_checker import check_synthesis
 from redteam_debate_validator import validate_debate
 from frontier_lifecycle import LifecycleError, derive_loop_counts, validate_for_stage_transition
+from sofa_contract import ContractProfile, evaluate_workspace
 
 
 def load_state(workspace_path: str) -> dict:
@@ -278,20 +279,18 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
         if "stage_5" not in state.get("stages_completed", []):
             missing.append("Stage 5 not marked as completed in state.json")
 
-        # Check that a final verdict / output has been recorded
-        wf_path = os.path.join(workspace_path, "research_workflow.md")
-        if os.path.exists(wf_path):
-            with open(wf_path, "r", encoding="utf-8") as f:
-                wf_content = f.read()
-
-            if mode == "ticker":
-                if "## Final Verdict" not in wf_content and "## 最终裁决" not in wf_content:
-                    missing.append("research_workflow.md missing Final Verdict section (Stage 5 requirement)")
-            elif mode == "sector":
-                if "## Final Verdict" not in wf_content and "## 最终裁决" not in wf_content:
-                    missing.append("research_workflow.md missing Final Verdict section (Stage 5 requirement)")
-                if "## Ranked Candidate" not in wf_content and "## 排序候选" not in wf_content:
-                    missing.append("research_workflow.md missing final Ranked Candidate Queue (Stage 5 Sector Hunt requirement)")
+        contract = evaluate_workspace(
+            workspace_path,
+            ContractProfile(
+                mode=mode,
+                target="stage_transition",
+                from_stage=from_stage,
+                to_stage=to_stage,
+            ),
+        )
+        missing.extend(issue.display() for issue in contract.failures)
+        for warning in contract.warnings:
+            print(f"[WARN] {warning.display()}")
 
     passed = len(missing) == 0
     return passed, missing
