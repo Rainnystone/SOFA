@@ -823,6 +823,83 @@ class TestWorkerOutputContract(unittest.TestCase):
             self.assertFalse(result.passed)
             self.assertIn("SCOUT_FORBIDDEN_CONCLUSION", [issue.code for issue in result.failures])
 
+    def test_scout_action_language_matches_case_insensitive_independent_terms(self):
+        cases = [
+            "action class: buy.",
+            "Conclusion: buy.",
+            "Recommendation: sell.",
+            "strong buy.",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace = Path(temp_dir)
+                    write_completed_loop_workspace(workspace)
+                    write_valid_machine_ledgers(workspace)
+                    (workspace / "scouts" / "loop_1_scout.md").write_text(
+                        "# Scout\n\nMethod cards loaded: supply-chain-mapping.\n\nSources consulted: company filing.\n\n"
+                        + text
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+                    self.assertFalse(result.passed)
+                    self.assertIn("SCOUT_FORBIDDEN_CONCLUSION", [issue.code for issue in result.failures])
+
+    def test_scout_action_language_does_not_match_word_fragments_or_hyphenated_terms(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_machine_ledgers(workspace)
+            (workspace / "scouts" / "loop_1_scout.md").write_text(
+                "# Scout\n\n"
+                "Method cards loaded: supply-chain-mapping.\n\n"
+                "Sources consulted: company filing.\n\n"
+                "BUYER qualification only. SELLING expenses noted. SELL-side context only.\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertTrue(result.passed, [issue.code for issue in result.failures])
+
+    def test_source_trace_accepts_heading_or_label_case_insensitively(self):
+        cases = [
+            "sources consulted: company filing.",
+            "### evidence sources\n- company filing.",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace = Path(temp_dir)
+                    write_completed_loop_workspace(workspace)
+                    write_valid_machine_ledgers(workspace)
+                    (workspace / "scouts" / "loop_1_scout.md").write_text(
+                        "# Scout\n\nMethod cards loaded: supply-chain-mapping.\n\n" + text + "\n",
+                        encoding="utf-8",
+                    )
+
+                    result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+                    self.assertTrue(result.passed, [issue.code for issue in result.failures])
+
+    def test_source_trace_does_not_match_chinese_body_sentence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_machine_ledgers(workspace)
+            (workspace / "scouts" / "loop_1_scout.md").write_text(
+                "# Scout\n\nMethod cards loaded: supply-chain-mapping.\n\n观点来源尚未形成检索清单。\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("WORKER_SOURCE_TRACE_MISSING", [issue.code for issue in result.failures])
+
 
 if __name__ == "__main__":
     unittest.main()

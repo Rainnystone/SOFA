@@ -39,13 +39,13 @@ SOURCE_TRACE_MARKERS = (
     "检索",
     "来源",
 )
-SCOUT_FORBIDDEN_TERMS = (
-    "Action Class",
-    "BUY",
-    "SELL",
-    "Strong Buy",
-    "强烈买入",
-    "卖出",
+SOURCE_TRACE_LABEL_PATTERN = re.compile(
+    r"^(?:#{1,6}\s*)?(?:Search Exhaustion Report|Sources consulted|Source Pack|Evidence Sources|检索|来源)\s*(?::|：|-|$)",
+    re.IGNORECASE,
+)
+SCOUT_FORBIDDEN_PATTERN = re.compile(
+    r"(?:\baction\s+class\b|(?<![\w-])strong\s+buy(?![\w-])|(?<![\w-])(?:buy|sell)(?![\w-])|强烈买入|卖出)",
+    re.IGNORECASE,
 )
 
 
@@ -285,19 +285,27 @@ def _check_worker_outputs(workspace: Path, result: ContractResult) -> None:
                 message="worker output must declare Method cards loaded",
                 path=rel,
             )
-        if not any(marker in text for marker in SOURCE_TRACE_MARKERS):
+        if not _has_source_trace(text):
             result.fail(
                 code="WORKER_SOURCE_TRACE_MISSING",
                 message="worker output must include a source or search trace section",
                 path=rel,
                 evidence=", ".join(SOURCE_TRACE_MARKERS),
             )
-        if rel.startswith("scouts/") and any(term in text for term in SCOUT_FORBIDDEN_TERMS):
+        if rel.startswith("scouts/") and _has_scout_forbidden_language(text):
             result.fail(
                 code="SCOUT_FORBIDDEN_CONCLUSION",
                 message="Scout output must not contain action-class style conclusion language",
                 path=rel,
             )
+
+
+def _has_source_trace(text: str) -> bool:
+    return any(SOURCE_TRACE_LABEL_PATTERN.search(line.strip()) for line in text.splitlines())
+
+
+def _has_scout_forbidden_language(text: str) -> bool:
+    return SCOUT_FORBIDDEN_PATTERN.search(text) is not None
 
 
 def _check_final_report(workspace: Path, profile: ContractProfile, result: ContractResult) -> None:
