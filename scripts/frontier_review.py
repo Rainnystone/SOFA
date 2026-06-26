@@ -551,4 +551,10 @@ def utc_now() -> str:
 
 
 if __name__ == "__main__":
+    # Force UTF-8 on stdout/stderr so output containing non-ASCII (e.g.
+    # user-supplied frontier names) prints consistently on every platform.
+    # Without this, Windows pipes default to cp1252 and the subprocess crashes
+    # with UnicodeEncodeError mid-output (exit 1).
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     raise SystemExit(main())
