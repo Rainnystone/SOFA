@@ -21,6 +21,32 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from frontier_lifecycle import make_registry
+from workspace_contract import ArtifactSpec, artifact_contract_for_mode
+
+
+def _artifact_path(workspace_path: str, artifact: ArtifactSpec) -> str:
+    if artifact.path == ".":
+        return workspace_path
+    return os.path.join(workspace_path, artifact.path)
+
+
+def _create_directories(
+    workspace_path: str, artifacts, created: list[str], skipped_existing: list[str]
+) -> None:
+    for artifact in artifacts:
+        directory = _artifact_path(workspace_path, artifact)
+        if os.path.exists(directory):
+            skipped_existing.append(artifact.label)
+        else:
+            os.makedirs(directory, exist_ok=True)
+            created.append(artifact.label)
+
+
+def _managed_block_markdown(contract, block_name: str) -> str:
+    for block in contract.managed_blocks:
+        if block.name == block_name:
+            return f"## {block.heading}\n{block.start_marker}\n{block.end_marker}"
+    raise ValueError(f"Unknown SOFA managed block: {block_name}")
 
 
 def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> None:
@@ -28,29 +54,11 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
     workspace_path = os.path.normpath(workspace_path)
     created = []
     skipped_existing = []
+    contract = artifact_contract_for_mode(mode)
+    mode = contract.mode
 
     # Create directory structure (common)
-    dirs = [
-        (workspace_path, "./"),
-        (os.path.join(workspace_path, "scouts"), "scouts/"),
-        (os.path.join(workspace_path, "challenges"), "challenges/"),
-        (os.path.join(workspace_path, "maps"), "maps/"),
-        (os.path.join(workspace_path, "financials"), "financials/"),
-        (os.path.join(workspace_path, "redteam"), "redteam/"),
-        (os.path.join(workspace_path, "reports"), "reports/"),
-        (os.path.join(workspace_path, "dive_packets"), "dive_packets/"),
-    ]
-
-    # Sector mode adds coverage/ for Coverage Challenge files
-    if mode == "sector":
-        dirs.append((os.path.join(workspace_path, "coverage"), "coverage/"))
-
-    for directory, label in dirs:
-        if os.path.exists(directory):
-            skipped_existing.append(label)
-        else:
-            os.makedirs(directory, exist_ok=True)
-            created.append(label)
+    _create_directories(workspace_path, contract.directory_specs, created, skipped_existing)
 
     # Create research_workflow.md
     workflow_path = os.path.join(workspace_path, "research_workflow.md")
@@ -88,13 +96,9 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
 | Time | Decision | Reason | Based On |
 |------|----------|--------|----------|
 
-## Frontier Review Log
-<!-- SOFA:frontier-review-log:start -->
-<!-- SOFA:frontier-review-log:end -->
+{_managed_block_markdown(contract, "frontier-review-log")}
 
-## Frontier Discovery Log
-<!-- SOFA:frontier-discovery-log:start -->
-<!-- SOFA:frontier-discovery-log:end -->
+{_managed_block_markdown(contract, "frontier-discovery-log")}
 
 ## Current Claim Ledger (summary)
 (See evidence_ledger.md for full content)
@@ -156,7 +160,9 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
     else:
         skipped_existing.append("search_log.md")
 
-    for ledger_name in ["search_log.jsonl", "dispatch_log.jsonl"]:
+    for ledger_name in contract.machine_ledgers:
+        if ledger_name in {"state.json", "frontier_registry.json"}:
+            continue
         ledger_path = os.path.join(workspace_path, ledger_name)
         if not os.path.exists(ledger_path):
             with open(ledger_path, "w", encoding="utf-8"):
@@ -189,7 +195,7 @@ python SOFA/scripts/capability_check.py --json
         skipped_existing.append("capability_report.md")
 
     # Sector mode: create initial dependency_ladder.md
-    if mode == "sector":
+    if "maps/dependency_ladder.md" in contract.mode_artifacts:
         ladder_path = os.path.join(workspace_path, "maps", "dependency_ladder.md")
         if not os.path.exists(ladder_path):
             with open(ladder_path, "w", encoding="utf-8") as f:

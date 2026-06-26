@@ -36,6 +36,7 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 | Script | Main tests | Responsibility |
 |--------|------------|----------------|
 | `scripts/init_workspace.py` | `tests/test_workspace_scripts.py` | Create workspace files, registry, managed Markdown blocks, and initial state. |
+| `scripts/workspace_contract/` | `tests/test_workspace_contract.py`, `tests/test_workspace_scripts.py`, `tests/test_sofa_contract.py` | Canonical workspace artifact/scaffold facts, mode-specific scaffold paths, managed blocks, and worker-output path classification. |
 | `scripts/sofa_contract/` | `tests/test_sofa_contract.py` | Shared compliance contract package for structured pass/fail/warn results and DSV4P-hardening checks. |
 | `scripts/frontier_lifecycle.py` | `tests/test_frontier_lifecycle.py` | Pure lifecycle model: stable ID loop binding, transition legality, review due, portfolio limits, and rendering. |
 | `scripts/frontier_review.py` | `tests/test_frontier_review_cli.py` | CLI for adding, starting, reviewing, retiring, reactivating, and reporting frontier status. |
@@ -47,6 +48,16 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 | report and score validators | structure and targeted validator tests | Validate scorecards, freshness, synthesis, red-team debate, and final dossiers. |
 
 If a script enforces a rule that appears in a guide, update both the script tests and the guide text in the same change.
+
+## Workspace Artifact Contract Change Path
+
+Use this path when changing workspace files, folders, ledgers, managed blocks, or worker-output path classification:
+
+1. Update focused tests in `tests/test_workspace_contract.py`.
+2. Update `scripts/workspace_contract/`.
+3. Update setup or validator adapters that consume the contract.
+4. Run `python -B -m unittest tests.test_workspace_contract tests.test_workspace_scripts tests.test_sofa_contract`.
+5. Run the full baseline before committing.
 
 ## Frontier Lifecycle Change Path
 

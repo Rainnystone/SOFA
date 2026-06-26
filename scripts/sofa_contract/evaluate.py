@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+from workspace_contract import core_required_files
+
 from .result import ContractProfile, ContractResult
 from .workspace import (
     find_markdown_reports,
@@ -73,6 +75,20 @@ SECTOR_FORBIDDEN_ACTION_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+CORE_WORKSPACE_FILE_FAILURES = {
+    "state.json": (
+        "STATE_JSON_MISSING",
+        "state.json is required as the machine-readable workspace authority",
+    ),
+    "research_workflow.md": (
+        "RESEARCH_WORKFLOW_MISSING",
+        "research_workflow.md is required as the human-readable workflow mirror",
+    ),
+    "evidence_ledger.md": (
+        "EVIDENCE_LEDGER_MISSING",
+        "evidence_ledger.md is required for evidence-first research",
+    ),
+}
 
 
 def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> ContractResult:
@@ -101,24 +117,12 @@ def _requires_final_report(profile: ContractProfile) -> bool:
 
 def _check_core_workspace_files(workspace: Path, result: ContractResult) -> dict | None:
     state = read_json_file(workspace / "state.json")
-    if state is None:
-        result.fail(
-            code="STATE_JSON_MISSING",
-            message="state.json is required as the machine-readable workspace authority",
-            path="state.json",
-        )
-    if not (workspace / "research_workflow.md").exists():
-        result.fail(
-            code="RESEARCH_WORKFLOW_MISSING",
-            message="research_workflow.md is required as the human-readable workflow mirror",
-            path="research_workflow.md",
-        )
-    if not (workspace / "evidence_ledger.md").exists():
-        result.fail(
-            code="EVIDENCE_LEDGER_MISSING",
-            message="evidence_ledger.md is required for evidence-first research",
-            path="evidence_ledger.md",
-        )
+    for relative_path in core_required_files():
+        missing = state is None if relative_path == "state.json" else not (workspace / relative_path).exists()
+        if not missing:
+            continue
+        code, message = CORE_WORKSPACE_FILE_FAILURES[relative_path]
+        result.fail(code=code, message=message, path=relative_path)
     return state
 
 

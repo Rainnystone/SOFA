@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -7,11 +9,61 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+from unittest import mock
+
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import init_workspace
+from workspace_contract import artifact_contract_for_mode
+
 INIT_SCRIPT = ROOT / "scripts/init_workspace.py"
 PACKET_SCRIPT = ROOT / "scripts/generate_ultra_packet.py"
 
 
 class TestWorkspaceScripts(unittest.TestCase):
+    def test_create_workspace_uses_artifact_contract_for_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "sector-workspace"
+
+            self.assertTrue(hasattr(init_workspace, "artifact_contract_for_mode"))
+            with mock.patch.object(
+                init_workspace,
+                "artifact_contract_for_mode",
+                wraps=artifact_contract_for_mode,
+            ) as contract_factory:
+                captured_stdout = io.StringIO()
+                with contextlib.redirect_stdout(captured_stdout):
+                    init_workspace.create_workspace(
+                        "AI Optical Interconnect",
+                        str(workspace),
+                        "sector",
+                    )
+
+            contract_factory.assert_called_once_with("sector")
+            self.assertIn("WORKSPACE INITIALIZED", captured_stdout.getvalue())
+            self.assertTrue((workspace / "maps" / "dependency_ladder.md").exists())
+
+    def test_create_workspace_canonicalizes_direct_call_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "sector-workspace"
+
+            captured_stdout = io.StringIO()
+            with contextlib.redirect_stdout(captured_stdout):
+                init_workspace.create_workspace(
+                    "AI Optical Interconnect",
+                    str(workspace),
+                    " SECTOR ",
+                )
+
+            state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+            registry = json.loads(
+                (workspace / "frontier_registry.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("sector", state["mode"])
+            self.assertEqual("sector", registry["mode"])
+            self.assertTrue((workspace / "maps" / "dependency_ladder.md").exists())
+            self.assertIn("Mode: Sector Hunt", captured_stdout.getvalue())
+
     def test_init_workspace_creates_sofa_artifacts_for_sector_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "sector-workspace"
@@ -30,21 +82,7 @@ class TestWorkspaceScripts(unittest.TestCase):
                 capture_output=True,
             )
 
-            expected_paths = [
-                "research_workflow.md",
-                "evidence_ledger.md",
-                "claim_ledger.md",
-                "search_log.md",
-                "search_log.jsonl",
-                "dispatch_log.jsonl",
-                "state.json",
-                "frontier_registry.json",
-                "capability_report.md",
-                "maps/dependency_ladder.md",
-                "coverage",
-                "reports",
-                "dive_packets",
-            ]
+            expected_paths = artifact_contract_for_mode("sector").all_scaffold_paths()
             missing = [
                 path for path in expected_paths if not (workspace / path).exists()
             ]
@@ -94,6 +132,9 @@ class TestWorkspaceScripts(unittest.TestCase):
 
             self.assertNotIn("coverage/", result.stdout)
             self.assertFalse((workspace / "coverage").exists())
+            self.assertNotIn(
+                "coverage", artifact_contract_for_mode("ticker").all_scaffold_paths()
+            )
 
     def test_init_workspace_preserves_existing_state_json_and_reports_skipped(self):
         with tempfile.TemporaryDirectory() as temp_dir:
