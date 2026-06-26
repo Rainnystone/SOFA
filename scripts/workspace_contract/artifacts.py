@@ -243,9 +243,30 @@ def is_main_thread_artifact(relative_path: str | Path) -> bool:
 
 
 def _normalize_relative_path(relative_path: str | Path) -> str:
-    raw = Path(str(relative_path)).as_posix()
-    while raw.startswith("./"):
-        raw = raw[2:]
+    raw_path = Path(str(relative_path))
+    if raw_path.is_absolute():
+        raise ValueError(
+            f"Expected workspace-relative path, got absolute path: {relative_path!r}"
+        )
+
+    raw = raw_path.as_posix()
     if raw in {"", "."}:
         return "."
-    return raw
+
+    normalized_parts: list[str] = []
+    for part in raw.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not normalized_parts:
+                raise ValueError(
+                    "Expected workspace-relative path, "
+                    f"got path outside workspace: {relative_path!r}"
+                )
+            normalized_parts.pop()
+            continue
+        normalized_parts.append(part)
+
+    if not normalized_parts:
+        return "."
+    return "/".join(normalized_parts)

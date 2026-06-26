@@ -49,6 +49,24 @@ class TestWorkspaceArtifactContract(unittest.TestCase):
         self.assertTrue(contract.is_worker_output_path("maps/sector_mapper_loop1.md"))
         self.assertTrue(contract.is_worker_output_path("coverage/coverage_loop1.md"))
 
+    def test_resolve_rejects_paths_outside_workspace(self):
+        contract = artifact_contract_for_mode("sector")
+        workspace_root = Path("/workspace/research")
+
+        with self.assertRaisesRegex(ValueError, "workspace-relative path"):
+            contract.resolve(workspace_root, "/tmp/outside.md")
+
+        with self.assertRaisesRegex(ValueError, "workspace-relative path"):
+            contract.resolve(workspace_root, "../outside.md")
+
+    def test_path_normalization_preserves_main_thread_artifact_classification(self):
+        contract = artifact_contract_for_mode("sector")
+
+        self.assertFalse(
+            contract.is_worker_output_path("maps/../maps/dependency_ladder.md")
+        )
+        self.assertTrue(is_main_thread_artifact("./maps/../maps/dependency_ladder.md"))
+
     def test_worker_output_directories_are_available_as_union_for_workspace_scans(self):
         self.assertEqual(
             ("scouts", "challenges", "maps", "coverage", "financials", "redteam"),
