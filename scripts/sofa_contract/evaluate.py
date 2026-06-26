@@ -303,10 +303,7 @@ def _workflow_claims_subagent_delivery(workflow_text: str | None) -> bool:
             continue
         if not after_separator:
             continue
-        row = " ".join(cells)
-        if "delivered" in row and (
-            "subagent" in row or "host_subagent" in row or "native_subagent" in row
-        ):
+        if any(cell == "delivered" for cell in cells):
             return True
     return False
 

@@ -876,6 +876,29 @@ class TestSearchAndDispatchContract(unittest.TestCase):
                     self.assertFalse(result.passed)
                     self.assertIn("DISPATCH_PROOF_MISSING", [issue.code for issue in result.failures])
 
+    def test_subagent_dispatch_log_delivered_status_requires_machine_delivery_proof(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace)
+            (workspace / "research_workflow.md").write_text(
+                "\n".join(
+                    [
+                        "# Research Workflow",
+                        "",
+                        "## Subagent Dispatch Log",
+                        "| Time | Loop# | Role | File Path | Status | Quality |",
+                        "|------|-------|------|-----------|--------|---------|",
+                        "| 2026-06-26 | 1 | scout | scouts/loop_1_scout.md | delivered | good |",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="stage_transition"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("DISPATCH_PROOF_MISSING", [issue.code for issue in result.failures])
+
     def test_workflow_tables_outside_subagent_dispatch_log_do_not_require_dispatch_proof(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
