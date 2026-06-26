@@ -21,7 +21,7 @@ SOFA is a host-neutral research harness. It is not one large prompt and not a si
 | Mode guides | `skills/sofa-analyze/references/*-guide.md` | Define the stage sequence, loop rhythm, required artifacts, and mode-specific constraints. |
 | Method cards | `skills/sofa-analyze/method-cards/*/METHOD.md` | Provide private worker methods for mapping, customer discovery, financial bridge, and red-team analysis. |
 | Prompt templates | `scripts/prompts/*.md` | Give worker agents bounded instructions for scout, challenge, mapper, review, and red-team tasks. |
-| Deterministic scripts | `scripts/*.py` | Initialize workspaces, enforce lifecycle and stage gates, validate reports, and create Ultra packets. |
+| Deterministic scripts and contracts | `scripts/*.py`, `scripts/sofa_contract/`, `scripts/workspace_contract/` | Initialize workspaces, own deterministic workspace facts, enforce lifecycle and stage gates, validate reports, and create Ultra packets. |
 | Documentation | `docs/*.md`, `docs/adapters/*.md` | Explain setup, capabilities, architecture, repo navigation, reports, and host mappings. |
 | Tests | `tests/test_*.py` | Lock down repo structure, workspace initialization, lifecycle rules, CLI behavior, and gates. |
 
@@ -63,6 +63,8 @@ A SOFA workspace is the durable research ledger. The important files are:
 
 The architecture intentionally keeps machine constraints and human narration separate: JSON carries lifecycle state; Markdown carries reviewable reasoning and evidence trails.
 
+The workspace artifact inventory and worker-output path classification are defined in `scripts/workspace_contract/`. Setup scripts and validators consume that contract instead of copying folder, ledger, managed-block, or scaffold lists into separate rule tables.
+
 ## Frontier Lifecycle Architecture
 
 Frontiers are first-class research objects. Stage 1 proposes the initial set, but Stage 2 can add, start, continue, retire, reprioritize, and reactivate them through the lifecycle CLI.
@@ -85,7 +87,7 @@ Scripts enforce rules that should not depend on agent memory:
 
 | Script | Deterministic responsibility |
 |--------|------------------------------|
-| `init_workspace.py` | Create a workspace with required files, registry, and managed Markdown blocks. |
+| `init_workspace.py` | Create a workspace from the artifact contract with required files, registry, and managed Markdown blocks. |
 | `workspace_contract/` | Own canonical workspace artifact, scaffold, managed-block, and worker-output path facts consumed by setup and validators. |
 | `frontier_lifecycle.py` | Pure lifecycle state machine, loop binding, review due checks, portfolio limits, and Markdown rendering. |
 | `frontier_review.py` | Main-thread CLI for lifecycle mutations and managed review log updates. |
@@ -135,6 +137,7 @@ Use these seams when extending SOFA:
 | New host runtime | Add an adapter under `docs/adapters/`; do not fork the core workflow. |
 | New research mode | Add a mode guide and tests before adding scripts. Keep Sector Hunt's no-action-class boundary intact. |
 | New deterministic rule | Put it in a script and add focused tests. Do not bury hard rules in prose only. |
+| New workspace artifact or scaffold fact | Update `scripts/workspace_contract/` and `tests/test_workspace_contract.py`, then update setup or validator consumers. |
 | New worker method | Add a private method card and prompt; keep it callable only through the main workflow. |
 | New optional capability | Add detection and recommendation. Do not silently install tools or write credentials. |
 
