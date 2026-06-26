@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -29,13 +31,16 @@ class TestWorkspaceScripts(unittest.TestCase):
                 "artifact_contract_for_mode",
                 wraps=artifact_contract_for_mode,
             ) as contract_factory:
-                init_workspace.create_workspace(
-                    "AI Optical Interconnect",
-                    str(workspace),
-                    "sector",
-                )
+                captured_stdout = io.StringIO()
+                with contextlib.redirect_stdout(captured_stdout):
+                    init_workspace.create_workspace(
+                        "AI Optical Interconnect",
+                        str(workspace),
+                        "sector",
+                    )
 
             contract_factory.assert_called_once_with("sector")
+            self.assertIn("WORKSPACE INITIALIZED", captured_stdout.getvalue())
             self.assertTrue((workspace / "maps" / "dependency_ladder.md").exists())
 
     def test_init_workspace_creates_sofa_artifacts_for_sector_mode(self):
