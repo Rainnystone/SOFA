@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -1521,7 +1523,11 @@ class TestCodexCloudReviewRegressions(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            complete_stage(str(workspace), "stage_0")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                complete_stage(str(workspace), "stage_0")
+
+            self.assertIn("STAGE COMPLETED: stage_0", stdout.getvalue())
 
             result = evaluate_workspace(
                 workspace,
