@@ -505,4 +505,11 @@ def main():
 
 
 if __name__ == "__main__":
+    # Force UTF-8 on stdout/stderr so JSON snapshots containing non-ASCII
+    # company names (e.g. A-share / HK issuers emitted via
+    # json.dumps(..., ensure_ascii=False)) print consistently on every
+    # platform. Without this, Windows pipes default to cp1252 and the
+    # subprocess crashes with UnicodeEncodeError mid-output (exit 1).
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     main()

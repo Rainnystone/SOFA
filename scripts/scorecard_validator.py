@@ -59,6 +59,13 @@ def validate_scorecards(workspace_path: str) -> tuple[bool, list[str]]:
 
 
 if __name__ == "__main__":
+    # Force UTF-8 on stdout/stderr so output containing non-ASCII (e.g.
+    # bilingual section names) prints consistently on every platform. Without
+    # this, Windows pipes default to cp1252 and the subprocess crashes with
+    # UnicodeEncodeError mid-output (exit 1) even when validation itself passed.
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
     if len(sys.argv) < 2:
         print("Usage: python scorecard_validator.py <workspace_path>")
         sys.exit(1)
