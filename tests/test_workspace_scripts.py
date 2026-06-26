@@ -7,11 +7,37 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+from unittest import mock
+
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import init_workspace
+from workspace_contract import artifact_contract_for_mode
+
 INIT_SCRIPT = ROOT / "scripts/init_workspace.py"
 PACKET_SCRIPT = ROOT / "scripts/generate_ultra_packet.py"
 
 
 class TestWorkspaceScripts(unittest.TestCase):
+    def test_create_workspace_uses_artifact_contract_for_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "sector-workspace"
+
+            self.assertTrue(hasattr(init_workspace, "artifact_contract_for_mode"))
+            with mock.patch.object(
+                init_workspace,
+                "artifact_contract_for_mode",
+                wraps=artifact_contract_for_mode,
+            ) as contract_factory:
+                init_workspace.create_workspace(
+                    "AI Optical Interconnect",
+                    str(workspace),
+                    "sector",
+                )
+
+            contract_factory.assert_called_once_with("sector")
+            self.assertTrue((workspace / "maps" / "dependency_ladder.md").exists())
+
     def test_init_workspace_creates_sofa_artifacts_for_sector_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "sector-workspace"
