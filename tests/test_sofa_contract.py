@@ -772,5 +772,57 @@ class TestSearchAndDispatchContract(unittest.TestCase):
             self.assertNotIn("LEGACY_SEARCH_LOG_USED", [issue.code for issue in result.warnings])
 
 
+def write_valid_machine_ledgers(workspace: Path):
+    write_valid_search_log(workspace)
+    write_valid_dispatch_log(workspace)
+
+
+class TestWorkerOutputContract(unittest.TestCase):
+    def test_worker_output_missing_method_cards_loaded_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_machine_ledgers(workspace)
+            (workspace / "scouts" / "loop_1_scout.md").write_text(
+                "# Scout\n\nSources consulted: company filing.\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("WORKER_METHOD_CARDS_MISSING", [issue.code for issue in result.failures])
+
+    def test_worker_output_missing_source_trace_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_machine_ledgers(workspace)
+            (workspace / "scouts" / "loop_1_scout.md").write_text(
+                "# Scout\n\nMethod cards loaded: supply-chain-mapping.\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("WORKER_SOURCE_TRACE_MISSING", [issue.code for issue in result.failures])
+
+    def test_scout_output_with_action_class_language_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_completed_loop_workspace(workspace)
+            write_valid_machine_ledgers(workspace)
+            (workspace / "scouts" / "loop_1_scout.md").write_text(
+                "# Scout\n\nMethod cards loaded: supply-chain-mapping.\n\nSources consulted: company filing.\n\nAction Class: buy.\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="dossier"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("SCOUT_FORBIDDEN_CONCLUSION", [issue.code for issue in result.failures])
+
+
 if __name__ == "__main__":
     unittest.main()

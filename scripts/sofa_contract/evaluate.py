@@ -31,6 +31,22 @@ REPORT_REQUIREMENTS = {
 DISPATCH_DELIVERY_REQUIRED_FIELDS = ("dispatch_id", "loop_id", "role", "mechanism", "delivery_path", "status")
 SUPPORTED_DISPATCH_MECHANISMS = ("host_subagent", "native_subagent", "degraded_single_agent")
 SUBAGENT_DISPATCH_MECHANISMS = ("host_subagent", "native_subagent")
+SOURCE_TRACE_MARKERS = (
+    "Search Exhaustion Report",
+    "Sources consulted",
+    "Source Pack",
+    "Evidence Sources",
+    "检索",
+    "来源",
+)
+SCOUT_FORBIDDEN_TERMS = (
+    "Action Class",
+    "BUY",
+    "SELL",
+    "Strong Buy",
+    "强烈买入",
+    "卖出",
+)
 
 
 def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> ContractResult:
@@ -41,6 +57,7 @@ def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> 
     _check_state_workflow_consistency(workspace, state, workflow_text, result)
     _check_search_log(workspace, state, result)
     _check_dispatch_log(workspace, result)
+    _check_worker_outputs(workspace, result)
     if _requires_final_report(profile):
         _check_final_report(workspace, profile, result)
     return result
@@ -256,6 +273,31 @@ def _dispatch_record_counts_as_delivery(record: dict) -> bool:
 
 def _missing_dispatch_delivery_fields(record: dict) -> list[str]:
     return [field for field in DISPATCH_DELIVERY_REQUIRED_FIELDS if not record.get(field)]
+
+
+def _check_worker_outputs(workspace: Path, result: ContractResult) -> None:
+    for path in find_worker_outputs(workspace):
+        rel = path.relative_to(workspace).as_posix()
+        text = path.read_text(encoding="utf-8")
+        if "Method cards loaded" not in text and "Method Cards Loaded" not in text:
+            result.fail(
+                code="WORKER_METHOD_CARDS_MISSING",
+                message="worker output must declare Method cards loaded",
+                path=rel,
+            )
+        if not any(marker in text for marker in SOURCE_TRACE_MARKERS):
+            result.fail(
+                code="WORKER_SOURCE_TRACE_MISSING",
+                message="worker output must include a source or search trace section",
+                path=rel,
+                evidence=", ".join(SOURCE_TRACE_MARKERS),
+            )
+        if rel.startswith("scouts/") and any(term in text for term in SCOUT_FORBIDDEN_TERMS):
+            result.fail(
+                code="SCOUT_FORBIDDEN_CONCLUSION",
+                message="Scout output must not contain action-class style conclusion language",
+                path=rel,
+            )
 
 
 def _check_final_report(workspace: Path, profile: ContractProfile, result: ContractResult) -> None:
