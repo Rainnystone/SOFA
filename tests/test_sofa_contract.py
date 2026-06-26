@@ -166,6 +166,38 @@ def write_valid_dispatch_log(workspace: Path):
     )
 
 
+def write_workflow_with_subagent_dispatch_claim(workspace: Path):
+    (workspace / "research_workflow.md").write_text(
+        "\n".join(
+            [
+                "# Research Workflow",
+                "",
+                "## Stage Progress",
+                "| Stage | Status | Output Files | Notes |",
+                "|-------|--------|--------------|-------|",
+                "| Stage 0: Intake + Framing | complete | | |",
+                "| Stage 1: Provisional Frontier Plan | complete | | |",
+                "| Stage 2: Evidence Frontier Loops | complete | evidence_ledger.md | |",
+                "",
+                "## Evidence Loop Tracker",
+                "| Loop | Status | Notes |",
+                "|------|--------|-------|",
+                "| Loop 1 | complete | main-thread evidence only |",
+                "",
+                "## Subagent Dispatch Log",
+                "| Dispatch ID | Loop | Role | Mechanism | Delivery Path | Status |",
+                "|-------------|------|------|-----------|---------------|--------|",
+                "| dispatch_0001 | loop_1 | scout | host_subagent | scouts/loop_1_scout.md | delivered |",
+                "",
+                "## Decision Log",
+                "- Continue evidence loop.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 class TestWorkspaceStateAndReportContract(unittest.TestCase):
     def test_early_stage_transition_does_not_require_final_report(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -271,6 +303,45 @@ class TestWorkspaceStateAndReportContract(unittest.TestCase):
 
             self.assertNotIn("SECTOR_REPORT_FORBIDDEN_ACTION_LANGUAGE", [issue.code for issue in result.failures])
             self.assertTrue(result.passed)
+
+    def test_split_report_fragments_do_not_satisfy_final_report_contract(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace)
+            reports = workspace / "reports"
+            reports.mkdir()
+            (reports / "summary.md").write_text(
+                "\n".join(
+                    [
+                        "# Final Report Summary",
+                        "Conclusion: research status is constructive watch.",
+                        "Confidence: medium.",
+                        "Time horizon: 12 months.",
+                        "Top supporting evidence: evidence_ledger.md#loop-1.",
+                        "Strongest counter evidence: customer qualification risk.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (reports / "appendix.md").write_text(
+                "\n".join(
+                    [
+                        "# Final Report Appendix",
+                        "Evidence map: evidence_ledger.md.",
+                        "Financial bridge: revenue bridge is constrained by qualification timing.",
+                        "Catalyst clock: next filing and customer update.",
+                        "Red-team results: unresolved substitution risk.",
+                        "Invalidation triggers: lost customer qualification.",
+                        "Watch protocol: monitor customer updates.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="final_report"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("FINAL_REPORT_MISSING_CONCLUSION", [issue.code for issue in result.failures])
 
 
 def write_completed_loop_workspace(workspace: Path):
@@ -771,6 +842,97 @@ class TestSearchAndDispatchContract(unittest.TestCase):
             self.assertFalse(result.passed)
             self.assertIn("SEARCH_LOG_MISSING", [issue.code for issue in result.failures])
             self.assertNotIn("LEGACY_SEARCH_LOG_USED", [issue.code for issue in result.warnings])
+
+    def test_workflow_subagent_dispatch_claim_requires_machine_delivery_proof(self):
+        cases = [
+            ("missing", None),
+            ("empty", ""),
+            (
+                "no_delivery",
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "scout",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "scouts/loop_1_scout.md",
+                        "status": "planned",
+                    }
+                )
+                + "\n",
+            ),
+        ]
+        for label, dispatch_text in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace = Path(temp_dir)
+                    write_base_workspace(workspace)
+                    write_workflow_with_subagent_dispatch_claim(workspace)
+                    if dispatch_text is not None:
+                        (workspace / "dispatch_log.jsonl").write_text(dispatch_text, encoding="utf-8")
+
+                    result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="stage_transition"))
+
+                    self.assertFalse(result.passed)
+                    self.assertIn("DISPATCH_PROOF_MISSING", [issue.code for issue in result.failures])
+
+    def test_workflow_tables_outside_subagent_dispatch_log_do_not_require_dispatch_proof(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace)
+            (workspace / "research_workflow.md").write_text(
+                "\n".join(
+                    [
+                        "# Research Workflow",
+                        "",
+                        "## Stage Progress",
+                        "| Stage | Status | Output Files | Notes |",
+                        "|-------|--------|--------------|-------|",
+                        "| Stage 2: Evidence Frontier Loops | complete | scouts/loop_1_scout.md | subagent delivered |",
+                        "",
+                        "## Evidence Loop Tracker",
+                        "| Loop | Status | Notes |",
+                        "|------|--------|-------|",
+                        "| Loop 1 | complete | host_subagent delivered |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="stage_transition"))
+
+            self.assertTrue(result.passed, [issue.code for issue in result.failures])
+
+    def test_malformed_dispatch_jsonl_returns_structured_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace)
+            write_workflow_with_subagent_dispatch_claim(workspace)
+            (workspace / "dispatch_log.jsonl").write_text("{not valid json\n", encoding="utf-8")
+
+            try:
+                result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="stage_transition"))
+            except Exception as exc:
+                self.fail(f"evaluate_workspace raised {type(exc).__name__}: {exc}")
+
+            self.assertFalse(result.passed)
+            self.assertIn("DISPATCH_LOG_INVALID", [issue.code for issue in result.failures])
+
+    def test_non_object_dispatch_jsonl_returns_structured_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace)
+            write_workflow_with_subagent_dispatch_claim(workspace)
+            (workspace / "dispatch_log.jsonl").write_text(json.dumps(["not", "an", "object"]) + "\n", encoding="utf-8")
+
+            try:
+                result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="stage_transition"))
+            except Exception as exc:
+                self.fail(f"evaluate_workspace raised {type(exc).__name__}: {exc}")
+
+            self.assertFalse(result.passed)
+            self.assertIn("DISPATCH_LOG_INVALID", [issue.code for issue in result.failures])
 
 
 def write_valid_machine_ledgers(workspace: Path):

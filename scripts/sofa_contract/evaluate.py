@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -56,7 +57,7 @@ def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> 
     workflow_text = read_text_file(workspace / "research_workflow.md")
     _check_state_workflow_consistency(workspace, state, workflow_text, result)
     _check_search_log(workspace, state, result)
-    _check_dispatch_log(workspace, result)
+    _check_dispatch_log(workspace, workflow_text, result)
     _check_worker_outputs(workspace, result)
     if _requires_final_report(profile):
         _check_final_report(workspace, profile, result)
@@ -184,24 +185,43 @@ def _check_search_log(workspace: Path, state: dict | None, result: ContractResul
     )
 
 
-def _read_dispatch_records(workspace: Path) -> list[dict]:
-    return [record for _line_number, record in iter_jsonl_records(workspace / "dispatch_log.jsonl")]
+def _read_dispatch_records(workspace: Path, result: ContractResult) -> list[dict] | None:
+    try:
+        return [record for _line_number, record in iter_jsonl_records(workspace / "dispatch_log.jsonl")]
+    except (json.JSONDecodeError, ValueError) as exc:
+        result.fail(
+            code="DISPATCH_LOG_INVALID",
+            message="dispatch_log.jsonl must be valid JSONL with one object per non-blank line",
+            path="dispatch_log.jsonl",
+            evidence=str(exc),
+        )
+        return None
 
 
-def _check_dispatch_log(workspace: Path, result: ContractResult) -> None:
+def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: ContractResult) -> None:
     worker_outputs = find_worker_outputs(workspace)
+    workflow_claims_delivery = _workflow_claims_subagent_delivery(workflow_text)
     dispatch_path = workspace / "dispatch_log.jsonl"
     if not dispatch_path.exists():
-        if not worker_outputs:
+        if not worker_outputs and not workflow_claims_delivery:
             return
         result.fail(
-            code="DISPATCH_LOG_MISSING",
-            message="worker outputs require dispatch_log.jsonl or approved degraded-mode records",
+            code="DISPATCH_PROOF_MISSING" if workflow_claims_delivery else "DISPATCH_LOG_MISSING",
+            message="worker outputs and workflow dispatch claims require dispatch_log.jsonl or approved degraded-mode records",
             path="dispatch_log.jsonl",
-            evidence=f"{len(worker_outputs)} worker output file(s)",
+            evidence=_dispatch_missing_evidence(worker_outputs, workflow_claims_delivery),
         )
         return
-    records = _read_dispatch_records(workspace)
+    records = _read_dispatch_records(workspace, result)
+    if records is None:
+        return
+    if workflow_claims_delivery and not any(_dispatch_record_counts_as_delivery(record) for record in records):
+        result.fail(
+            code="DISPATCH_PROOF_MISSING",
+            message="workflow Subagent Dispatch Log claims delivered subagent work without machine delivery proof",
+            path="dispatch_log.jsonl",
+            evidence="no delivered host/native subagent record or approved degraded delivery record",
+        )
     for record in records:
         mechanism = str(record.get("mechanism", "")).lower()
         label = str(record.get("label", "")).lower()
@@ -256,6 +276,67 @@ def _check_dispatch_log(workspace: Path, result: ContractResult) -> None:
                 path=rel,
                 evidence="dispatch_log.jsonl delivery_path mismatch",
             )
+
+
+def _dispatch_missing_evidence(worker_outputs: list[Path], workflow_claims_delivery: bool) -> str:
+    evidence = []
+    if worker_outputs:
+        evidence.append(f"{len(worker_outputs)} worker output file(s)")
+    if workflow_claims_delivery:
+        evidence.append("research_workflow.md Subagent Dispatch Log delivered row")
+    return "; ".join(evidence)
+
+
+def _workflow_claims_subagent_delivery(workflow_text: str | None) -> bool:
+    section = _markdown_section(workflow_text, "Subagent Dispatch Log")
+    if not section:
+        return False
+    after_separator = False
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            after_separator = False
+            continue
+        cells = [cell.strip().lower() for cell in stripped.strip("|").split("|")]
+        if _is_markdown_table_separator(cells):
+            after_separator = True
+            continue
+        if not after_separator:
+            continue
+        row = " ".join(cells)
+        if "delivered" in row and (
+            "subagent" in row or "host_subagent" in row or "native_subagent" in row
+        ):
+            return True
+    return False
+
+
+def _markdown_section(markdown_text: str | None, heading: str) -> str | None:
+    if not markdown_text:
+        return None
+    heading_level: int | None = None
+    section_lines: list[str] = []
+    for line in markdown_text.splitlines():
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if match:
+            level = len(match.group(1))
+            title = match.group(2).strip().lower()
+            if heading_level is not None and level <= heading_level:
+                break
+            if heading_level is None and title == heading.lower():
+                heading_level = level
+                continue
+        if heading_level is not None:
+            section_lines.append(line)
+    if heading_level is None:
+        return None
+    return "\n".join(section_lines)
+
+
+def _is_markdown_table_separator(cells: list[str]) -> bool:
+    if not cells:
+        return False
+    return all(cell and set(cell) <= {"-", ":"} and "-" in cell for cell in cells)
 
 
 def _dispatch_record_counts_as_delivery(record: dict) -> bool:
@@ -317,22 +398,39 @@ def _check_final_report(workspace: Path, profile: ContractProfile, result: Contr
             path="reports/",
         )
         return
-    combined = "\n\n".join(path.read_text(encoding="utf-8") for path in reports).lower()
-    for label, markers in REPORT_REQUIREMENTS.items():
-        if not any(marker.lower() in combined for marker in markers):
+    report_texts = [(path, path.read_text(encoding="utf-8").lower()) for path in reports]
+    complete_reports = [
+        (path, text)
+        for path, text in report_texts
+        if not _missing_final_report_requirements(text)
+    ]
+    if complete_reports:
+        report_path, report_text = complete_reports[0]
+        if profile.mode == "sector" and _contains_sector_action_language(report_text):
             result.fail(
-                code=f"FINAL_REPORT_MISSING_{label}",
-                message=f"final report is missing required area: {label.lower().replace('_', ' ')}",
-                path="reports/",
-                evidence=", ".join(markers),
+                code="SECTOR_REPORT_FORBIDDEN_ACTION_LANGUAGE",
+                message="Sector Hunt output must not contain action-class style conclusions",
+                path=report_path.relative_to(workspace).as_posix(),
+                evidence="found buy/sell/action class language",
             )
-    if profile.mode == "sector" and _contains_sector_action_language(combined):
+        return
+    best_path, best_text = min(report_texts, key=lambda item: len(_missing_final_report_requirements(item[1])))
+    for label in _missing_final_report_requirements(best_text):
+        markers = REPORT_REQUIREMENTS[label]
         result.fail(
-            code="SECTOR_REPORT_FORBIDDEN_ACTION_LANGUAGE",
-            message="Sector Hunt output must not contain action-class style conclusions",
-            path="reports/",
-            evidence="found buy/sell/action class language",
+            code=f"FINAL_REPORT_MISSING_{label}",
+            message=f"final report is missing required area: {label.lower().replace('_', ' ')}",
+            path=best_path.relative_to(workspace).as_posix(),
+            evidence=", ".join(markers),
         )
+
+
+def _missing_final_report_requirements(report_text: str) -> list[str]:
+    missing = []
+    for label, markers in REPORT_REQUIREMENTS.items():
+        if not any(marker.lower() in report_text for marker in markers):
+            missing.append(label)
+    return missing
 
 
 def _contains_sector_action_language(text: str) -> bool:
