@@ -56,21 +56,7 @@ class TestWorkspaceScripts(unittest.TestCase):
                 capture_output=True,
             )
 
-            expected_paths = [
-                "research_workflow.md",
-                "evidence_ledger.md",
-                "claim_ledger.md",
-                "search_log.md",
-                "search_log.jsonl",
-                "dispatch_log.jsonl",
-                "state.json",
-                "frontier_registry.json",
-                "capability_report.md",
-                "maps/dependency_ladder.md",
-                "coverage",
-                "reports",
-                "dive_packets",
-            ]
+            expected_paths = artifact_contract_for_mode("sector").all_scaffold_paths()
             missing = [
                 path for path in expected_paths if not (workspace / path).exists()
             ]
@@ -120,6 +106,9 @@ class TestWorkspaceScripts(unittest.TestCase):
 
             self.assertNotIn("coverage/", result.stdout)
             self.assertFalse((workspace / "coverage").exists())
+            self.assertNotIn(
+                "coverage", artifact_contract_for_mode("ticker").all_scaffold_paths()
+            )
 
     def test_init_workspace_preserves_existing_state_json_and_reports_skipped(self):
         with tempfile.TemporaryDirectory() as temp_dir:
