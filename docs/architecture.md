@@ -86,6 +86,7 @@ Scripts enforce rules that should not depend on agent memory:
 | Script | Deterministic responsibility |
 |--------|------------------------------|
 | `init_workspace.py` | Create a workspace with required files, registry, and managed Markdown blocks. |
+| `workspace_contract/` | Own canonical workspace artifact, scaffold, managed-block, and worker-output path facts consumed by setup and validators. |
 | `frontier_lifecycle.py` | Pure lifecycle state machine, loop binding, review due checks, portfolio limits, and Markdown rendering. |
 | `frontier_review.py` | Main-thread CLI for lifecycle mutations and managed review log updates. |
 | `loop_enforcer.py` | Validate evidence ledger loop headers against stable frontier IDs. |
@@ -100,6 +101,8 @@ The main analyst thread may decide whether a frontier should continue or retire.
 ### Compliance Contract
 
 `scripts/sofa_contract/` is the deterministic authority for workspace completion checks shared by gate checks, dossier validation, report readiness, search logging, dispatch logging, and worker-output compliance. Existing CLI entry points keep their names, but same-purpose rules call this module instead of carrying duplicate rule tables. Markdown workflow files remain human-readable mirrors; machine-readable JSON and JSONL files are the authority where the contract defines one.
+
+`scripts/workspace_contract/` is the deterministic source for workspace shape facts. It does not decide readiness; it gives setup and validation callers one place to ask which files, folders, ledgers, managed blocks, and worker-output paths belong to a SOFA workspace.
 
 ## Agent And Subagent Boundary
 
