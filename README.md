@@ -53,7 +53,7 @@ SOFA is built as a harness instead. The user still starts from one entrypoint, b
 | Private method cards | Give subagents specific methods for supply-chain mapping, customer discovery, financial bridge, and red-team work. | The user does not directly call half-context methods; the main workflow controls when and why each method is used. |
 | Deterministic gates | Run scripts for workspace setup, stage checks, loop enforcement, and dossier validation. | Important checks are handled by code, not by the agent's memory or confidence. |
 | Durable workspace | Writes evidence, claims, searches, worker outputs, scorecards, and reports to files. | The research can be reviewed, resumed, challenged, and improved later. |
-| Host adapters | Map the same core workflow to Codex, Claude Code, and generic agent environments. | SOFA is not tied to one vendor's tool names or one runtime. |
+| Host adapters | Map the same core workflow to Codex, Claude Code, ZCode, Qoder, and generic agent environments. | SOFA is not tied to one vendor's tool names or one runtime. |
 
 ## How The Agent Loop Works
 
@@ -158,5 +158,7 @@ SOFA supports research. It is not investment advice. It does not trade, replace 
 - [Codemap](docs/codemap.md)
 - [Codex adapter](docs/adapters/codex.md)
 - [Claude Code adapter](docs/adapters/claude-code.md)
+- [ZCode adapter](docs/adapters/zcode.md)
+- [Qoder-compatible adapter](docs/adapters/qoder-work.md)
 - [Generic agent adapter](docs/adapters/generic-agent.md)
 - [License](LICENSE)
