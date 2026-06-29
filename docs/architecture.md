@@ -127,6 +127,7 @@ See:
 - [Claude Code adapter](adapters/claude-code.md)
 - [Generic agent adapter](adapters/generic-agent.md)
 - [Qoder-compatible adapter](adapters/qoder-work.md)
+- [ZCode adapter](adapters/zcode.md)
 
 ## Extension Points
 

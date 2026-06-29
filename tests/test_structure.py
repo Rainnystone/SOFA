@@ -68,6 +68,7 @@ class TestSofaStructure(unittest.TestCase):
             "docs/adapters/claude-code.md",
             "docs/adapters/qoder-work.md",
             "docs/adapters/generic-agent.md",
+            "docs/adapters/zcode.md",
             "skills/sofa-analyze/SKILL.md",
             "skills/sofa-analyze/references/workflow-guide.md",
             "skills/sofa-analyze/references/ticker-dive-guide.md",
