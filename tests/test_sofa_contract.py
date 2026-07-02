@@ -1158,7 +1158,7 @@ class TestWorkerOutputContract(unittest.TestCase):
             (workspace / "maps").mkdir()
             (workspace / "maps" / "mapping_1.md").write_text(
                 "# Sector Mapper\n\n"
-                "Method cards loaded: supply-chain-mapping.\n\n"
+                "Method cards loaded: supply-chain-mapping, customer-graph-discovery.\n\n"
                 "Sources consulted: company filing.\n\n"
                 "Action Class: buy.\n",
                 encoding="utf-8",
