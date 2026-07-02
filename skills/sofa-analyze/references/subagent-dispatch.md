@@ -69,16 +69,18 @@ Do not overwrite prior worker files. Use loop, round, or version identifiers in 
 
 ## Role Reference
 
+This table is a dispatch guide summary. The authoritative worker role facts for prompt paths, delivery folders, method-card expectations, source-trace rules, required output markers, forbidden worker-output classes, and dispatch aliases live in `../../../scripts/worker_role_catalog/`.
+
 | Role | Prompt | Mode | Delivery |
 |------|--------|------|----------|
 | Frontier Scout | `scripts/prompts/scout_prompt.md` | Ticker | `scouts/` |
 | Challenge Probe | `scripts/prompts/challenge_prompt.md` | Ticker | `challenges/` |
 | Sector Mapper | `scripts/prompts/sector_mapper_prompt.md` | Sector | `maps/` |
 | Coverage Challenge | `scripts/prompts/coverage_challenge_prompt.md` | Sector | `coverage/` |
-| Supply Chain Mapper | `scripts/prompts/supply_chain_prompt.md` | Both | `maps/` |
-| Customer Graph Mapper | `scripts/prompts/customer_graph_prompt.md` | Both | `maps/` |
-| Financial Bridge Analyst | `scripts/prompts/financial_bridge_prompt.md` | Ticker or Ultra | `financials/` |
-| Red Team | `scripts/prompts/red_team_prompt.md` | Ticker or Ultra | `redteam/` |
+| Supply Chain Mapper | `scripts/prompts/supply_chain_prompt.md` | Ticker / Sector / Ultra | `maps/` |
+| Customer Graph Mapper | `scripts/prompts/customer_graph_prompt.md` | Ticker / Sector / Ultra | `maps/` |
+| Financial Bridge Analyst | `scripts/prompts/financial_bridge_prompt.md` | Ticker / Sector / Ultra | `financials/` |
+| Red Team | `scripts/prompts/red_team_prompt.md` | Ticker / Sector / Ultra | `redteam/` |
 
 Before dispatching any role, read the standalone prompt file. Do not reconstruct a worker prompt from memory or from this summary.
 

@@ -5,6 +5,15 @@ import re
 from pathlib import Path
 
 from workspace_contract import core_required_files
+from worker_role_catalog import (
+    SOURCE_TRACE_MARKERS,
+    all_worker_roles,
+    forbidden_output_violations,
+    has_required_output_marker,
+    has_source_trace,
+    normalize_role_slug,
+    role_for_slug,
+)
 
 from .result import ContractProfile, ContractResult
 from .workspace import (
@@ -50,22 +59,6 @@ SECTOR_REPORT_REQUIREMENTS = {
 DISPATCH_DELIVERY_REQUIRED_FIELDS = ("dispatch_id", "loop_id", "role", "mechanism", "delivery_path", "status")
 SUPPORTED_DISPATCH_MECHANISMS = ("host_subagent", "native_subagent", "degraded_single_agent")
 SUBAGENT_DISPATCH_MECHANISMS = ("host_subagent", "native_subagent")
-SOURCE_TRACE_MARKERS = (
-    "Search Exhaustion Report",
-    "Sources consulted",
-    "Source Pack",
-    "Evidence Sources",
-    "检索",
-    "来源",
-)
-SOURCE_TRACE_LABEL_PATTERN = re.compile(
-    r"^(?:#{1,6}\s*)?(?:Search Exhaustion Report|Sources consulted|Source Pack|Evidence Sources|检索|来源)\s*(?::|：|-|$)",
-    re.IGNORECASE,
-)
-SCOUT_FORBIDDEN_PATTERN = re.compile(
-    r"(?:\baction\s+class\b|(?<![\w-])strong\s+buy(?![\w-])|(?<![\w-])(?:buy|sell)(?![\w-])|强烈买入|卖出)",
-    re.IGNORECASE,
-)
 SECTOR_FORBIDDEN_ACTION_PATTERN = re.compile(
     r"(?:"
     r"\baction\s+class\b|"
@@ -98,8 +91,8 @@ def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> 
     workflow_text = read_text_file(workspace / "research_workflow.md")
     _check_state_workflow_consistency(workspace, state, workflow_text, result)
     _check_search_log(workspace, state, result)
-    _check_dispatch_log(workspace, workflow_text, result)
-    _check_worker_outputs(workspace, result)
+    _check_dispatch_log(workspace, workflow_text, profile, result)
+    _check_worker_outputs(workspace, profile, result)
     if _requires_final_report(profile):
         _check_final_report(workspace, profile, result)
     return result
@@ -262,7 +255,12 @@ def _read_dispatch_records(workspace: Path, result: ContractResult) -> list[dict
         return None
 
 
-def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: ContractResult) -> None:
+def _check_dispatch_log(
+    workspace: Path,
+    workflow_text: str | None,
+    profile: ContractProfile,
+    result: ContractResult,
+) -> None:
     worker_outputs = find_worker_outputs(workspace)
     workflow_claims_delivery = _workflow_claims_subagent_delivery(workflow_text)
     dispatch_path = workspace / "dispatch_log.jsonl"
@@ -285,6 +283,13 @@ def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: Cont
             message="workflow Subagent Dispatch Log claims delivered subagent work without machine delivery proof",
             path="dispatch_log.jsonl",
             evidence="no delivered host/native subagent record or approved degraded delivery record",
+        )
+    for duplicate_path, dispatch_ids in _duplicate_delivered_paths(workspace, records).items():
+        result.fail(
+            code="DISPATCH_DELIVERY_PATH_DUPLICATE",
+            message="delivered dispatch records must not reuse the same delivery_path",
+            path="dispatch_log.jsonl",
+            evidence=f"{duplicate_path}: {', '.join(dispatch_ids)}",
         )
     for record in records:
         mechanism = str(record.get("mechanism", "")).lower()
@@ -314,6 +319,16 @@ def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: Cont
                         path="dispatch_log.jsonl",
                         evidence=mechanism,
                     )
+                else:
+                    role_issue = _dispatch_role_delivery_issue(record, normalized_delivery_path, profile.mode)
+                    if role_issue is not None:
+                        code, message, evidence = role_issue
+                        result.fail(
+                            code=code,
+                            message=message,
+                            path="dispatch_log.jsonl",
+                            evidence=evidence,
+                        )
         if mechanism == "degraded_single_agent" and record.get("degraded_mode_approved") is not True:
             result.fail(
                 code="DEGRADED_MODE_NOT_APPROVED",
@@ -365,6 +380,81 @@ def _normalize_delivery_path(workspace: Path, delivery_path) -> str | None:
         return resolved.relative_to(workspace.resolve()).as_posix()
     except (ValueError, OSError):
         return None
+
+
+def _dispatch_role_delivery_issue(
+    record: dict,
+    normalized_delivery_path: str,
+    profile_mode: str,
+) -> tuple[str, str, str] | None:
+    try:
+        role_slug = normalize_role_slug(record.get("role"), delivery_path=normalized_delivery_path)
+        role = role_for_slug(role_slug)
+    except ValueError as exc:
+        return (
+            "DISPATCH_ROLE_DELIVERY_MISMATCH",
+            "delivered dispatch record role must match its delivery_path",
+            str(exc),
+        )
+    if profile_mode not in role.modes:
+        return (
+            "DISPATCH_ROLE_MODE_MISMATCH",
+            "delivered dispatch record role is not allowed for this workspace mode",
+            f"{role.slug} supports modes: {', '.join(role.modes)}; workspace mode: {profile_mode}",
+        )
+    return None
+
+
+def _duplicate_delivered_paths(workspace: Path, records: list[dict]) -> dict[str, list[str]]:
+    dispatch_ids_by_path: dict[str, list[str]] = {}
+    for record in records:
+        if record.get("status") != "delivered":
+            continue
+        if not record.get("delivery_path"):
+            continue
+        normalized_path = _normalize_delivery_path(workspace, record.get("delivery_path", ""))
+        if normalized_path is None:
+            continue
+        dispatch_ids_by_path.setdefault(normalized_path, []).append(str(record.get("dispatch_id", "")))
+    return {
+        path: dispatch_ids
+        for path, dispatch_ids in dispatch_ids_by_path.items()
+        if len(dispatch_ids) > 1
+    }
+
+
+def _delivered_roles_by_path(workspace: Path, profile_mode: str) -> dict[str, str]:
+    dispatch_path = workspace / "dispatch_log.jsonl"
+    if not dispatch_path.exists():
+        return {}
+    try:
+        records = [record for _line_number, record in iter_jsonl_records(dispatch_path)]
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+    roles_by_path: dict[str, str] = {}
+    seen_paths: set[str] = set()
+    for record in records:
+        if not _dispatch_record_counts_as_delivery(record):
+            continue
+        normalized_path = _normalize_delivery_path(workspace, record.get("delivery_path", ""))
+        if normalized_path is None:
+            continue
+        if normalized_path in seen_paths:
+            continue
+        seen_paths.add(normalized_path)
+        try:
+            role_slug = normalize_role_slug(
+                record.get("role"),
+                delivery_path=normalized_path,
+            )
+            role = role_for_slug(role_slug)
+        except ValueError:
+            continue
+        if profile_mode not in role.modes:
+            continue
+        roles_by_path[normalized_path] = role.slug
+    return roles_by_path
 
 
 def _dispatch_missing_evidence(worker_outputs: list[Path], workflow_claims_delivery: bool) -> str:
@@ -442,55 +532,80 @@ def _missing_dispatch_delivery_fields(record: dict) -> list[str]:
     return [field for field in DISPATCH_DELIVERY_REQUIRED_FIELDS if not record.get(field)]
 
 
-def _check_worker_outputs(workspace: Path, result: ContractResult) -> None:
+def _check_worker_outputs(workspace: Path, profile: ContractProfile, result: ContractResult) -> None:
+    delivered_roles = _delivered_roles_by_path(workspace, profile.mode)
     for path in find_worker_outputs(workspace):
         rel = path.relative_to(workspace).as_posix()
         text = path.read_text(encoding="utf-8")
-        if "Method cards loaded" not in text and "Method Cards Loaded" not in text:
+        candidate_roles = _candidate_worker_roles_for_output(rel)
+        role = _worker_role_for_output(rel, delivered_roles, candidate_roles)
+
+        if not any(
+            has_required_output_marker(text, marker)
+            for marker in _required_output_markers_for_output(role, candidate_roles)
+        ):
             result.fail(
                 code="WORKER_METHOD_CARDS_MISSING",
                 message="worker output must declare Method cards loaded",
                 path=rel,
             )
-        requires_source_trace = _requires_source_trace(rel)
-        is_scout = rel.startswith("scouts/")
-        if not _has_source_trace(text):
-            if requires_source_trace:
+        has_trace = has_source_trace(text, candidate_roles[0])
+        if not has_trace:
+            if _requires_source_trace(role, candidate_roles):
                 result.fail(
                     code="WORKER_SOURCE_TRACE_MISSING",
                     message="search worker output must include a source or search trace section",
                     path=rel,
                     evidence=", ".join(SOURCE_TRACE_MARKERS),
                 )
-            else:
-                # Analysis roles (challenge / red_team / coverage / financials)
-                # reason over claims the main thread pastes in; their prompts
-                # require Method Cards Loaded but no search-trace heading. Treat
-                # a missing trace as evidence-quality, not a contract block.
+            elif role is not None:
                 result.warn(
                     code="WORKER_SOURCE_TRACE_RECOMMENDED",
                     message="worker output is missing a source or search trace section (recommended for analysis roles)",
                     path=rel,
                     evidence=", ".join(SOURCE_TRACE_MARKERS),
                 )
-        if is_scout and _has_scout_forbidden_language(text):
-            result.fail(
-                code="SCOUT_FORBIDDEN_CONCLUSION",
-                message="Scout output must not contain action-class style conclusion language",
-                path=rel,
-            )
+
+        if role is not None:
+            for issue in forbidden_output_violations(role, text):
+                result.fail(
+                    code=issue.issue_code,
+                    message=issue.message,
+                    path=rel,
+                )
 
 
-def _has_source_trace(text: str) -> bool:
-    return any(SOURCE_TRACE_LABEL_PATTERN.search(line.strip()) for line in text.splitlines())
+def _candidate_worker_roles_for_output(rel: str):
+    return tuple(role for role in all_worker_roles() if role.matches_delivery_path(rel))
 
 
-def _requires_source_trace(rel: str) -> bool:
-    return rel.startswith(("scouts/", "maps/"))
+def _required_output_markers_for_output(role, candidate_roles) -> tuple[str, ...]:
+    if role is not None:
+        return role.required_output_markers
+    if not candidate_roles:
+        return ()
+    shared_markers = set(candidate_roles[0].required_output_markers)
+    for candidate_role in candidate_roles[1:]:
+        shared_markers &= set(candidate_role.required_output_markers)
+    return tuple(marker for marker in candidate_roles[0].required_output_markers if marker in shared_markers)
 
 
-def _has_scout_forbidden_language(text: str) -> bool:
-    return SCOUT_FORBIDDEN_PATTERN.search(text) is not None
+def _requires_source_trace(role, candidate_roles) -> bool:
+    if role is not None:
+        return role.requires_source_trace
+    return bool(candidate_roles) and all(candidate_role.requires_source_trace for candidate_role in candidate_roles)
+
+
+def _worker_role_for_output(rel: str, delivered_roles: dict[str, str], candidate_roles):
+    role_slug = delivered_roles.get(rel)
+    if role_slug is not None:
+        try:
+            return role_for_slug(normalize_role_slug(role_slug, delivery_path=rel))
+        except ValueError:
+            return None
+    if len(candidate_roles) == 1:
+        return candidate_roles[0]
+    return None
 
 
 def _check_final_report(workspace: Path, profile: ContractProfile, result: ContractResult) -> None:
