@@ -23,16 +23,20 @@ SOURCE_TRACE_LABEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+ENGLISH_ACTION_TERMS = r"(?:strong\s+buy|buy|sell|hold|long|short|accumulate|reduce)"
+CHINESE_ACTION_TERMS = r"(?:强烈买入|买入|卖出|持有|增持|减持)"
 ACTION_CLASS_PATTERN = re.compile(
-    r"(?:"
-    r"\baction\s+class\b|"
-    r"\btarget\s+price\b|"
-    r"\b(?:recommendation|rating|conclusion)\b\s*(?::|：|-)\s*"
-    r"(?:strong\s+buy|buy|sell|hold|long|short|accumulate|reduce|强烈买入|买入|卖出|持有|增持|减持)|"
-    r"(?<![\w-])strong\s+buy(?![\w-])|"
-    r"(?<![\w-])(?:buy|sell)(?![\w-])|"
-    r"强烈买入|买入|卖出|持有|增持|减持|目标价"
-    r")",
+    rf"(?:"
+    rf"\baction\s+class\b|"
+    rf"\btarget\s+price\b|"
+    rf"\b(?:recommendation|rating|conclusion)\b\s*(?::|：|-)\s*{ENGLISH_ACTION_TERMS}(?![\w-])|"
+    rf"(?<![\w-]){ENGLISH_ACTION_TERMS}(?![\w-])\s+(?:rating|recommendation)|"
+    rf"(?<![\w-])strong\s+buy(?![\w-])|"
+    rf"(?:投资建议|操作建议|评级|结论)\s*(?::|：|-)?\s*{CHINESE_ACTION_TERMS}|"
+    rf"建议\s*{CHINESE_ACTION_TERMS}|"
+    rf"{CHINESE_ACTION_TERMS}\s*(?:评级|建议)|"
+    rf"目标价"
+    rf")",
     re.IGNORECASE,
 )
 
@@ -197,7 +201,14 @@ WORKER_ROLES = (
     WorkerRole(
         slug="financial_bridge",
         display_label="Financial Bridge",
-        dispatch_aliases=("financial", "financial bridge", "financial screen", "financial_bridge", "financials"),
+        dispatch_aliases=(
+            "financial",
+            "financial bridge",
+            "financial bridge analyst",
+            "financial screen",
+            "financial_bridge",
+            "financials",
+        ),
         prompt_template="scripts/prompts/financial_bridge_prompt.md",
         modes=("ticker", "sector", "ultra"),
         delivery_folder="financials",
@@ -211,7 +222,15 @@ WORKER_ROLES = (
     WorkerRole(
         slug="red_team",
         display_label="Red Team",
-        dispatch_aliases=("redteam", "red team", "red_team", "redteam analyst", "thesis-revision", "thesis_revision"),
+        dispatch_aliases=(
+            "redteam",
+            "red team",
+            "red team analyst",
+            "red_team",
+            "redteam analyst",
+            "thesis-revision",
+            "thesis_revision",
+        ),
         prompt_template="scripts/prompts/red_team_prompt.md",
         modes=("ticker", "sector", "ultra"),
         delivery_folder="redteam",

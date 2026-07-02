@@ -91,8 +91,8 @@ def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> 
     workflow_text = read_text_file(workspace / "research_workflow.md")
     _check_state_workflow_consistency(workspace, state, workflow_text, result)
     _check_search_log(workspace, state, result)
-    _check_dispatch_log(workspace, workflow_text, result)
-    _check_worker_outputs(workspace, result)
+    _check_dispatch_log(workspace, workflow_text, profile, result)
+    _check_worker_outputs(workspace, profile, result)
     if _requires_final_report(profile):
         _check_final_report(workspace, profile, result)
     return result
@@ -255,7 +255,12 @@ def _read_dispatch_records(workspace: Path, result: ContractResult) -> list[dict
         return None
 
 
-def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: ContractResult) -> None:
+def _check_dispatch_log(
+    workspace: Path,
+    workflow_text: str | None,
+    profile: ContractProfile,
+    result: ContractResult,
+) -> None:
     worker_outputs = find_worker_outputs(workspace)
     workflow_claims_delivery = _workflow_claims_subagent_delivery(workflow_text)
     dispatch_path = workspace / "dispatch_log.jsonl"
@@ -278,6 +283,13 @@ def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: Cont
             message="workflow Subagent Dispatch Log claims delivered subagent work without machine delivery proof",
             path="dispatch_log.jsonl",
             evidence="no delivered host/native subagent record or approved degraded delivery record",
+        )
+    for duplicate_path, dispatch_ids in _duplicate_delivered_paths(workspace, records).items():
+        result.fail(
+            code="DISPATCH_DELIVERY_PATH_DUPLICATE",
+            message="delivered dispatch records must not reuse the same delivery_path",
+            path="dispatch_log.jsonl",
+            evidence=f"{duplicate_path}: {', '.join(dispatch_ids)}",
         )
     for record in records:
         mechanism = str(record.get("mechanism", "")).lower()
@@ -308,13 +320,14 @@ def _check_dispatch_log(workspace: Path, workflow_text: str | None, result: Cont
                         evidence=mechanism,
                     )
                 else:
-                    role_failure = _dispatch_role_delivery_failure(record, normalized_delivery_path)
-                    if role_failure is not None:
+                    role_issue = _dispatch_role_delivery_issue(record, normalized_delivery_path, profile.mode)
+                    if role_issue is not None:
+                        code, message, evidence = role_issue
                         result.fail(
-                            code="DISPATCH_ROLE_DELIVERY_MISMATCH",
-                            message="delivered dispatch record role must match its delivery_path",
+                            code=code,
+                            message=message,
                             path="dispatch_log.jsonl",
-                            evidence=role_failure,
+                            evidence=evidence,
                         )
         if mechanism == "degraded_single_agent" and record.get("degraded_mode_approved") is not True:
             result.fail(
@@ -369,15 +382,48 @@ def _normalize_delivery_path(workspace: Path, delivery_path) -> str | None:
         return None
 
 
-def _dispatch_role_delivery_failure(record: dict, normalized_delivery_path: str) -> str | None:
+def _dispatch_role_delivery_issue(
+    record: dict,
+    normalized_delivery_path: str,
+    profile_mode: str,
+) -> tuple[str, str, str] | None:
     try:
-        normalize_role_slug(record.get("role"), delivery_path=normalized_delivery_path)
+        role_slug = normalize_role_slug(record.get("role"), delivery_path=normalized_delivery_path)
+        role = role_for_slug(role_slug)
     except ValueError as exc:
-        return str(exc)
+        return (
+            "DISPATCH_ROLE_DELIVERY_MISMATCH",
+            "delivered dispatch record role must match its delivery_path",
+            str(exc),
+        )
+    if profile_mode not in role.modes:
+        return (
+            "DISPATCH_ROLE_MODE_MISMATCH",
+            "delivered dispatch record role is not allowed for this workspace mode",
+            f"{role.slug} supports modes: {', '.join(role.modes)}; workspace mode: {profile_mode}",
+        )
     return None
 
 
-def _delivered_roles_by_path(workspace: Path) -> dict[str, str]:
+def _duplicate_delivered_paths(workspace: Path, records: list[dict]) -> dict[str, list[str]]:
+    dispatch_ids_by_path: dict[str, list[str]] = {}
+    for record in records:
+        if record.get("status") != "delivered":
+            continue
+        if not record.get("delivery_path"):
+            continue
+        normalized_path = _normalize_delivery_path(workspace, record.get("delivery_path", ""))
+        if normalized_path is None:
+            continue
+        dispatch_ids_by_path.setdefault(normalized_path, []).append(str(record.get("dispatch_id", "")))
+    return {
+        path: dispatch_ids
+        for path, dispatch_ids in dispatch_ids_by_path.items()
+        if len(dispatch_ids) > 1
+    }
+
+
+def _delivered_roles_by_path(workspace: Path, profile_mode: str) -> dict[str, str]:
     dispatch_path = workspace / "dispatch_log.jsonl"
     if not dispatch_path.exists():
         return {}
@@ -387,19 +433,27 @@ def _delivered_roles_by_path(workspace: Path) -> dict[str, str]:
         return {}
 
     roles_by_path: dict[str, str] = {}
+    seen_paths: set[str] = set()
     for record in records:
         if not _dispatch_record_counts_as_delivery(record):
             continue
         normalized_path = _normalize_delivery_path(workspace, record.get("delivery_path", ""))
         if normalized_path is None:
             continue
+        if normalized_path in seen_paths:
+            continue
+        seen_paths.add(normalized_path)
         try:
-            roles_by_path[normalized_path] = normalize_role_slug(
+            role_slug = normalize_role_slug(
                 record.get("role"),
                 delivery_path=normalized_path,
             )
+            role = role_for_slug(role_slug)
         except ValueError:
             continue
+        if profile_mode not in role.modes:
+            continue
+        roles_by_path[normalized_path] = role.slug
     return roles_by_path
 
 
@@ -478,8 +532,8 @@ def _missing_dispatch_delivery_fields(record: dict) -> list[str]:
     return [field for field in DISPATCH_DELIVERY_REQUIRED_FIELDS if not record.get(field)]
 
 
-def _check_worker_outputs(workspace: Path, result: ContractResult) -> None:
-    delivered_roles = _delivered_roles_by_path(workspace)
+def _check_worker_outputs(workspace: Path, profile: ContractProfile, result: ContractResult) -> None:
+    delivered_roles = _delivered_roles_by_path(workspace, profile.mode)
     for path in find_worker_outputs(workspace):
         rel = path.relative_to(workspace).as_posix()
         text = path.read_text(encoding="utf-8")

@@ -131,8 +131,10 @@ class TestWorkerRoleCatalog(unittest.TestCase):
             "coverage": "coverage_challenge",
             "financial": "financial_bridge",
             "financial screen": "financial_bridge",
+            "Financial Bridge Analyst": "financial_bridge",
             "redteam": "red_team",
             "red team": "red_team",
+            "Red Team Analyst": "red_team",
             "thesis-revision": "red_team",
         }
         for alias, expected_slug in cases.items():
@@ -174,6 +176,19 @@ class TestWorkerRoleCatalog(unittest.TestCase):
         )
 
         self.assertEqual([], forbidden_output_violations(role, text))
+
+    def test_mapping_fact_language_does_not_trigger_action_language_violation(self):
+        text = (
+            "# Output\n\n"
+            "Method cards loaded: supply-chain-mapping, customer-graph-discovery.\n\n"
+            "Sources consulted: company filing.\n\n"
+            "- Customers buy modules from upstream suppliers.\n"
+            "- 公司A持有公司B 20%股权，客户买入模块库存用于生产。\n"
+        )
+
+        for slug in ("frontier_scout", "sector_mapper"):
+            with self.subTest(slug=slug):
+                self.assertEqual([], forbidden_output_violations(role_for_slug(slug), text))
 
     def test_required_output_marker_and_source_trace_helpers(self):
         role = role_for_slug("frontier_scout")

@@ -1280,6 +1280,140 @@ class TestWorkerOutputContract(unittest.TestCase):
             self.assertIn("DISPATCH_ROLE_DELIVERY_MISMATCH", failure_codes)
             self.assertNotIn("WORKER_FORBIDDEN_CONCLUSION", failure_codes)
 
+    def test_dispatch_role_must_be_allowed_in_workspace_mode(self):
+        cases = [
+            (
+                "sector_rejects_scout",
+                "sector",
+                "scouts/loop_1_scout.md",
+                "scout",
+                "# Scout\n\nMethod cards loaded: supply-chain-mapping.\n\nSources consulted: company filing.\n",
+            ),
+            (
+                "ticker_rejects_sector_mapper",
+                "ticker",
+                "maps/mapping_1.md",
+                "sector_mapper",
+                "# Mapping\n\n"
+                "Method cards loaded: supply-chain-mapping, customer-graph-discovery.\n\n"
+                "Sources consulted: company filing.\n",
+            ),
+        ]
+        for label, mode, relative_path, role, output_text in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace = Path(temp_dir)
+                    write_base_workspace(workspace, stages_completed=[], current_stage="stage_0")
+                    output_path = workspace / relative_path
+                    output_path.parent.mkdir(parents=True)
+                    output_path.write_text(output_text, encoding="utf-8")
+                    (workspace / "dispatch_log.jsonl").write_text(
+                        json.dumps(
+                            {
+                                "dispatch_id": "dispatch_0001",
+                                "loop_id": "loop_1",
+                                "role": role,
+                                "mechanism": "host_subagent",
+                                "delivery_path": relative_path,
+                                "status": "delivered",
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    result = evaluate_workspace(workspace, ContractProfile(mode=mode, target="workspace"))
+
+                    self.assertFalse(result.passed)
+                    self.assertIn(
+                        "DISPATCH_ROLE_MODE_MISMATCH",
+                        [issue.code for issue in result.failures],
+                        [issue.display() for issue in result.failures],
+                    )
+
+    def test_duplicate_delivery_paths_fail_before_later_role_can_mask_first_role(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace, stages_completed=[], current_stage="stage_0")
+            (workspace / "maps").mkdir()
+            (workspace / "maps" / "mapping_1.md").write_text(
+                "# Sector Mapper\n\n"
+                "Method cards loaded: supply-chain-mapping, customer-graph-discovery.\n\n"
+                "Sources consulted: company filing.\n\n"
+                "Action Class: buy.\n",
+                encoding="utf-8",
+            )
+            records = [
+                {
+                    "dispatch_id": "dispatch_0001",
+                    "loop_id": "loop_1",
+                    "role": "sector_mapper",
+                    "mechanism": "host_subagent",
+                    "delivery_path": "maps/mapping_1.md",
+                    "status": "delivered",
+                },
+                {
+                    "dispatch_id": "dispatch_0002",
+                    "loop_id": "loop_1",
+                    "role": "supply_chain_mapper",
+                    "mechanism": "host_subagent",
+                    "delivery_path": "./maps/mapping_1.md",
+                    "status": "delivered",
+                },
+            ]
+            (workspace / "dispatch_log.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="sector", target="workspace"))
+
+            failure_codes = [issue.code for issue in result.failures]
+            self.assertFalse(result.passed)
+            self.assertIn("DISPATCH_DELIVERY_PATH_DUPLICATE", failure_codes)
+            self.assertIn("WORKER_FORBIDDEN_CONCLUSION", failure_codes)
+
+    def test_dispatch_accepts_documented_analyst_role_labels(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace, stages_completed=[], current_stage="stage_0")
+            (workspace / "financials").mkdir()
+            (workspace / "financials" / "bridge.md").write_text(
+                "# Financial Bridge\n\nMethod cards loaded: financial-bridge.\n",
+                encoding="utf-8",
+            )
+            (workspace / "redteam").mkdir()
+            (workspace / "redteam" / "round1_redteam.md").write_text(
+                "# Red Team\n\nMethod cards loaded: red-team.\n",
+                encoding="utf-8",
+            )
+            records = [
+                {
+                    "dispatch_id": "dispatch_fin_0001",
+                    "loop_id": "loop_1",
+                    "role": "Financial Bridge Analyst",
+                    "mechanism": "host_subagent",
+                    "delivery_path": "financials/bridge.md",
+                    "status": "delivered",
+                },
+                {
+                    "dispatch_id": "dispatch_rt_0001",
+                    "loop_id": "loop_1",
+                    "role": "Red Team Analyst",
+                    "mechanism": "host_subagent",
+                    "delivery_path": "redteam/round1_redteam.md",
+                    "status": "delivered",
+                },
+            ]
+            (workspace / "dispatch_log.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="workspace"))
+
+            self.assertTrue(result.passed, [issue.display() for issue in result.failures])
+
 
 VALIDATE_DOSSIER_SCRIPT = ROOT / "scripts/validate_dossier.py"
 
