@@ -28,6 +28,7 @@ ACTION_CLASS_PATTERN = re.compile(
     r"\baction\s+class\b|"
     r"\btarget\s+price\b|"
     r"(?<![\w-])strong\s+buy(?![\w-])|"
+    r"(?<![\w-])(?:buy|sell)(?![\w-])|"
     r"强烈买入|买入|卖出|持有|增持|减持|目标价"
     r")",
     re.IGNORECASE,
