@@ -69,6 +69,8 @@ Do not overwrite prior worker files. Use loop, round, or version identifiers in 
 
 ## Role Reference
 
+This table is a dispatch guide summary. The authoritative worker role facts for prompt paths, delivery folders, method-card expectations, source-trace rules, required output markers, forbidden worker-output classes, and dispatch aliases live in `../../../scripts/worker_role_catalog/`.
+
 | Role | Prompt | Mode | Delivery |
 |------|--------|------|----------|
 | Frontier Scout | `scripts/prompts/scout_prompt.md` | Ticker | `scouts/` |

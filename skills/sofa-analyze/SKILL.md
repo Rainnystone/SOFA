@@ -121,6 +121,8 @@ Recommended report guidance:
 
 ## Worker Role Quick Reference
 
+This table is a human-readable summary. The deterministic worker role facts live in `../../scripts/worker_role_catalog/` and are consumed by `sofa_contract`.
+
 Read the standalone prompt before each dispatch.
 
 | Role | Prompt | Method Cards | Mode | Delivery |

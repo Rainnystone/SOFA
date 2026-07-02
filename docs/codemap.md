@@ -37,6 +37,7 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 |--------|------------|----------------|
 | `scripts/init_workspace.py` | `tests/test_workspace_scripts.py` | Create workspace files, registry, managed Markdown blocks, and initial state from `workspace_contract` facts. |
 | `scripts/workspace_contract/` | `tests/test_workspace_contract.py`, `tests/test_workspace_scripts.py`, `tests/test_sofa_contract.py` | Canonical workspace artifact/scaffold facts, mode-specific scaffold paths, managed blocks, and worker-output path classification. |
+| `scripts/worker_role_catalog/` | `tests/test_worker_role_catalog.py`, `tests/test_sofa_contract.py` | Canonical worker role facts, prompt paths, delivery folders, method-card expectations, source-trace rules, forbidden worker-output classes, and dispatch aliases consumed by `sofa_contract`. |
 | `scripts/sofa_contract/` | `tests/test_sofa_contract.py` | Shared compliance contract package for structured pass/fail/warn results and DSV4P-hardening checks; consumes `workspace_contract` for workspace shape facts. |
 | `scripts/frontier_lifecycle.py` | `tests/test_frontier_lifecycle.py` | Pure lifecycle model: stable ID loop binding, transition legality, review due, portfolio limits, and rendering. |
 | `scripts/frontier_review.py` | `tests/test_frontier_review_cli.py` | CLI for adding, starting, reviewing, retiring, reactivating, and reporting frontier status. |
@@ -58,6 +59,17 @@ Use this path when changing workspace files, folders, ledgers, managed blocks, o
 3. Update setup or validator consumers such as `scripts/init_workspace.py` and `scripts/sofa_contract/`.
 4. Run `python -B -m unittest tests.test_workspace_contract tests.test_workspace_scripts tests.test_sofa_contract`.
 5. Run the full baseline before committing.
+
+## Worker Role Catalog Change Path
+
+Use this path when changing worker roles, prompt-template paths, delivery folders, method-card expectations, source-trace requirements, required output markers, forbidden worker-output classes, or dispatch aliases:
+
+1. Update focused tests in `tests/test_worker_role_catalog.py`.
+2. Update `scripts/worker_role_catalog/`.
+3. Update `scripts/sofa_contract/` only when readiness or worker-output checks consume the changed fact.
+4. Keep role tables in `skills/sofa-analyze/SKILL.md` and `skills/sofa-analyze/references/subagent-dispatch.md` as short human-readable summaries.
+5. Run `python -B -m unittest tests.test_worker_role_catalog tests.test_sofa_contract`.
+6. Run the full baseline before committing.
 
 ## Frontier Lifecycle Change Path
 
