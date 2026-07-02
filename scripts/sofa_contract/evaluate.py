@@ -7,11 +7,11 @@ from pathlib import Path
 from workspace_contract import core_required_files
 from worker_role_catalog import (
     SOURCE_TRACE_MARKERS,
+    all_worker_roles,
     forbidden_output_violations,
     has_required_output_marker,
     has_source_trace,
     normalize_role_slug,
-    role_for_delivery_path,
     role_for_slug,
 )
 
@@ -483,26 +483,28 @@ def _check_worker_outputs(workspace: Path, result: ContractResult) -> None:
     for path in find_worker_outputs(workspace):
         rel = path.relative_to(workspace).as_posix()
         text = path.read_text(encoding="utf-8")
-        role = _worker_role_for_output(rel, delivered_roles)
+        candidate_roles = _candidate_worker_roles_for_output(rel)
+        role = _worker_role_for_output(rel, delivered_roles, candidate_roles)
 
         if not any(
             has_required_output_marker(text, marker)
-            for marker in role.required_output_markers
+            for marker in _required_output_markers_for_output(role, candidate_roles)
         ):
             result.fail(
                 code="WORKER_METHOD_CARDS_MISSING",
                 message="worker output must declare Method cards loaded",
                 path=rel,
             )
-        if not has_source_trace(text, role):
-            if role.requires_source_trace:
+        has_trace = has_source_trace(text, candidate_roles[0])
+        if not has_trace:
+            if _requires_source_trace(role, candidate_roles):
                 result.fail(
                     code="WORKER_SOURCE_TRACE_MISSING",
                     message="search worker output must include a source or search trace section",
                     path=rel,
                     evidence=", ".join(SOURCE_TRACE_MARKERS),
                 )
-            else:
+            elif role is not None:
                 result.warn(
                     code="WORKER_SOURCE_TRACE_RECOMMENDED",
                     message="worker output is missing a source or search trace section (recommended for analysis roles)",
@@ -510,22 +512,46 @@ def _check_worker_outputs(workspace: Path, result: ContractResult) -> None:
                     evidence=", ".join(SOURCE_TRACE_MARKERS),
                 )
 
-        for issue in forbidden_output_violations(role, text):
-            result.fail(
-                code=issue.issue_code,
-                message=issue.message,
-                path=rel,
-            )
+        if role is not None:
+            for issue in forbidden_output_violations(role, text):
+                result.fail(
+                    code=issue.issue_code,
+                    message=issue.message,
+                    path=rel,
+                )
 
 
-def _worker_role_for_output(rel: str, delivered_roles: dict[str, str]):
+def _candidate_worker_roles_for_output(rel: str):
+    return tuple(role for role in all_worker_roles() if role.matches_delivery_path(rel))
+
+
+def _required_output_markers_for_output(role, candidate_roles) -> tuple[str, ...]:
+    if role is not None:
+        return role.required_output_markers
+    if not candidate_roles:
+        return ()
+    shared_markers = set(candidate_roles[0].required_output_markers)
+    for candidate_role in candidate_roles[1:]:
+        shared_markers &= set(candidate_role.required_output_markers)
+    return tuple(marker for marker in candidate_roles[0].required_output_markers if marker in shared_markers)
+
+
+def _requires_source_trace(role, candidate_roles) -> bool:
+    if role is not None:
+        return role.requires_source_trace
+    return bool(candidate_roles) and all(candidate_role.requires_source_trace for candidate_role in candidate_roles)
+
+
+def _worker_role_for_output(rel: str, delivered_roles: dict[str, str], candidate_roles):
     role_slug = delivered_roles.get(rel)
-    if role_slug is None:
-        return role_for_delivery_path(rel)
-    try:
-        return role_for_slug(normalize_role_slug(role_slug, delivery_path=rel))
-    except ValueError:
-        return role_for_delivery_path(rel)
+    if role_slug is not None:
+        try:
+            return role_for_slug(normalize_role_slug(role_slug, delivery_path=rel))
+        except ValueError:
+            return None
+    if len(candidate_roles) == 1:
+        return candidate_roles[0]
+    return None
 
 
 def _check_final_report(workspace: Path, profile: ContractProfile, result: ContractResult) -> None:
