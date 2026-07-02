@@ -28,7 +28,6 @@ ACTION_CLASS_PATTERN = re.compile(
     r"\baction\s+class\b|"
     r"\btarget\s+price\b|"
     r"(?<![\w-])strong\s+buy(?![\w-])|"
-    r"(?<![\w-])(?:buy|sell|hold|long|short|accumulate|reduce)(?![\w-])|"
     r"强烈买入|买入|卖出|持有|增持|减持|目标价"
     r")",
     re.IGNORECASE,
@@ -88,7 +87,7 @@ class WorkerRole:
 
     def matches_delivery_path(self, relative_path: str | Path) -> bool:
         normalized = normalize_relative_path(relative_path)
-        return normalized.startswith(f"{self.delivery_folder}/")
+        return normalized == self.delivery_folder or normalized.startswith(f"{self.delivery_folder}/")
 
 
 SCOUT_ACTION_RULE = ForbiddenOutputRule(
@@ -238,18 +237,10 @@ def role_for_slug(slug: str) -> WorkerRole:
 def role_for_delivery_path(relative_path: str | Path) -> WorkerRole:
     normalized = normalize_relative_path(relative_path)
     folder = normalized.split("/", 1)[0]
-    folder_defaults = {
-        "scouts": "frontier_scout",
-        "challenges": "challenge_probe",
-        "maps": "sector_mapper",
-        "coverage": "coverage_challenge",
-        "financials": "financial_bridge",
-        "redteam": "red_team",
-    }
-    try:
-        return role_for_slug(folder_defaults[folder])
-    except KeyError as exc:
-        raise ValueError(f"No SOFA worker role matches delivery path: {relative_path!r}") from exc
+    for role in WORKER_ROLES:
+        if role.delivery_folder == folder:
+            return role
+    raise ValueError(f"No SOFA worker role matches delivery path: {relative_path!r}")
 
 
 def normalize_role_slug(role_alias: str | None, *, delivery_path: str | Path | None = None) -> str:

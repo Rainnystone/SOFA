@@ -110,6 +110,7 @@ class TestWorkerRoleCatalog(unittest.TestCase):
 
     def test_role_lookup_and_delivery_path_mapping(self):
         self.assertEqual("frontier_scout", role_for_slug("frontier_scout").slug)
+        self.assertEqual("frontier_scout", role_for_delivery_path("scouts").slug)
         self.assertEqual("frontier_scout", role_for_delivery_path("scouts/loop_1_scout.md").slug)
         self.assertEqual("challenge_probe", role_for_delivery_path("challenges/loop_1_challenge.md").slug)
         self.assertEqual("sector_mapper", role_for_delivery_path("maps/mapping_1.md").slug)
@@ -140,9 +141,20 @@ class TestWorkerRoleCatalog(unittest.TestCase):
             "frontier_scout",
             normalize_role_slug("scout", delivery_path="scouts/loop_1_scout.md"),
         )
+        self.assertEqual("frontier_scout", normalize_role_slug("scout", delivery_path="scouts"))
 
         with self.assertRaisesRegex(ValueError, "does not match delivery path"):
             normalize_role_slug("financial", delivery_path="scouts/loop_1_scout.md")
+
+    def test_short_list_phrase_does_not_trigger_action_language_violation(self):
+        role = role_for_slug("sector_mapper")
+        text = (
+            "# Output\n\n"
+            "Method cards loaded: supply-chain-mapping, customer-graph-discovery.\n\n"
+            "Sources consulted: short list of candidate suppliers.\n"
+        )
+
+        self.assertEqual([], forbidden_output_violations(role, text))
 
     def test_required_output_marker_and_source_trace_helpers(self):
         role = role_for_slug("frontier_scout")
