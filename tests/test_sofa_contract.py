@@ -1122,6 +1122,35 @@ class TestWorkerOutputContract(unittest.TestCase):
             self.assertFalse(result.passed)
             self.assertIn("WORKER_SOURCE_TRACE_MISSING", [issue.code for issue in result.failures])
 
+    def test_financial_bridge_missing_source_trace_warns_but_does_not_fail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace, stages_completed=[], current_stage="stage_0")
+            (workspace / "financials").mkdir()
+            (workspace / "financials" / "bridge.md").write_text(
+                "# Financial Bridge\n\nMethod cards loaded: financial-bridge.\n",
+                encoding="utf-8",
+            )
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "financial",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "financials/bridge.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="workspace"))
+
+            self.assertTrue(result.passed, [issue.code for issue in result.failures])
+            self.assertIn("WORKER_SOURCE_TRACE_RECOMMENDED", [issue.code for issue in result.warnings])
+
     def test_dispatch_role_must_match_delivery_folder(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)

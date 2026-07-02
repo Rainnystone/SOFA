@@ -269,8 +269,6 @@ def has_required_output_marker(text: str, marker: str) -> bool:
 
 
 def has_source_trace(text: str, role: WorkerRole) -> bool:
-    if not role.requires_source_trace:
-        return True
     return any(SOURCE_TRACE_LABEL_PATTERN.search(line.strip()) for line in text.splitlines())
 
 
