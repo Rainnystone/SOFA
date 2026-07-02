@@ -131,11 +131,11 @@ Read the standalone prompt before each dispatch.
 | Challenge Probe | `challenge_prompt.md` | red-team, supply-chain-mapping, customer-graph-discovery | Ticker | `challenges/` |
 | Sector Mapper | `sector_mapper_prompt.md` | supply-chain-mapping, customer-graph-discovery | Sector | `maps/` |
 | Coverage Challenge | `coverage_challenge_prompt.md` | supply-chain-mapping, customer-graph-discovery | Sector | `coverage/` |
-| Supply Chain Mapper | `supply_chain_prompt.md` | supply-chain-mapping | Both | `maps/` |
-| Customer Graph Mapper | `customer_graph_prompt.md` | customer-graph-discovery | Both | `maps/` |
-| Financial Bridge | `financial_bridge_prompt.md` | financial-bridge | Ticker or Ultra | `financials/` |
+| Supply Chain Mapper | `supply_chain_prompt.md` | supply-chain-mapping | Ticker / Sector / Ultra | `maps/` |
+| Customer Graph Mapper | `customer_graph_prompt.md` | customer-graph-discovery | Ticker / Sector / Ultra | `maps/` |
+| Financial Bridge | `financial_bridge_prompt.md` | financial-bridge | Ticker / Sector / Ultra | `financials/` |
 | Financial Screen | `financial_bridge_prompt.md` | financial-bridge | Sector | `financials/` |
-| Red Team | `red_team_prompt.md` | red-team | Ticker or Ultra | `redteam/` |
+| Red Team | `red_team_prompt.md` | red-team | Ticker / Sector / Ultra | `redteam/` |
 
 Worker context isolation:
 

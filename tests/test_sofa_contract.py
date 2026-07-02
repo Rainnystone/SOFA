@@ -1214,6 +1214,38 @@ class TestWorkerOutputContract(unittest.TestCase):
             self.assertFalse(result.passed)
             self.assertIn("WORKER_FORBIDDEN_CONCLUSION", [issue.code for issue in result.failures])
 
+    def test_sector_mapper_recommendation_hold_fails_as_forbidden_conclusion(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_base_workspace(workspace, stages_completed=[], current_stage="stage_0")
+            (workspace / "maps").mkdir()
+            (workspace / "maps" / "mapping_1.md").write_text(
+                "# Sector Mapper\n\n"
+                "Method cards loaded: supply-chain-mapping, customer-graph-discovery.\n\n"
+                "Sources consulted: company filing.\n\n"
+                "Recommendation: hold.\n",
+                encoding="utf-8",
+            )
+            (workspace / "dispatch_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "dispatch_id": "dispatch_0001",
+                        "loop_id": "loop_1",
+                        "role": "sector_mapper",
+                        "mechanism": "host_subagent",
+                        "delivery_path": "maps/mapping_1.md",
+                        "status": "delivered",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(workspace, ContractProfile(mode="sector", target="workspace"))
+
+            self.assertFalse(result.passed)
+            self.assertIn("WORKER_FORBIDDEN_CONCLUSION", [issue.code for issue in result.failures])
+
     def test_ambiguous_map_output_with_invalid_dispatch_role_skips_role_specific_forbidden_check(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)

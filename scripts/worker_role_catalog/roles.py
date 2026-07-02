@@ -27,6 +27,8 @@ ACTION_CLASS_PATTERN = re.compile(
     r"(?:"
     r"\baction\s+class\b|"
     r"\btarget\s+price\b|"
+    r"\b(?:recommendation|rating|conclusion)\b\s*(?::|：|-)\s*"
+    r"(?:strong\s+buy|buy|sell|hold|long|short|accumulate|reduce|强烈买入|买入|卖出|持有|增持|减持)|"
     r"(?<![\w-])strong\s+buy(?![\w-])|"
     r"(?<![\w-])(?:buy|sell)(?![\w-])|"
     r"强烈买入|买入|卖出|持有|增持|减持|目标价"
@@ -138,7 +140,7 @@ WORKER_ROLES = (
     WorkerRole(
         slug="sector_mapper",
         display_label="Sector Mapper",
-        dispatch_aliases=("mapper", "sector mapper", "sector_mapper", "maps"),
+        dispatch_aliases=("mapper", "sector mapper", "sector_mapper"),
         prompt_template="scripts/prompts/sector_mapper_prompt.md",
         modes=("sector",),
         delivery_folder="maps",
@@ -237,10 +239,15 @@ def role_for_slug(slug: str) -> WorkerRole:
 
 def role_for_delivery_path(relative_path: str | Path) -> WorkerRole:
     normalized = normalize_relative_path(relative_path)
-    folder = normalized.split("/", 1)[0]
-    for role in WORKER_ROLES:
-        if role.delivery_folder == folder:
-            return role
+    matches = tuple(role for role in WORKER_ROLES if role.matches_delivery_path(normalized))
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        role_list = ", ".join(role.slug for role in matches)
+        raise ValueError(
+            f"ambiguous SOFA worker role for delivery path {relative_path!r}; "
+            f"no unambiguous role matches among: {role_list}"
+        )
     raise ValueError(f"No SOFA worker role matches delivery path: {relative_path!r}")
 
 

@@ -113,10 +113,13 @@ class TestWorkerRoleCatalog(unittest.TestCase):
         self.assertEqual("frontier_scout", role_for_delivery_path("scouts").slug)
         self.assertEqual("frontier_scout", role_for_delivery_path("scouts/loop_1_scout.md").slug)
         self.assertEqual("challenge_probe", role_for_delivery_path("challenges/loop_1_challenge.md").slug)
-        self.assertEqual("sector_mapper", role_for_delivery_path("maps/mapping_1.md").slug)
         self.assertEqual("coverage_challenge", role_for_delivery_path("coverage/coverage_1.md").slug)
         self.assertEqual("financial_bridge", role_for_delivery_path("financials/bridge.md").slug)
         self.assertEqual("red_team", role_for_delivery_path("redteam/round1_redteam.md").slug)
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            role_for_delivery_path("maps/mapping_1.md")
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            role_for_delivery_path("maps/customer_graph_v1.md")
 
     def test_dispatch_aliases_normalize_to_canonical_slugs(self):
         cases = {
@@ -142,9 +145,25 @@ class TestWorkerRoleCatalog(unittest.TestCase):
             normalize_role_slug("scout", delivery_path="scouts/loop_1_scout.md"),
         )
         self.assertEqual("frontier_scout", normalize_role_slug("scout", delivery_path="scouts"))
+        self.assertEqual(
+            "sector_mapper",
+            normalize_role_slug("sector_mapper", delivery_path="maps/mapping_1.md"),
+        )
+        self.assertEqual(
+            "supply_chain_mapper",
+            normalize_role_slug("supply_chain_mapper", delivery_path="maps/supply_chain_v1.md"),
+        )
+        self.assertEqual(
+            "customer_graph_mapper",
+            normalize_role_slug("customer_graph_mapper", delivery_path="maps/customer_graph_v1.md"),
+        )
 
         with self.assertRaisesRegex(ValueError, "does not match delivery path"):
             normalize_role_slug("financial", delivery_path="scouts/loop_1_scout.md")
+        with self.assertRaisesRegex(ValueError, "ambiguous|unambiguous"):
+            normalize_role_slug(None, delivery_path="maps/supply_chain_v1.md")
+        with self.assertRaisesRegex(ValueError, "Unknown SOFA worker role alias"):
+            normalize_role_slug("maps", delivery_path="maps/customer_graph_v1.md")
 
     def test_short_list_phrase_does_not_trigger_action_language_violation(self):
         role = role_for_slug("sector_mapper")
