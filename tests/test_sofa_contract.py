@@ -11,8 +11,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from sofa_contract import ContractIssue, ContractProfile, ContractResult
+from sofa_contract import ContractIssue, ContractProfile, ContractResult, evaluate_workspace
 from sofa_contract.workspace import iter_jsonl_records, read_json_file, read_text_file
+from capability_policy import RESULT_STATUS_COMPLETED, RESULT_STATUS_DEGRADED, STAGE0_LOOP_ID
+from sofa_contract import evaluate as evaluate_module
 
 
 class TestContractResultModel(unittest.TestCase):
@@ -96,9 +98,6 @@ class TestWorkspaceReaders(unittest.TestCase):
                 ],
                 records,
             )
-
-
-from sofa_contract import evaluate_workspace
 
 
 def write_base_workspace(workspace: Path, *, stages_completed=None, current_stage="stage_0"):
@@ -2084,6 +2083,88 @@ class TestCodexCloudReviewRegressions(unittest.TestCase):
             )
             self.assertIn("loop_2", missing_issue.evidence)
             self.assertIn("loop_3", missing_issue.evidence)
+
+
+class TestSearchRecordVocabulary(unittest.TestCase):
+    def _write_minimal_workspace(self, workspace: Path, records: list[dict]) -> None:
+        (workspace / "state.json").write_text(
+            json.dumps(
+                {
+                    "mode": "ticker",
+                    "loop_count": 1,
+                    "stages_completed": [],
+                    "current_stage": "stage_2",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (workspace / "research_workflow.md").write_text(
+            "# Research Workflow\n", encoding="utf-8"
+        )
+        (workspace / "evidence_ledger.md").write_text(
+            "# Evidence Ledger\n\n## Loop 1: F1 - Test frontier\n", encoding="utf-8"
+        )
+        (workspace / "search_log.jsonl").write_text(
+            "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+            encoding="utf-8",
+        )
+
+    def test_evaluate_module_uses_policy_status_constants(self):
+        self.assertEqual(RESULT_STATUS_COMPLETED, evaluate_module.RESULT_STATUS_COMPLETED)
+        self.assertEqual(RESULT_STATUS_DEGRADED, evaluate_module.RESULT_STATUS_DEGRADED)
+
+    def test_stage0_record_does_not_satisfy_loop_coverage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            self._write_minimal_workspace(
+                workspace,
+                [
+                    {
+                        "loop_id": STAGE0_LOOP_ID,
+                        "result_status": RESULT_STATUS_COMPLETED,
+                        "query": "framing: confirm subject identity",
+                    }
+                ],
+            )
+
+            result = evaluate_workspace(
+                workspace, ContractProfile(mode="ticker", target="workspace")
+            )
+
+        codes = [issue.code for issue in result.failures]
+        self.assertIn("SEARCH_LOG_LOOP_COVERAGE_MISSING", codes)
+        coverage_issue = next(
+            issue for issue in result.failures
+            if issue.code == "SEARCH_LOG_LOOP_COVERAGE_MISSING"
+        )
+        self.assertIn("loop_1", coverage_issue.message + (coverage_issue.evidence or ""))
+
+    def test_loop_record_plus_stage0_record_satisfies_coverage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            self._write_minimal_workspace(
+                workspace,
+                [
+                    {
+                        "loop_id": STAGE0_LOOP_ID,
+                        "result_status": RESULT_STATUS_COMPLETED,
+                        "query": "framing: confirm subject identity",
+                    },
+                    {
+                        "loop_id": "loop_1",
+                        "result_status": RESULT_STATUS_COMPLETED,
+                        "query": "F1 substrate supplier evidence",
+                    },
+                ],
+            )
+
+            result = evaluate_workspace(
+                workspace, ContractProfile(mode="ticker", target="workspace")
+            )
+
+        codes = [issue.code for issue in result.failures]
+        self.assertNotIn("SEARCH_LOG_LOOP_COVERAGE_MISSING", codes)
+        self.assertNotIn("SEARCH_LOG_MISSING", codes)
 
 
 if __name__ == "__main__":

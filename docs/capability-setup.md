@@ -2,6 +2,8 @@
 
 SOFA detects optional tools and prints recommendations. It never silently installs tools, writes credentials, or changes host configuration without explicit user approval.
 
+The deterministic source for the chain order, provider ids, and recommendation text is `scripts/capability_policy/`. This page is human-readable setup guidance summarizing those facts.
+
 Run the capability check when you want to see what is available:
 
 ```bash
