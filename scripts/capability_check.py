@@ -8,16 +8,12 @@ import importlib.util
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
-
-SEARCH_CHAIN_NAMES = [
-    "AnySearch skill",
-    "Exa MCP server",
-    "Tavily",
-    "Host-agent built-ins",
-]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from capability_policy import FINANCE_CAPABILITIES, SEARCH_CHAIN
 
 SKILL_ROOTS = [
     ".agents/skills",
@@ -30,6 +26,10 @@ WIND_SKILLS = [
     "wind-find-finance-skill",
 ]
 
+HOST_BUILTIN_EVIDENCE = [
+    "Not externally detectable by SOFA; inspect the current host agent."
+]
+
 
 def scan_environment(
     home: Path | None = None,
@@ -40,99 +40,65 @@ def scan_environment(
     home_path = Path.home() if home is None else Path(home)
     env_data = dict(os.environ if env is None else env)
 
-    anysearch_evidence = _existing_paths(
-        home_path / root / "anysearch" for root in SKILL_ROOTS
-    )
-    exa_evidence = ["EXA_API_KEY present"] if env_data.get("EXA_API_KEY") else []
-
-    tavily_evidence = []
-    if env_data.get("TAVILY_API_KEY"):
-        tavily_evidence.append("TAVILY_API_KEY present")
-    if _command_present("tvly", env_data, env_is_explicit=env is not None):
-        tavily_evidence.append("tvly command present")
-
-    wind_evidence = _wind_evidence(home_path, env_data)
-    yfinance_evidence = (
-        ["Python module yfinance importable"] if _module_present("yfinance") else []
-    )
+    evidence_by_id = {
+        "anysearch": _existing_paths(
+            home_path / root / "anysearch" for root in SKILL_ROOTS
+        ),
+        "exa": ["EXA_API_KEY present"] if env_data.get("EXA_API_KEY") else [],
+        "tavily": _tavily_evidence(env_data, env_is_explicit=env is not None),
+        "host_builtin": HOST_BUILTIN_EVIDENCE,
+        "wind": _wind_evidence(home_path, env_data),
+        "yfinance": (
+            ["Python module yfinance importable"] if _module_present("yfinance") else []
+        ),
+    }
 
     search_chain = [
         {
-            "name": "AnySearch skill",
-            "configured": bool(anysearch_evidence),
-            "evidence": anysearch_evidence,
-            "recommendation": (
-                "Install AnySearch from https://github.com/anysearch-ai/anysearch-skill "
-                "as the preferred general-search skill."
+            "id": provider.provider_id,
+            "name": provider.display_label,
+            "configured": (
+                provider.provider_id != "host_builtin"
+                and bool(evidence_by_id[provider.provider_id])
             ),
-        },
-        {
-            "name": "Exa MCP server",
-            "configured": bool(exa_evidence),
-            "evidence": exa_evidence,
-            "recommendation": (
-                "Configure Exa MCP from https://github.com/exa-labs/exa-mcp-server "
-                "with EXA_API_KEY after AnySearch if MCP search is available."
-            ),
-        },
-        {
-            "name": "Tavily",
-            "configured": bool(tavily_evidence),
-            "evidence": tavily_evidence,
-            "recommendation": (
-                "Install Tavily skills from https://github.com/tavily-ai/skills "
-                "or use the Tavily CLI as a later JSON-friendly search fallback."
-            ),
-        },
-        {
-            "name": "Host-agent built-ins",
-            "configured": False,
-            "evidence": [
-                "Not externally detectable by SOFA; inspect the current host agent."
-            ],
-            "recommendation": (
-                "Use host-agent built-in search only after AnySearch, Exa, and Tavily "
-                "are unavailable or unsuitable."
-            ),
-        },
+            "evidence": evidence_by_id[provider.provider_id],
+            "recommendation": provider.recommendation,
+        }
+        for provider in SEARCH_CHAIN
     ]
 
     finance = {
-        "wind": {
-            "configured": bool(wind_evidence),
-            "evidence": wind_evidence,
-            "recommendation": (
-                "Chinese financial-data users should read "
-                "https://aifinmarket.wind.com.cn/skill.md, install Wind financial "
-                "capability after choosing project or global scope, and configure "
-                "credentials only after explicit confirmation."
-            ),
-        },
-        "yfinance": {
-            "configured": bool(yfinance_evidence),
-            "evidence": yfinance_evidence,
-            "recommendation": (
-                "English/global public-market users can install yfinance with "
-                "python -m pip install yfinance and treat it as a research aid, "
-                "not an authoritative filing source."
-            ),
-        },
+        entry.provider_id: {
+            "configured": bool(evidence_by_id[entry.provider_id]),
+            "evidence": evidence_by_id[entry.provider_id],
+            "recommendation": entry.recommendation,
+        }
+        for entry in FINANCE_CAPABILITIES
     }
 
     recommendations = []
     for entry in search_chain[:3]:
         if not entry["configured"]:
             recommendations.append(entry["recommendation"])
-    for entry in (finance["wind"], finance["yfinance"]):
-        if not entry["configured"]:
-            recommendations.append(entry["recommendation"])
+    for name in ("wind", "yfinance"):
+        if not finance[name]["configured"]:
+            recommendations.append(finance[name]["recommendation"])
 
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "search_chain": search_chain,
         "finance": finance,
         "recommendations": recommendations,
     }
+
+
+def _tavily_evidence(env_data: dict[str, str], *, env_is_explicit: bool) -> list[str]:
+    evidence = []
+    if env_data.get("TAVILY_API_KEY"):
+        evidence.append("TAVILY_API_KEY present")
+    if _command_present("tvly", env_data, env_is_explicit=env_is_explicit):
+        evidence.append("tvly command present")
+    return evidence
 
 
 def _existing_paths(paths) -> list[str]:
