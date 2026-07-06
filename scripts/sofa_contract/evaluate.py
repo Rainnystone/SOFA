@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from workspace_contract import core_required_files
+from capability_policy import RESULT_STATUS_COMPLETED, RESULT_STATUS_DEGRADED
 from worker_role_catalog import (
     SOURCE_TRACE_MARKERS,
     all_worker_roles,
@@ -171,8 +172,12 @@ def _valid_search_coverage(workspace: Path) -> tuple[set[str], bool]:
     try:
         for _line_number, record in iter_jsonl_records(workspace / "search_log.jsonl"):
             status = str(record.get("result_status", "")).strip().lower()
-            valid = (status == "completed" and _has_completed_search_record_shape(record)) or (
-                status == "degraded_approved" and _has_degraded_search_record_shape(record)
+            valid = (
+                status == RESULT_STATUS_COMPLETED
+                and _has_completed_search_record_shape(record)
+            ) or (
+                status == RESULT_STATUS_DEGRADED
+                and _has_degraded_search_record_shape(record)
             )
             if valid:
                 has_any_valid = True
