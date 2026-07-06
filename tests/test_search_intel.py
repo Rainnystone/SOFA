@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "search_intel.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from capability_policy import (
@@ -111,6 +112,15 @@ def make_workspace(base: Path) -> Path:
         encoding="utf-8",
     )
     return workspace
+
+
+def run_cli(*args):
+    return subprocess.run(
+        [sys.executable, "-B", str(SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
 
 
 class TestPriorQueryDigest(unittest.TestCase):
@@ -293,6 +303,69 @@ class TestSearchYieldStats(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "line 8"):
                 build_search_yield_stats(workspace)
+
+
+class TestSearchIntelCli(unittest.TestCase):
+    def test_digest_json_round_trip(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+
+            result = run_cli("digest", str(workspace), "--json")
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            ["stage_0", "F1", "F2", "unbound"],
+            [group["group_id"] for group in payload],
+        )
+        self.assertNotIn("CONTAMINANT", result.stdout)
+
+    def test_digest_frontier_filter(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+
+            result = run_cli("digest", str(workspace), "--frontier", "F2")
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode)
+        self.assertIn("#### F2", result.stdout)
+        self.assertNotIn("#### F1", result.stdout)
+
+    def test_stats_text_output_is_advisory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+
+            result = run_cli("stats", str(workspace))
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode)
+        self.assertIn("advisory only", result.stdout)
+
+    def test_malformed_search_log_exits_1(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            with (workspace / "search_log.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write("{not valid json\n")
+
+            result = run_cli("stats", str(workspace))
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("SEARCH INTEL ERROR", result.stderr)
+
+    def test_missing_workspace_exits_1(self):
+        result = run_cli("digest", "/nonexistent/sofa/workspace")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("SEARCH INTEL ERROR", result.stderr)
+
+    def test_empty_but_valid_workspace_exits_0(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = run_cli("digest", temp_dir)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode)
+        self.assertIn("(no recorded searches)", result.stdout)
 
 
 if __name__ == "__main__":
