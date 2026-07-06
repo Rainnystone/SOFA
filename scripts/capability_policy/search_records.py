@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from frontier_lifecycle import LOOP_HEADER_RE
+try:
+    from ..frontier_lifecycle import LOOP_HEADER_RE
+except ImportError:
+    from frontier_lifecycle import LOOP_HEADER_RE
 
 from .policy import STAGE0_LOOP_ID
 
