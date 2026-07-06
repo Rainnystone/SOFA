@@ -8,7 +8,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from worker_role_catalog import (
     ACTION_CLASS_LANGUAGE,
+    DispatchSlot,
     all_worker_roles,
+    forbidden_input_violations,
     forbidden_output_violations,
     has_required_output_marker,
     has_source_trace,
@@ -223,6 +225,89 @@ class TestWorkerRoleCatalog(unittest.TestCase):
             [issue.issue_code for issue in forbidden_output_violations(sector_mapper, text)],
         )
         self.assertEqual([], forbidden_output_violations(financial, text))
+
+
+EXPECTED_DISPATCH_FACTS = {
+    "frontier_scout": ("frontier_packet", "loop{loop}_{frontier_slug}.md"),
+    "challenge_probe": ("claim_summary", "loop{loop}_challenge.md"),
+    "sector_mapper": ("mapping_packet", "mapping_loop{loop}_{frontier_slug}.md"),
+    "coverage_challenge": ("coverage_packet", "coverage_loop{loop}.md"),
+    "supply_chain_mapper": ("ladder_packet", "supply_chain_v{version}.md"),
+    "customer_graph_mapper": ("customer_packet", "customer_graph_v{version}.md"),
+    "financial_bridge": ("bridge_input", "{ticker}_bridge.md"),
+    "red_team": ("round_input", "round{round}_redteam.md"),
+}
+
+
+class TestDispatchFacts(unittest.TestCase):
+    def test_every_role_declares_input_and_delivery_slots(self):
+        for role in all_worker_roles():
+            with self.subTest(slug=role.slug):
+                input_slot_name, filename_template = EXPECTED_DISPATCH_FACTS[role.slug]
+                slots = {slot.name: slot for slot in role.dispatch_slots}
+                self.assertEqual({input_slot_name, "delivery_path"}, set(slots))
+                self.assertEqual(filename_template, role.delivery_filename_template)
+
+    def test_replace_literals_appear_once_in_body_and_in_declarations(self):
+        for role in all_worker_roles():
+            template = role.prompt_path(ROOT).read_text(encoding="utf-8")
+            parts = template.split("\n## Placeholders", 1)
+            body = parts[0]
+            declarations = parts[1] if len(parts) > 1 else ""
+            for slot in role.dispatch_slots:
+                with self.subTest(slug=role.slug, slot=slot.name):
+                    if slot.style == "replace":
+                        self.assertEqual(1, body.count(slot.literal))
+                        self.assertIn(slot.literal, declarations)
+                    else:
+                        self.assertEqual("append", slot.style)
+                        self.assertEqual("red_team", role.slug)
+                        self.assertTrue(slot.heading)
+
+    def test_red_team_uses_append_slots_only(self):
+        red_team = role_for_slug("red_team")
+        self.assertEqual(
+            ["append", "append"],
+            [slot.style for slot in red_team.dispatch_slots],
+        )
+
+    def test_forbidden_input_rules_screen_isolated_roles_only(self):
+        market_text = "The current market cap suggests the thesis is cheap."
+        action_text = "Preliminary action class: buy on any dip."
+
+        scout = role_for_slug("frontier_scout")
+        self.assertEqual(
+            ["DISPATCH_INPUT_MARKET_DATA"],
+            [issue.issue_code for issue in forbidden_input_violations(scout, market_text)],
+        )
+        self.assertEqual(
+            ["DISPATCH_INPUT_ACTION_LANGUAGE"],
+            [issue.issue_code for issue in forbidden_input_violations(scout, action_text)],
+        )
+
+        challenge = role_for_slug("challenge_probe")
+        self.assertEqual([], forbidden_input_violations(challenge, market_text))
+        self.assertEqual(
+            ["DISPATCH_INPUT_ACTION_LANGUAGE"],
+            [issue.issue_code for issue in forbidden_input_violations(challenge, action_text)],
+        )
+
+        bridge = role_for_slug("financial_bridge")
+        self.assertEqual([], forbidden_input_violations(bridge, market_text + action_text))
+        red_team = role_for_slug("red_team")
+        self.assertEqual([], forbidden_input_violations(red_team, market_text + action_text))
+
+    def test_clean_packet_passes_screening(self):
+        scout = role_for_slug("frontier_scout")
+        packet = (
+            "- Frontier: InP substrate qualified capacity\n"
+            "- Key Claims: C1 substrate supply is concentrated\n"
+            "- Expected Evidence: filings, supplier pages\n"
+        )
+        self.assertEqual([], forbidden_input_violations(scout, packet))
+
+    def test_validate_catalog_covers_dispatch_facts(self):
+        self.assertEqual([], validate_catalog(ROOT))
 
 
 if __name__ == "__main__":
