@@ -348,6 +348,32 @@ class TestAssembleDispatchCli(unittest.TestCase):
         )
         self.assertIn("Frontier Packet", payload["dispatch_text"])
 
+    def test_json_payload_has_documented_field_set_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            workspace = make_workspace(base)
+            packet_path = self._write_packet(base)
+            result = run_cli(
+                "--workspace", str(workspace), "--role", "scout",
+                "--packet-file", str(packet_path),
+                "--loop", "7", "--frontier-slug", "substrate_supply",
+                "--no-digest", "--json",
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            {
+                "role_slug",
+                "prompt_template",
+                "delivery_path",
+                "dispatch_text",
+                "attachments",
+                "suggested_record_fields",
+            },
+            set(payload),
+        )
+
     def test_text_output_prints_dispatch_and_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)

@@ -70,7 +70,9 @@ def main(argv=None) -> int:
         return 1
 
     if args.json:
-        print(json.dumps(dataclasses.asdict(result), ensure_ascii=False, indent=2))
+        payload = dataclasses.asdict(result)
+        payload.pop("delivery_abs_path", None)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(result.dispatch_text, end="")
         print(f"DELIVERY PATH: {result.delivery_path}", file=sys.stderr)
