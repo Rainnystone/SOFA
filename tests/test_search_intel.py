@@ -138,6 +138,29 @@ class TestPriorQueryDigest(unittest.TestCase):
         self.assertEqual(["www.sec.gov"], by_group["F1"].visited_hosts)
         self.assertEqual(["CNINFO:600000"], by_group["F1"].source_identifiers)
 
+    def test_url_refs_store_hostnames_without_credentials_or_ports(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            extra_record = {
+                "loop_id": "loop_1",
+                "query": "ACME secure source lookup",
+                "result_status": "completed",
+                "evidence_refs": [
+                    "https://example.com:8443/a",
+                    "https://user:pass@secure.example.com/path",
+                ],
+            }
+            with (workspace / "search_log.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(extra_record, ensure_ascii=False) + "\n")
+
+            groups = build_prior_query_digest(workspace)
+
+        by_group = {group.group_id: group for group in groups}
+        self.assertIn("example.com", by_group["F1"].visited_hosts)
+        self.assertIn("secure.example.com", by_group["F1"].visited_hosts)
+        self.assertNotIn("example.com:8443", by_group["F1"].visited_hosts)
+        self.assertNotIn("user:pass@secure.example.com", by_group["F1"].visited_hosts)
+
     def test_unbound_group_collects_dispatch_only_and_unmapped_loops(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = make_workspace(Path(temp_dir))
