@@ -438,6 +438,14 @@ class TestSearchIntelCli(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("SEARCH INTEL ERROR", result.stderr)
 
+    def test_usage_errors_exit_1(self):
+        for args in ((), ("digest",), ("nope", "/tmp")):
+            with self.subTest(args=args):
+                result = run_cli(*args)
+
+            self.assertEqual(1, result.returncode)
+            self.assertIn("SEARCH INTEL ERROR", result.stderr)
+
     def test_empty_but_valid_workspace_exits_0(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             result = run_cli("digest", temp_dir)

@@ -19,8 +19,14 @@ from capability_policy import (  # noqa: E402
 )
 
 
+class SearchIntelArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        raise ValueError(message)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    parser = SearchIntelArgumentParser(
         description="Render SOFA search-record intelligence views"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -41,9 +47,9 @@ def main(argv: list[str] | None = None) -> int:
     stats_parser.add_argument("--loop")
     stats_parser.add_argument("--json", action="store_true")
 
-    args = parser.parse_args(argv)
-
     try:
+        args = parser.parse_args(argv)
+
         if args.command == "digest":
             groups = build_prior_query_digest(args.workspace)
             if args.frontier:
