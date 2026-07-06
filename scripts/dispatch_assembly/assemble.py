@@ -108,6 +108,11 @@ def assemble_dispatch(
             ) from exc
         if "{" in delivery_rel or "}" in delivery_rel:
             raise AssemblyError(f"out_path must not contain path tokens: {out_path!r}")
+        if not worker.matches_delivery_path(delivery_rel):
+            raise AssemblyError(
+                f"out_path {delivery_rel!r} is outside the {worker.slug} delivery folder "
+                f"{worker.delivery_folder!r}; sofa_contract would reject the record"
+            )
     else:
         delivery_rel = _render_delivery_path(worker, fields)
     delivery_abs = str(workspace_path / delivery_rel)

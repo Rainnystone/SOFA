@@ -266,6 +266,22 @@ class TestOutPathScreening(unittest.TestCase):
             )
             self.assertEqual("scouts/custom_name.md", result.delivery_path)
 
+    def test_out_path_rejects_delivery_folder_mismatch(self):
+        # sofa_contract enforces that a delivered record's role matches its
+        # delivery_path folder; an --out override pointing at another role's
+        # folder would assemble a dispatch that the contract immediately
+        # rejects. Refuse early with a clear error naming the folder.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            with self.assertRaisesRegex(AssemblyError, "delivery folder|redteam|scouts"):
+                assemble_dispatch(
+                    repo_root=ROOT, workspace=workspace, role="scout",
+                    slot_values={"frontier_packet": PACKET},
+                    name_fields={"loop": "1", "frontier_slug": "x"},
+                    attach_digest=False,
+                    out_path="redteam/scout.md",
+                )
+
 
 class TestSlotValueTokenScreening(unittest.TestCase):
     def test_slot_value_containing_workspace_token_raises(self):
