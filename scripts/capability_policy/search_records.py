@@ -146,7 +146,7 @@ def build_search_yield_stats(workspace: Path | str) -> list[LoopYieldStats]:
             if query:
                 _append_unique(queries, query)
             for dead_end in _dead_ends(record):
-                _append_unique(dead_ends, dead_end)
+                dead_ends.append(dead_end)
             for ref in _evidence_refs(record):
                 _append_unique(refs, ref)
 

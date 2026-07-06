@@ -279,6 +279,45 @@ class TestSearchYieldStats(unittest.TestCase):
         self.assertEqual(2, by_loop["loop_1"].unique_refs)
         self.assertEqual(2, by_loop["loop_1"].first_seen_refs)
 
+    def test_stats_count_repeated_dead_end_events(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            duplicate_records = [
+                {
+                    "loop_id": "loop_4",
+                    "query": "ACME repeated query one",
+                    "result_status": "completed",
+                    "dead_ends": [
+                        {
+                            "query": "ACME repeated failed route",
+                            "category": "no_result",
+                        }
+                    ],
+                    "evidence_refs": [],
+                },
+                {
+                    "loop_id": "loop_4",
+                    "query": "ACME repeated query two",
+                    "result_status": "completed",
+                    "dead_ends": [
+                        {
+                            "query": "ACME repeated failed route",
+                            "category": "no_result",
+                        }
+                    ],
+                    "evidence_refs": [],
+                },
+            ]
+            with (workspace / "search_log.jsonl").open("a", encoding="utf-8") as handle:
+                for record in duplicate_records:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+            stats = build_search_yield_stats(workspace)
+
+        by_loop = {entry.loop_key: entry for entry in stats}
+        self.assertEqual({"no_result": 2}, by_loop["loop_4"].dead_end_counts)
+        self.assertAlmostEqual(1.0, by_loop["loop_4"].dead_end_rate)
+
     def test_first_seen_refs_deduplicate_across_loops(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = make_workspace(Path(temp_dir))
