@@ -82,9 +82,19 @@ This table is a dispatch guide summary. The authoritative worker role facts for 
 | Financial Bridge Analyst | `scripts/prompts/financial_bridge_prompt.md` | Ticker / Sector / Ultra | `financials/` |
 | Red Team | `scripts/prompts/red_team_prompt.md` | Ticker / Sector / Ultra | `redteam/` |
 
-Before dispatching any role, read the standalone prompt file. Do not reconstruct a worker prompt from memory or from this summary.
+Dispatch slot literals and delivery filename templates are catalog facts in `../../../scripts/worker_role_catalog/`. In the manual fallback, read the standalone prompt file before dispatching; never reconstruct a worker prompt from memory or from this summary.
 
 ## Dispatch Assembly
+
+Assemble dispatch text deterministically:
+
+```bash
+python {PLUGIN_DIR}/scripts/assemble_dispatch.py --workspace "{WORKSPACE}" --role <role> --packet-file <packet.md> [--loop N] [--frontier-slug slug] [--round N] [--ticker T] [--version N]
+```
+
+The assembler fills the catalog-declared slots in the curated prompt template, computes the canonical delivery path, screens the packet against role forbidden-input tripwires (pattern-based only — semantic isolation stays the main thread's responsibility), and attaches the prior-query digest when available. The main thread still authors the packet, reviews the assembled text, and dispatches through the host subagent mechanism. After dispatch, the main thread records the dispatch_log.jsonl entry; the assembler never writes it.
+
+Degraded fallback (manual assembly):
 
 1. Read the standalone prompt template.
 2. Prepare the current packet, evidence summary, constraints, delivery path, and required references.

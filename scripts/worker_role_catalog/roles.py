@@ -66,6 +66,64 @@ class ForbiddenOutputRule:
 
 
 @dataclass(frozen=True)
+class ForbiddenInputIssue:
+    class_name: str
+    issue_code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class ForbiddenInputRule:
+    class_name: str
+    issue_code: str
+    message: str
+    pattern: re.Pattern[str]
+
+    def evaluate(self, text: str) -> ForbiddenInputIssue | None:
+        if self.pattern.search(text):
+            return ForbiddenInputIssue(
+                class_name=self.class_name,
+                issue_code=self.issue_code,
+                message=self.message,
+            )
+        return None
+
+
+@dataclass(frozen=True)
+class DispatchSlot:
+    name: str
+    style: str  # "replace" or "append"
+    literal: str = ""
+    heading: str = ""
+    required: bool = True
+
+
+FILENAME_FIELD_VOCABULARY = {"loop", "frontier_slug", "round", "ticker", "version"}
+FILENAME_FIELD_PATTERN = re.compile(r"\{([a-z_]+)\}")
+
+MARKET_DATA_PATTERN = re.compile(
+    r"(?:\btarget\s+price\b|\bmarket\s+cap(?:italization)?\b|\bP/E\b|\bPE\s+ratio\b"
+    r"|\bstock\s+prices?\b|\bshare\s+prices?\b"
+    r"|市值|股价|目标价|市盈率)",
+    re.IGNORECASE,
+)
+
+ACTION_INPUT_RULE = ForbiddenInputRule(
+    class_name="action_class_language",
+    issue_code="DISPATCH_INPUT_ACTION_LANGUAGE",
+    message="dispatch input must not contain action-class or conclusion language for this role",
+    pattern=ACTION_CLASS_PATTERN,
+)
+
+MARKET_DATA_INPUT_RULE = ForbiddenInputRule(
+    class_name="market_data",
+    issue_code="DISPATCH_INPUT_MARKET_DATA",
+    message="dispatch input must not contain price, market-cap, or valuation data for this role",
+    pattern=MARKET_DATA_PATTERN,
+)
+
+
+@dataclass(frozen=True)
 class WorkerRole:
     slug: str
     display_label: str
@@ -81,6 +139,9 @@ class WorkerRole:
     forbidden_output_classes: tuple[str, ...]
     forbidden_output_rules: tuple[ForbiddenOutputRule, ...] = ()
     source_trace_markers: tuple[str, ...] = SOURCE_TRACE_MARKERS
+    dispatch_slots: tuple[DispatchSlot, ...] = ()
+    delivery_filename_template: str = ""
+    forbidden_input_rules: tuple[ForbiddenInputRule, ...] = ()
 
     def prompt_path(self, repo_root: str | Path) -> Path:
         return Path(repo_root) / self.prompt_template
@@ -126,6 +187,12 @@ WORKER_ROLES = (
         forbidden_input_classes=("thesis", "stock_price", "market_cap", "valuation", "prior_worker_output"),
         forbidden_output_classes=(ACTION_CLASS_LANGUAGE,),
         forbidden_output_rules=(SCOUT_ACTION_RULE,),
+        dispatch_slots=(
+            DispatchSlot(name="frontier_packet", style="replace", literal="[主线程粘贴完整 Frontier Packet]"),
+            DispatchSlot(name="delivery_path", style="replace", literal="[主线程指定，如：完成后用 Write 工具将完整输出写入 {WORKSPACE}/scouts/loop1_customer_relationship.md]"),
+        ),
+        delivery_filename_template="loop{loop}_{frontier_slug}.md",
+        forbidden_input_rules=(ACTION_INPUT_RULE, MARKET_DATA_INPUT_RULE),
     ),
     WorkerRole(
         slug="challenge_probe",
@@ -140,6 +207,12 @@ WORKER_ROLES = (
         required_output_markers=("Method cards loaded",),
         forbidden_input_classes=("full_thesis", "conversation_history", "bull_case"),
         forbidden_output_classes=(),
+        dispatch_slots=(
+            DispatchSlot(name="claim_summary", style="replace", literal="[主线程粘贴：只包含本轮 frontier 的 claim 摘要 + 支撑证据列表 + 证据等级]"),
+            DispatchSlot(name="delivery_path", style="replace", literal="[主线程指定，如：完成后用 Write 工具将完整输出写入 {WORKSPACE}/challenges/loop1_challenge.md]"),
+        ),
+        delivery_filename_template="loop{loop}_challenge.md",
+        forbidden_input_rules=(ACTION_INPUT_RULE,),
     ),
     WorkerRole(
         slug="sector_mapper",
@@ -155,6 +228,12 @@ WORKER_ROLES = (
         forbidden_input_classes=("thesis", "stock_price", "market_cap", "valuation", "investment_recommendation"),
         forbidden_output_classes=(ACTION_CLASS_LANGUAGE,),
         forbidden_output_rules=(WORKER_ACTION_RULE,),
+        dispatch_slots=(
+            DispatchSlot(name="mapping_packet", style="replace", literal="[主线程粘贴：当前已知的 dependency ladder 摘要 + 需要扩展的具体层级/方向 + 目标深度]"),
+            DispatchSlot(name="delivery_path", style="replace", literal="[主线程指定，如：完成后用 Write 工具将完整输出写入 {WORKSPACE}/maps/mapping_loop1_layer2_3.md]"),
+        ),
+        delivery_filename_template="mapping_loop{loop}_{frontier_slug}.md",
+        forbidden_input_rules=(ACTION_INPUT_RULE, MARKET_DATA_INPUT_RULE),
     ),
     WorkerRole(
         slug="coverage_challenge",
@@ -169,6 +248,12 @@ WORKER_ROLES = (
         required_output_markers=("Method cards loaded",),
         forbidden_input_classes=("final_thesis", "investment_recommendation"),
         forbidden_output_classes=(),
+        dispatch_slots=(
+            DispatchSlot(name="coverage_packet", style="replace", literal="[主线程粘贴：当前 dependency ladder 摘要 + 已完成的 mapping loop 数量 + 已发现的节点列表]"),
+            DispatchSlot(name="delivery_path", style="replace", literal="[主线程指定，如：完成后用 Write 工具将完整输出写入 {WORKSPACE}/coverage/coverage_loop1.md]"),
+        ),
+        delivery_filename_template="coverage_loop{loop}.md",
+        forbidden_input_rules=(ACTION_INPUT_RULE,),
     ),
     WorkerRole(
         slug="supply_chain_mapper",
@@ -183,6 +268,12 @@ WORKER_ROLES = (
         required_output_markers=("Method cards loaded",),
         forbidden_input_classes=("stock_price", "market_cap", "valuation", "investment_recommendation"),
         forbidden_output_classes=(),
+        dispatch_slots=(
+            DispatchSlot(name="ladder_packet", style="replace", literal="[主线程粘贴：当前已知的 dependency ladder + 需要扩展的层级/方向]"),
+            DispatchSlot(name="delivery_path", style="replace", literal="[主线程指定，如：完成后用 Write 工具将完整输出写入 {WORKSPACE}/maps/supply_chain_v1.md]"),
+        ),
+        delivery_filename_template="supply_chain_v{version}.md",
+        forbidden_input_rules=(ACTION_INPUT_RULE, MARKET_DATA_INPUT_RULE),
     ),
     WorkerRole(
         slug="customer_graph_mapper",
@@ -197,6 +288,12 @@ WORKER_ROLES = (
         required_output_markers=("Method cards loaded",),
         forbidden_input_classes=("stock_price", "market_cap", "valuation", "investment_recommendation"),
         forbidden_output_classes=(),
+        dispatch_slots=(
+            DispatchSlot(name="customer_packet", style="replace", literal="[主线程粘贴：目标公司 + 当前已知客户 + 需要验证的候选客户]"),
+            DispatchSlot(name="delivery_path", style="replace", literal="[主线程指定，如：完成后用 Write 工具将完整输出写入 {WORKSPACE}/maps/customer_graph_v1.md]"),
+        ),
+        delivery_filename_template="customer_graph_v{version}.md",
+        forbidden_input_rules=(ACTION_INPUT_RULE, MARKET_DATA_INPUT_RULE),
     ),
     WorkerRole(
         slug="financial_bridge",
@@ -218,6 +315,11 @@ WORKER_ROLES = (
         required_output_markers=("Method cards loaded",),
         forbidden_input_classes=("technical_thesis_judgment",),
         forbidden_output_classes=(),
+        dispatch_slots=(
+            DispatchSlot(name="bridge_input", style="replace", literal="[主线程粘贴：公司名 + ticker + thesis 摘要 + 需要验证的财务传导路径 + 当前已知的财务数据（如有）]"),
+            DispatchSlot(name="delivery_path", style="replace", literal="[主线程指定，如：完成后用 Write 工具将完整输出写入 {WORKSPACE}/financials/TICKER_bridge.md]"),
+        ),
+        delivery_filename_template="{ticker}_bridge.md",
     ),
     WorkerRole(
         slug="red_team",
@@ -240,6 +342,11 @@ WORKER_ROLES = (
         required_output_markers=("Method cards loaded",),
         forbidden_input_classes=("conversation_history", "user_sentiment", "kol_endorsement"),
         forbidden_output_classes=(),
+        dispatch_slots=(
+            DispatchSlot(name="round_input", style="append", heading="## 本轮输入（主线程提供）"),
+            DispatchSlot(name="delivery_path", style="append", heading="## 交付文件路径"),
+        ),
+        delivery_filename_template="round{round}_redteam.md",
     ),
 )
 
@@ -307,6 +414,15 @@ def forbidden_output_violations(role: WorkerRole, text: str) -> list[ForbiddenOu
     return issues
 
 
+def forbidden_input_violations(role: WorkerRole, text: str) -> list[ForbiddenInputIssue]:
+    issues: list[ForbiddenInputIssue] = []
+    for rule in role.forbidden_input_rules:
+        issue = rule.evaluate(text)
+        if issue is not None:
+            issues.append(issue)
+    return issues
+
+
 def validate_catalog(repo_root: str | Path) -> list[str]:
     root = Path(repo_root)
     issues: list[str] = []
@@ -339,6 +455,50 @@ def validate_catalog(repo_root: str | Path) -> list[str]:
             if existing is not None and existing != role.slug:
                 issues.append(f"dispatch alias {alias!r} is used by both {existing} and {role.slug}")
             aliases[normalized] = role.slug
+
+        slot_names = [slot.name for slot in role.dispatch_slots]
+        if len(slot_names) != len(set(slot_names)):
+            issues.append(f"{role.slug} has duplicate dispatch slot names")
+        if slot_names.count("delivery_path") != 1:
+            issues.append(f"{role.slug} must declare exactly one delivery_path slot")
+
+        template_body = ""
+        template_declarations = ""
+        if role.prompt_path(root).is_file():
+            template_text = role.prompt_path(root).read_text(encoding="utf-8")
+            template_parts = template_text.split("\n## Placeholders", 1)
+            template_body = template_parts[0]
+            template_declarations = template_parts[1] if len(template_parts) > 1 else ""
+
+        for slot in role.dispatch_slots:
+            if slot.style == "replace":
+                if not slot.literal:
+                    issues.append(f"{role.slug} slot {slot.name} is replace-style but has no literal")
+                elif template_body.count(slot.literal) != 1:
+                    issues.append(
+                        f"{role.slug} slot {slot.name} literal must appear exactly once in the template body"
+                    )
+                elif slot.literal not in template_declarations:
+                    issues.append(
+                        f"{role.slug} slot {slot.name} literal is not declared in the template Placeholders section"
+                    )
+            elif slot.style == "append":
+                if not slot.heading:
+                    issues.append(f"{role.slug} slot {slot.name} is append-style but has no heading")
+            else:
+                issues.append(f"{role.slug} slot {slot.name} has unknown style: {slot.style}")
+
+        if not role.delivery_filename_template:
+            issues.append(f"{role.slug} has no delivery filename template")
+        else:
+            unknown_fields = (
+                set(FILENAME_FIELD_PATTERN.findall(role.delivery_filename_template))
+                - FILENAME_FIELD_VOCABULARY
+            )
+            if unknown_fields:
+                issues.append(
+                    f"{role.slug} filename template uses unknown fields: {sorted(unknown_fields)}"
+                )
 
     return issues
 

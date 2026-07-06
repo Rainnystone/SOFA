@@ -123,7 +123,7 @@ Recommended report guidance:
 
 This table is a human-readable summary. The deterministic worker role facts live in `../../scripts/worker_role_catalog/` and are consumed by `sofa_contract`.
 
-Read the standalone prompt before each dispatch.
+Assemble each dispatch with `python {PLUGIN_DIR}/scripts/assemble_dispatch.py --workspace "{WORKSPACE}" --role <role> --packet-file <packet.md>` plus the role's name fields. The manual sequence in [subagent-dispatch.md](references/subagent-dispatch.md) remains the degraded fallback; in that fallback, read the standalone prompt before each dispatch.
 
 | Role | Prompt | Method Cards | Mode | Delivery |
 |------|--------|--------------|------|----------|

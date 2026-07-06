@@ -121,4 +121,4 @@ Layer 2: [Component/Module] → [companies + new nodes]
 ## Placeholders
 
 - `[主线程粘贴：当前已知的 dependency ladder 摘要 + 需要扩展的具体层级/方向 + 目标深度]`
-- `[主线程指定交付文件路径]`
+- `[主线程指定，如：完成后用 Write 工具将完整输出写入 {WORKSPACE}/maps/mapping_loop1_layer2_3.md]` -- Specify the exact delivery file path for this dispatch.

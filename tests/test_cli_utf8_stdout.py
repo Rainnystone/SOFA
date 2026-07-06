@@ -47,6 +47,7 @@ CLI_SCRIPTS_WITH_NON_ASCII_OUTPUT = (
     "loop_enforcer.py",
     "frontier_review.py",
     "search_intel.py",
+    "assemble_dispatch.py",
     # validate_dossier.py is the reference implementation: already fixed.
     "validate_dossier.py",
 )

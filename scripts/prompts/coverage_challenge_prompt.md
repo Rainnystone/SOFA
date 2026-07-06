@@ -112,4 +112,4 @@ You have access to the following Research Tool Cards. Read them at the start of 
 ## Placeholders
 
 - `[主线程粘贴：当前 dependency ladder 摘要 + 已完成的 mapping loop 数量 + 已发现的节点列表]`
-- `[主线程指定交付文件路径]`
+- `[主线程指定，如：完成后用 Write 工具将完整输出写入 {WORKSPACE}/coverage/coverage_loop1.md]` -- Specify the exact delivery file path for this dispatch.

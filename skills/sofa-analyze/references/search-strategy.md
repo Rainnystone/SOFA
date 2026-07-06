@@ -59,6 +59,8 @@ The digest carries negative trace only: queries already attempted, dead ends wit
 
 The stats table is advisory input for the Gate Scorecard's Next Yield judgment. It never decides continue/stop.
 
+`{PLUGIN_DIR}/scripts/assemble_dispatch.py` attaches this digest to assembled dispatches automatically when `search_log.jsonl` exists; pass `--no-digest` to bypass explicitly.
+
 ## Framing Search
 
 Stage 0 framing search is intentionally light. It may confirm:
