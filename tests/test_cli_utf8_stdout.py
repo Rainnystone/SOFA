@@ -46,6 +46,7 @@ CLI_SCRIPTS_WITH_NON_ASCII_OUTPUT = (
     "redteam_debate_validator.py",
     "loop_enforcer.py",
     "frontier_review.py",
+    "search_intel.py",
     # validate_dossier.py is the reference implementation: already fixed.
     "validate_dossier.py",
 )
@@ -166,6 +167,34 @@ class TestCliStdoutBehaviorUnderLegacyEncoding(unittest.TestCase):
         stdout = result.stdout.decode("utf-8")
         stderr = result.stderr.decode("utf-8", errors="replace")
         self.assertIn("综合分析笔记", stdout)
+        self.assertNotIn("UnicodeEncodeError", stderr)
+
+    def test_search_intel_digest_json_survives_legacy_encoding(self):
+        # search_intel.py can print captured Chinese queries via
+        # ensure_ascii=False JSON; this must work under a legacy pipe too.
+        workspace = self._make_workspace()
+        (workspace / "search_log.jsonl").write_text(
+            json.dumps(
+                {
+                    "loop_id": "stage_0",
+                    "query": "ACME 公司 主体确认",
+                    "result_status": "completed",
+                    "evidence_refs": ["https://example.com/profile"],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = _run_script(
+            SCRIPTS / "search_intel.py", "digest", str(workspace), "--json", cwd=ROOT,
+        )
+
+        stdout = result.stdout.decode("utf-8")
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        self.assertEqual(0, result.returncode, stderr)
+        self.assertIn("ACME 公司 主体确认", stdout)
         self.assertNotIn("UnicodeEncodeError", stderr)
 
     def test_validate_dossier_stdout_survives_legacy_encoding(self):

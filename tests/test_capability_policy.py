@@ -1,3 +1,4 @@
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -111,6 +112,25 @@ class TestRenderHelpers(unittest.TestCase):
 
 
 class TestPolicyValidation(unittest.TestCase):
+    def test_package_namespace_import_works_from_repo_root(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                "import scripts.capability_policy as policy; "
+                "print(policy.STAGE0_LOOP_ID)",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("stage_0", result.stdout.strip())
+
     def test_validate_policy_reports_no_issues(self):
         self.assertEqual([], validate_policy())
 

@@ -46,6 +46,19 @@ SOFA separates market data from evidence.
 5. Record tool gaps and fallback steps.
 6. Assign evidence grades in the evidence ledger.
 
+## Prior Search Trace
+
+Before dispatching a Scout or Challenge Probe, the main thread may render a prior-query digest and paste it into the dispatch after the packet:
+
+```bash
+python {PLUGIN_DIR}/scripts/search_intel.py digest "{WORKSPACE}"
+python {PLUGIN_DIR}/scripts/search_intel.py stats "{WORKSPACE}"
+```
+
+The digest carries negative trace only: queries already attempted, dead ends with categories, and visited hosts. It never contains findings, grades, or thesis content, so it does not weaken worker isolation. Dead-end categories: `no_result` (do not retry verbatim), `tool_degraded` (retry once the capability recovers), `blocked_source` (needs an alternate route, not repetition).
+
+The stats table is advisory input for the Gate Scorecard's Next Yield judgment. It never decides continue/stop.
+
 ## Framing Search
 
 Stage 0 framing search is intentionally light. It may confirm:
@@ -56,6 +69,8 @@ Stage 0 framing search is intentionally light. It may confirm:
 - whether the user's question is Ticker Dive, Sector Hunt, or Sector-to-Ultra.
 
 Stage 0 must not turn into thesis formation.
+
+Log framing searches to `search_log.jsonl` with `loop_id: "stage_0"` so they join the machine-readable search trail before Loop 1 exists.
 
 ## Role-Specific Use
 
