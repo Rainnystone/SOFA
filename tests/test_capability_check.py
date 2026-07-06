@@ -3,6 +3,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+from capability_policy import recommendation_for_missing
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +95,37 @@ class TestCapabilityCheck(unittest.TestCase):
             result = module.scan_environment(home=home, env=env)
 
         self.assertEqual([], result["recommendations"])
+
+    def test_search_chain_entries_carry_policy_provider_ids(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = module.scan_environment(home=Path(temp_dir), env={})
+
+        self.assertEqual(
+            ["anysearch", "exa", "tavily", "host_builtin"],
+            [entry["id"] for entry in result["search_chain"]],
+        )
+        self.assertEqual("1.1", result["schema_version"])
+
+    def test_recommendation_text_renders_from_policy(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = module.scan_environment(home=Path(temp_dir), env={})
+
+        by_id = {entry["id"]: entry for entry in result["search_chain"]}
+        for provider_id in ("anysearch", "exa", "tavily"):
+            self.assertEqual(
+                recommendation_for_missing(provider_id),
+                by_id[provider_id]["recommendation"],
+            )
+        self.assertEqual(
+            recommendation_for_missing("wind"),
+            result["finance"]["wind"]["recommendation"],
+        )
+        self.assertEqual(
+            recommendation_for_missing("yfinance"),
+            result["finance"]["yfinance"]["recommendation"],
+        )
 
 
 if __name__ == "__main__":
