@@ -167,6 +167,19 @@ def assemble_dispatch(
             )
         except ValueError as exc:
             raise AssemblyError(f"prior-query digest failed: {exc}") from exc
+        # The prior-query digest renders raw query text, which may carry
+        # market-data or action-class language. Attaching it unscreened to an
+        # isolated role would reintroduce the exact terms the packet screening
+        # just blocked, so screen the rendered digest with the same role rules.
+        digest_violations = forbidden_input_violations(worker, digest_text)
+        if digest_violations:
+            details = "; ".join(
+                f"{issue.issue_code}: {issue.message}" for issue in digest_violations
+            )
+            raise AssemblyError(
+                f"prior-query digest for role {worker.slug} failed input "
+                f"screening: {details} (clean the search_log or use --no-digest)"
+            )
         text = text.rstrip() + "\n\n" + digest_text
         attachments.append("prior_query_digest")
 

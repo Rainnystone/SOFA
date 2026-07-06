@@ -186,6 +186,62 @@ class TestDigestAttachment(unittest.TestCase):
             self.assertNotIn("Prior Search Trace", result.dispatch_text)
             self.assertEqual([], result.attachments)
 
+    def test_digest_with_market_data_terms_fails_loud_for_isolated_role(self):
+        # The prior-query digest renders the raw query text, which may contain
+        # market-data or action-class language. Attaching it unscreened to an
+        # isolated role would reintroduce the exact terms the packet screening
+        # just blocked. The assembler must screen the rendered digest per role
+        # and fail loud so the main thread can clean the log or use --no-digest.
+        market_log = (
+            '{"loop_id": "loop_1", "result_status": "completed", '
+            '"query": "ACME market cap target price", '
+            '"evidence_refs": [], "notes": ""}\n'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            (workspace / "search_log.jsonl").write_text(market_log, encoding="utf-8")
+            with self.assertRaisesRegex(AssemblyError, "DISPATCH_INPUT_MARKET_DATA|digest"):
+                assemble_dispatch(
+                    repo_root=ROOT, workspace=workspace, role="scout",
+                    slot_values={"frontier_packet": PACKET},
+                    name_fields={"loop": "2", "frontier_slug": "x"},
+                )
+
+    def test_digest_with_market_data_terms_passes_for_unscreened_role(self):
+        # financial_bridge is not price-screened, so a digest carrying market
+        # data must still attach for it.
+        market_log = (
+            '{"loop_id": "loop_1", "result_status": "completed", '
+            '"query": "ACME market cap target price", '
+            '"evidence_refs": [], "notes": ""}\n'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            (workspace / "search_log.jsonl").write_text(market_log, encoding="utf-8")
+            result = assemble_dispatch(
+                repo_root=ROOT, workspace=workspace, role="financial",
+                slot_values={"bridge_input": "Thesis with financial context."},
+                name_fields={"ticker": "ACME"},
+            )
+            self.assertIn("Prior Search Trace", result.dispatch_text)
+            self.assertIn("prior_query_digest", result.attachments)
+
+    def test_digest_with_action_terms_fails_loud_for_isolated_role(self):
+        action_log = (
+            '{"loop_id": "loop_1", "result_status": "completed", '
+            '"query": "preliminary action class buy", '
+            '"evidence_refs": [], "notes": ""}\n'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            (workspace / "search_log.jsonl").write_text(action_log, encoding="utf-8")
+            with self.assertRaisesRegex(AssemblyError, "DISPATCH_INPUT_ACTION_LANGUAGE|digest"):
+                assemble_dispatch(
+                    repo_root=ROOT, workspace=workspace, role="scout",
+                    slot_values={"frontier_packet": PACKET},
+                    name_fields={"loop": "2", "frontier_slug": "x"},
+                )
+
 
 class TestEveryCatalogRoleAssembles(unittest.TestCase):
     def test_all_roles_assemble_from_generic_input(self):
