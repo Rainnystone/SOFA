@@ -4,6 +4,8 @@ This file is the single source of truth for SOFA search, fetch, and financial-da
 
 ## General Search Fallback Chain
 
+The deterministic source for this order and its provider ids is `../../../scripts/capability_policy/`. The list below is the human-readable summary.
+
 Use the strongest configured tool that fits the evidence need:
 
 1. AnySearch skill: preferred general search and extraction layer when installed.

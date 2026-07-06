@@ -67,6 +67,8 @@ The workspace artifact inventory and worker-output path classification are defin
 
 `scripts/worker_role_catalog/` is the deterministic source for worker role facts. Human-readable role tables in the entry skill and dispatch guide summarize those facts for operators, while validators consume the catalog for role-specific worker-output and dispatch checks.
 
+`scripts/capability_policy/` is the deterministic source for capability facts. `capability_check.py` and `init_workspace.py` render capability text from it, and `sofa_contract` consumes its search-record status vocabulary.
+
 ## Frontier Lifecycle Architecture
 
 Frontiers are first-class research objects. Stage 1 proposes the initial set, but Stage 2 can add, start, continue, retire, reprioritize, and reactivate them through the lifecycle CLI.
@@ -98,7 +100,8 @@ Scripts enforce rules that should not depend on agent memory:
 | `gate_check.py` | Enforce stage transition gates, including lifecycle convergence before Stage 3. |
 | `scorecard_validator.py` / `timeliness_checker.py` / `synthesis_checker.py` | Validate stage artifacts and freshness requirements. |
 | `validate_dossier.py` / `redteam_debate_validator.py` | Validate final report and red-team artifacts. |
-| `capability_check.py` | Detect optional search and financial-data capabilities without silently installing them. |
+| `capability_check.py` | Detect optional search and financial-data capabilities without silently installing them; renders provider names and recommendations from `capability_policy/`. |
+| `capability_policy/` | Own canonical capability facts: search chain order, provider ids and labels, finance recommendations, search-record status vocabulary, stage-0 binding, dead-end categories, and missing-tool confidence language. |
 | `generate_ultra_packet.py` | Convert Sector Hunt outputs into bounded Ticker Dive packets. |
 
 The main analyst thread may decide whether a frontier should continue or retire. The scripts decide whether that decision is legal, persisted, and gate-compatible.
@@ -144,6 +147,6 @@ Use these seams when extending SOFA:
 | New workspace artifact or scaffold fact | Update `scripts/workspace_contract/` and `tests/test_workspace_contract.py`, then update setup or validator consumers. |
 | New worker role or changed worker boundary | Update `scripts/worker_role_catalog/` and `tests/test_worker_role_catalog.py`, then update prompt/docs summaries only as needed. |
 | New worker method | Add a private method card and prompt; keep it callable only through the main workflow. |
-| New optional capability | Add detection and recommendation. Do not silently install tools or write credentials. |
+| New optional capability | Add facts to `scripts/capability_policy/` and detection to `capability_check.py`. Do not silently install tools or write credentials. |
 
 For file-level navigation, see [Codemap](codemap.md).
