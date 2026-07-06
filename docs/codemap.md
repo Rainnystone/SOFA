@@ -40,6 +40,7 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 | `scripts/worker_role_catalog/` | `tests/test_worker_role_catalog.py`, `tests/test_sofa_contract.py` | Canonical worker role facts, prompt paths, delivery folders, method-card expectations, source-trace rules, forbidden worker-output classes, and dispatch aliases consumed by `sofa_contract`. |
 | `scripts/capability_policy/` | `tests/test_capability_policy.py`, `tests/test_capability_check.py`, `tests/test_sofa_contract.py` | Canonical capability facts: search chain, provider ids, finance recommendations, search-record vocabulary, and render helpers consumed by `capability_check.py`, `init_workspace.py`, and `sofa_contract`. |
 | `scripts/search_intel.py` | `tests/test_search_intel.py`, `tests/test_cli_utf8_stdout.py` | CLI rendering prior-query digests and advisory yield statistics from `capability_policy.search_records`. |
+| `scripts/dispatch_assembly/` + `scripts/assemble_dispatch.py` | `tests/test_dispatch_assembly.py`, `tests/test_worker_role_catalog.py`, `tests/test_cli_utf8_stdout.py` | Deterministic dispatch composition from worker-role slot facts, filename templates, input tripwires, and prior-query digest attachment. |
 | `scripts/sofa_contract/` | `tests/test_sofa_contract.py` | Shared compliance contract package for structured pass/fail/warn results and DSV4P-hardening checks; consumes `workspace_contract` for workspace shape facts and `worker_role_catalog` for role-specific dispatch and worker-output checks. |
 | `scripts/frontier_lifecycle.py` | `tests/test_frontier_lifecycle.py` | Pure lifecycle model: stable ID loop binding, transition legality, review due, portfolio limits, and rendering. |
 | `scripts/frontier_review.py` | `tests/test_frontier_review_cli.py` | CLI for adding, starting, reviewing, retiring, reactivating, and reporting frontier status. |
@@ -67,10 +68,10 @@ Use this path when changing workspace files, folders, ledgers, managed blocks, o
 Use this path when changing worker roles, prompt-template paths, delivery folders, method-card expectations, source-trace requirements, required output markers, forbidden worker-output classes, or dispatch aliases:
 
 1. Update focused tests in `tests/test_worker_role_catalog.py`.
-2. Update `scripts/worker_role_catalog/`.
+2. Update `scripts/worker_role_catalog/` (role facts, dispatch slots, filename templates, input tripwires).
 3. Update `scripts/sofa_contract/` only when readiness or worker-output checks consume the changed fact.
 4. Keep role tables in `skills/sofa-analyze/SKILL.md` and `skills/sofa-analyze/references/subagent-dispatch.md` as short human-readable summaries.
-5. Run `python -B -m unittest tests.test_worker_role_catalog tests.test_sofa_contract`.
+5. Run `python -B -m unittest tests.test_worker_role_catalog tests.test_sofa_contract tests.test_dispatch_assembly`.
 6. Run the full baseline before committing.
 
 ## Capability Policy Change Path

@@ -69,6 +69,8 @@ The workspace artifact inventory and worker-output path classification are defin
 
 `scripts/capability_policy/` is the deterministic source for capability facts. `capability_check.py` and `init_workspace.py` render capability text from it, and `sofa_contract` consumes its search-record status vocabulary.
 
+`scripts/dispatch_assembly/` composes dispatches from those facts. Curated prompt templates remain the only prose authority; the assembler fills declared slots, computes delivery paths, screens inputs with pattern tripwires, and attaches negative-trace digests. The main thread keeps packet authorship and dispatch itself.
+
 ## Frontier Lifecycle Architecture
 
 Frontiers are first-class research objects. Stage 1 proposes the initial set, but Stage 2 can add, start, continue, retire, reprioritize, and reactivate them through the lifecycle CLI.
@@ -103,6 +105,7 @@ Scripts enforce rules that should not depend on agent memory:
 | `capability_check.py` | Detect optional search and financial-data capabilities without silently installing them; renders provider names and recommendations from `capability_policy/`. |
 | `capability_policy/` | Own canonical capability facts: search chain order, provider ids and labels, finance recommendations, search-record status vocabulary, stage-0 binding, dead-end categories, and missing-tool confidence language. |
 | `search_intel.py` | Render advisory prior-query digests and search yield statistics from `search_log.jsonl`; negative trace only, no readiness role. |
+| `dispatch_assembly/` + `assemble_dispatch.py` | Assemble worker dispatch text deterministically from catalog slot facts, curated prompt templates, and machine-trace attachments. Read-only: no workspace writes, no dispatch-log writes, no dispatching, no readiness role. |
 | `generate_ultra_packet.py` | Convert Sector Hunt outputs into bounded Ticker Dive packets. |
 
 The main analyst thread may decide whether a frontier should continue or retire. The scripts decide whether that decision is legal, persisted, and gate-compatible.
@@ -149,5 +152,6 @@ Use these seams when extending SOFA:
 | New worker role or changed worker boundary | Update `scripts/worker_role_catalog/` and `tests/test_worker_role_catalog.py`, then update prompt/docs summaries only as needed. |
 | New worker method | Add a private method card and prompt; keep it callable only through the main workflow. |
 | New optional capability | Add facts to `scripts/capability_policy/` and detection to `capability_check.py`. Do not silently install tools or write credentials. |
+| New dispatch slot, filename convention, or input tripwire | Update `scripts/worker_role_catalog/` facts and `tests/test_worker_role_catalog.py`; the assembler consumes the catalog and needs no per-role code. |
 
 For file-level navigation, see [Codemap](codemap.md).
