@@ -26,6 +26,7 @@ try:
     from ..worker_role_catalog import (
         WorkerRole,
         forbidden_input_violations,
+        normalize_relative_path,
         normalize_role_slug,
         role_for_slug,
     )
@@ -37,6 +38,7 @@ except ImportError:
     from worker_role_catalog import (
         WorkerRole,
         forbidden_input_violations,
+        normalize_relative_path,
         normalize_role_slug,
         role_for_slug,
     )
@@ -97,7 +99,17 @@ def assemble_dispatch(
         if not NAME_FIELD_PATTERN.fullmatch(value):
             raise AssemblyError(f"name field {key} has an unsafe value: {value!r}")
 
-    delivery_rel = out_path if out_path else _render_delivery_path(worker, fields)
+    if out_path:
+        try:
+            delivery_rel = normalize_relative_path(out_path)
+        except ValueError as exc:
+            raise AssemblyError(
+                f"out_path is not a safe workspace-relative path: {out_path!r} ({exc})"
+            ) from exc
+        if "{" in delivery_rel or "}" in delivery_rel:
+            raise AssemblyError(f"out_path must not contain path tokens: {out_path!r}")
+    else:
+        delivery_rel = _render_delivery_path(worker, fields)
     delivery_abs = str(workspace_path / delivery_rel)
     delivery_instruction = f"完成后用 Write 工具将完整输出写入 {delivery_abs}"
 
@@ -117,6 +129,11 @@ def assemble_dispatch(
                     f"missing required slot value: {slot.name} for role {worker.slug}"
                 )
             continue
+        if "{PLUGIN_DIR}" in value or "{WORKSPACE}" in value:
+            raise AssemblyError(
+                f"slot {slot.name} value for role {worker.slug} must not contain "
+                f"path tokens ({{PLUGIN_DIR}}/{{WORKSPACE}})"
+            )
         if slot.style == "replace":
             if slot.literal not in text:
                 raise AssemblyError(

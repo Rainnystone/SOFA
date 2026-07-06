@@ -229,5 +229,83 @@ class TestPackageImport(unittest.TestCase):
         self.assertIn("assemble_dispatch", result.stdout)
 
 
+class TestOutPathScreening(unittest.TestCase):
+    def test_out_path_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            with self.assertRaisesRegex(AssemblyError, "out_path|outside workspace|unsafe"):
+                assemble_dispatch(
+                    repo_root=ROOT, workspace=workspace, role="scout",
+                    slot_values={"frontier_packet": PACKET},
+                    name_fields={"loop": "1", "frontier_slug": "x"},
+                    attach_digest=False,
+                    out_path="../../etc/evil.md",
+                )
+
+    def test_out_path_rejects_path_tokens(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            with self.assertRaisesRegex(AssemblyError, "out_path|token"):
+                assemble_dispatch(
+                    repo_root=ROOT, workspace=workspace, role="scout",
+                    slot_values={"frontier_packet": PACKET},
+                    name_fields={"loop": "1", "frontier_slug": "x"},
+                    attach_digest=False,
+                    out_path="{WORKSPACE}/escape.md",
+                )
+
+    def test_out_path_accepts_valid_relative_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            result = assemble_dispatch(
+                repo_root=ROOT, workspace=workspace, role="scout",
+                slot_values={"frontier_packet": PACKET},
+                name_fields={"loop": "1", "frontier_slug": "x"},
+                attach_digest=False,
+                out_path="scouts/custom_name.md",
+            )
+            self.assertEqual("scouts/custom_name.md", result.delivery_path)
+
+
+class TestSlotValueTokenScreening(unittest.TestCase):
+    def test_slot_value_containing_workspace_token_raises(self):
+        leaky_packet = PACKET + "\nReference: see {WORKSPACE}/scouts/x.md for context.\n"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            with self.assertRaisesRegex(AssemblyError, "WORKSPACE|token|slot value"):
+                assemble_dispatch(
+                    repo_root=ROOT, workspace=workspace, role="scout",
+                    slot_values={"frontier_packet": leaky_packet},
+                    name_fields={"loop": "1", "frontier_slug": "x"},
+                    attach_digest=False,
+                )
+
+    def test_slot_value_containing_plugin_dir_token_raises(self):
+        leaky_packet = PACKET + "\nTemplate at {PLUGIN_DIR}/scripts/prompts/x.md\n"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            with self.assertRaisesRegex(AssemblyError, "PLUGIN_DIR|token|slot value"):
+                assemble_dispatch(
+                    repo_root=ROOT, workspace=workspace, role="scout",
+                    slot_values={"frontier_packet": leaky_packet},
+                    name_fields={"loop": "1", "frontier_slug": "x"},
+                    attach_digest=False,
+                )
+
+    def test_clean_slot_value_without_tokens_passes(self):
+        # A packet that mentions a path in prose WITHOUT the literal token is fine.
+        clean_packet = PACKET + "\nReference: see the workspace scouts folder for context.\n"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            result = assemble_dispatch(
+                repo_root=ROOT, workspace=workspace, role="scout",
+                slot_values={"frontier_packet": clean_packet},
+                name_fields={"loop": "1", "frontier_slug": "x"},
+                attach_digest=False,
+            )
+            self.assertNotIn("{WORKSPACE}", result.dispatch_text)
+            self.assertNotIn("{PLUGIN_DIR}", result.dispatch_text)
+
+
 if __name__ == "__main__":
     unittest.main()
