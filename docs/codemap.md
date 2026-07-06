@@ -25,7 +25,7 @@ This codemap is for maintainers and coding agents working inside the SOFA repo. 
 | `skills/sofa-analyze/references/ticker-dive-guide.md` | Ticker-specific evidence frontier loop, thesis path, red-team path, or final decision boundary changes. |
 | `skills/sofa-analyze/references/sector-hunt-guide.md` | Sector-specific mapping loop, chokepoint scoring, ranked queue, or no-action-class boundary changes. |
 | `skills/sofa-analyze/references/sector-to-ultra-guide.md` | Sector Hunt output needs to become Ticker Dive / Ultra Dive packets. |
-| `skills/sofa-analyze/references/search-strategy.md` | Search capability order, evidence search policy, or source freshness rules change. |
+| `skills/sofa-analyze/references/search-strategy.md` | Operational search policy, evidence source handling, or source freshness rules change; capability order, provider ids, and recommendation facts belong to `scripts/capability_policy/`. |
 | `skills/sofa-analyze/references/final-report.md` | Final report structure, action-class language, or evidence appendix expectations change. |
 | `skills/sofa-analyze/references/method-card-spec.md` | Private method card format or visibility rules change. |
 
@@ -108,7 +108,7 @@ Current lifecycle source of truth:
 | Public positioning or quickstart | `README.md`, `README_CN.md`, `docs/installation.md` |
 | Architecture or repo navigation | `docs/architecture.md`, `docs/codemap.md`, README deeper-doc links |
 | Host mapping | One file under `docs/adapters/`; avoid changing the core workflow unless the mapping reveals a real core gap. |
-| Capability recommendations | `docs/capability-setup.md`, `scripts/capability_check.py`, `tests/test_capability_check.py` |
+| Capability facts or recommendations | `scripts/capability_policy/`, `tests/test_capability_policy.py`, `docs/capability-setup.md`; check `scripts/capability_check.py` and `tests/test_capability_check.py` only when detection or probe behavior changes. |
 | Report style | `docs/report-guide.md`, `skills/sofa-analyze/references/final-report.md` |
 
 Keep README concise. If a section grows into implementation detail, move it to `docs/` and link it.

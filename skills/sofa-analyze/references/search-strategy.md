@@ -1,6 +1,6 @@
 # SOFA Search Strategy
 
-This file is the single source of truth for SOFA search, fetch, and financial-data routing. Guides, prompts, method cards, and reports should reference this file instead of defining their own tool priority.
+This file is the human-readable operational strategy guide for SOFA search, fetch, and financial-data routing. Guides, prompts, method cards, and reports should reference this file for operational search policy instead of redefining source handling or freshness rules. Deterministic capability facts such as chain order, provider ids, recommendation text, and search-record vocabulary belong to `../../../scripts/capability_policy/`.
 
 ## General Search Fallback Chain
 
