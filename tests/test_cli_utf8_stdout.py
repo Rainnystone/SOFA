@@ -46,6 +46,7 @@ CLI_SCRIPTS_WITH_NON_ASCII_OUTPUT = (
     "redteam_debate_validator.py",
     "loop_enforcer.py",
     "frontier_review.py",
+    "search_intel.py",
     # validate_dossier.py is the reference implementation: already fixed.
     "validate_dossier.py",
 )
