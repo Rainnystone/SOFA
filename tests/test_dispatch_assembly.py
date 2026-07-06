@@ -307,5 +307,94 @@ class TestSlotValueTokenScreening(unittest.TestCase):
             self.assertNotIn("{PLUGIN_DIR}", result.dispatch_text)
 
 
+SCRIPT = ROOT / "scripts" / "assemble_dispatch.py"
+
+
+def run_cli(*args):
+    return subprocess.run(
+        [sys.executable, "-B", str(SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+
+class TestAssembleDispatchCli(unittest.TestCase):
+    def _write_packet(self, base: Path) -> Path:
+        packet_path = base / "packet.md"
+        packet_path.write_text(PACKET, encoding="utf-8")
+        return packet_path
+
+    def test_json_output_round_trips(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            workspace = make_workspace(base)
+            packet_path = self._write_packet(base)
+            result = run_cli(
+                "--workspace", str(workspace), "--role", "scout",
+                "--packet-file", str(packet_path),
+                "--loop", "7", "--frontier-slug", "substrate_supply",
+                "--no-digest", "--json",
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual("frontier_scout", payload["role_slug"])
+        self.assertEqual("scouts/loop7_substrate_supply.md", payload["delivery_path"])
+        self.assertEqual(
+            {"role": "frontier_scout", "loop_id": "loop_7",
+             "delivery_path": "scouts/loop7_substrate_supply.md"},
+            payload["suggested_record_fields"],
+        )
+        self.assertIn("Frontier Packet", payload["dispatch_text"])
+
+    def test_text_output_prints_dispatch_and_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            workspace = make_workspace(base)
+            packet_path = self._write_packet(base)
+            result = run_cli(
+                "--workspace", str(workspace), "--role", "scout",
+                "--packet-file", str(packet_path),
+                "--loop", "7", "--frontier-slug", "substrate_supply",
+                "--no-digest",
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("InP substrate qualified capacity", result.stdout)
+        self.assertIn("scouts/loop7_substrate_supply.md", result.stderr)
+
+    def test_screening_failure_exits_1(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            workspace = make_workspace(base)
+            leaky_path = base / "leaky.md"
+            leaky_path.write_text(
+                PACKET + "\nContext: target price implies upside.\n", encoding="utf-8"
+            )
+            result = run_cli(
+                "--workspace", str(workspace), "--role", "scout",
+                "--packet-file", str(leaky_path),
+                "--loop", "1", "--frontier-slug", "x", "--no-digest",
+            )
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("ASSEMBLY ERROR", result.stderr)
+        self.assertIn("DISPATCH_INPUT_MARKET_DATA", result.stderr)
+
+    def test_missing_name_field_exits_1(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            workspace = make_workspace(base)
+            packet_path = self._write_packet(base)
+            result = run_cli(
+                "--workspace", str(workspace), "--role", "scout",
+                "--packet-file", str(packet_path), "--loop", "1", "--no-digest",
+            )
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("frontier_slug", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
