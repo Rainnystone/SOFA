@@ -69,10 +69,11 @@ class TestScoutAssembly(unittest.TestCase):
             self.assertNotIn("{WORKSPACE}", result.dispatch_text)
             self.assertNotIn("[主线程粘贴完整 Frontier Packet]", result.dispatch_text)
             self.assertNotIn("## Placeholders", result.dispatch_text)
+            self.assertEqual("frontier_scout", result.suggested_record_fields["role"])
+            self.assertEqual("loop_7", result.suggested_record_fields["loop_id"])
             self.assertEqual(
-                {"role": "frontier_scout", "loop_id": "loop_7",
-                 "delivery_path": "scouts/loop7_substrate_supply.md"},
-                result.suggested_record_fields,
+                "scouts/loop7_substrate_supply.md",
+                result.suggested_record_fields["delivery_path"],
             )
 
     def test_missing_name_field_raises(self):
@@ -146,6 +147,63 @@ class TestRedTeamAssembly(unittest.TestCase):
             self.assertIn("Thesis bundle: claims C1-C3 with grades.", result.dispatch_text)
             self.assertIn("## 交付文件路径", result.dispatch_text)
             self.assertIn("[主线程必须回答的问题]", result.dispatch_text)
+
+
+class TestSuggestedRecordFields(unittest.TestCase):
+    def test_loop_role_marks_dispatch_only_fields_incomplete(self):
+        # scout has a loop in its filename template, so the assembler can fill
+        # role/loop_id/delivery_path. dispatch_id, mechanism, and status are
+        # properties of the dispatch act (not the packet), so they are always
+        # main-thread-supplied and listed in incomplete_fields.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            result = assemble_dispatch(
+                repo_root=ROOT, workspace=workspace, role="scout",
+                slot_values={"frontier_packet": PACKET},
+                name_fields={"loop": "7", "frontier_slug": "substrate_supply"},
+                attach_digest=False,
+            )
+            self.assertEqual("loop_7", result.suggested_record_fields["loop_id"])
+            self.assertEqual(
+                ["dispatch_id", "mechanism", "status"],
+                result.suggested_record_fields["incomplete_fields"],
+            )
+
+    def test_loopless_role_marks_loop_id_incomplete(self):
+        # financial_bridge filename template is {ticker}_bridge.md (no loop),
+        # so loop_id cannot be derived; sofa_contract still requires it on
+        # delivered records. The assembler must flag loop_id as incomplete so
+        # the main thread knows to bind the bridge to the relevant loop.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            result = assemble_dispatch(
+                repo_root=ROOT, workspace=workspace, role="financial",
+                slot_values={"bridge_input": "Thesis with financial context."},
+                name_fields={"ticker": "AXTI"},
+                attach_digest=False,
+            )
+            self.assertIsNone(result.suggested_record_fields.get("loop_id"))
+            self.assertIn(
+                "loop_id",
+                result.suggested_record_fields["incomplete_fields"],
+            )
+
+    def test_redteam_round_role_marks_loop_id_incomplete(self):
+        # red_team uses round{round}_redteam.md (no loop field), so loop_id
+        # is incomplete just like financial_bridge.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            result = assemble_dispatch(
+                repo_root=ROOT, workspace=workspace, role="redteam",
+                slot_values={"round_input": "Thesis bundle."},
+                name_fields={"round": "1"},
+                attach_digest=False,
+            )
+            self.assertIsNone(result.suggested_record_fields.get("loop_id"))
+            self.assertIn(
+                "loop_id",
+                result.suggested_record_fields["incomplete_fields"],
+            )
 
 
 class TestDigestAttachment(unittest.TestCase):
@@ -413,10 +471,14 @@ class TestAssembleDispatchCli(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual("frontier_scout", payload["role_slug"])
         self.assertEqual("scouts/loop7_substrate_supply.md", payload["delivery_path"])
+        suggested = payload["suggested_record_fields"]
+        self.assertEqual("frontier_scout", suggested["role"])
+        self.assertEqual("loop_7", suggested["loop_id"])
         self.assertEqual(
-            {"role": "frontier_scout", "loop_id": "loop_7",
-             "delivery_path": "scouts/loop7_substrate_supply.md"},
-            payload["suggested_record_fields"],
+            "scouts/loop7_substrate_supply.md", suggested["delivery_path"]
+        )
+        self.assertEqual(
+            ["dispatch_id", "mechanism", "status"], suggested["incomplete_fields"]
         )
         self.assertIn("Frontier Packet", payload["dispatch_text"])
 

@@ -183,9 +183,23 @@ def assemble_dispatch(
         text = text.rstrip() + "\n\n" + digest_text
         attachments.append("prior_query_digest")
 
-    suggested = {"role": worker.slug, "delivery_path": delivery_rel}
+    # suggested_record_fields is a partial dispatch_log.jsonl skeleton. The
+    # assembler fills only what it can derive deterministically; the main
+    # thread completes the record when the dispatch actually happens. loop_id
+    # is contract-required on delivered records but cannot be derived for
+    # roles whose filename template has no loop field (financial_bridge uses
+    # {ticker}, red_team uses {round}); for those roles loop_id is None and is
+    # flagged in incomplete_fields so the main thread binds the record to the
+    # relevant loop instead of silently shipping an incomplete record that
+    # sofa_contract will reject.
+    suggested: dict = {"role": worker.slug, "delivery_path": delivery_rel}
+    incomplete = ["dispatch_id", "mechanism", "status"]
     if "loop" in fields:
         suggested["loop_id"] = f"loop_{fields['loop']}"
+    else:
+        suggested["loop_id"] = None
+        incomplete.insert(0, "loop_id")
+    suggested["incomplete_fields"] = incomplete
 
     return AssembledDispatch(
         role_slug=worker.slug,
