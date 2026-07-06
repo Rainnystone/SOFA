@@ -324,6 +324,24 @@ class TestDispatchFacts(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual([], forbidden_input_violations(scout, text))
 
+    def test_market_data_pattern_catches_english_stock_share_price(self):
+        # isolated roles declare `stock_price` as a forbidden input class; the
+        # market-data tripwire must catch English stock/share-price language,
+        # not only the Chinese 股价 term.
+        scout = role_for_slug("frontier_scout")
+        passages = [
+            "The stock price fell 20% after the report.",
+            "Share price is up on the rumor.",
+            "Recent stock prices suggest mispricing.",
+        ]
+        for text in passages:
+            with self.subTest(text=text):
+                issues = forbidden_input_violations(scout, text)
+                self.assertEqual(
+                    ["DISPATCH_INPUT_MARKET_DATA"],
+                    [issue.issue_code for issue in issues],
+                )
+
     def test_validate_catalog_covers_dispatch_facts(self):
         self.assertEqual([], validate_catalog(ROOT))
 

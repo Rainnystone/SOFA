@@ -103,6 +103,7 @@ FILENAME_FIELD_PATTERN = re.compile(r"\{([a-z_]+)\}")
 
 MARKET_DATA_PATTERN = re.compile(
     r"(?:\btarget\s+price\b|\bmarket\s+cap(?:italization)?\b|\bP/E\b|\bPE\s+ratio\b"
+    r"|\bstock\s+prices?\b|\bshare\s+prices?\b"
     r"|市值|股价|目标价|市盈率)",
     re.IGNORECASE,
 )
