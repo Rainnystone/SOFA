@@ -306,6 +306,24 @@ class TestDispatchFacts(unittest.TestCase):
         )
         self.assertEqual([], forbidden_input_violations(scout, packet))
 
+    def test_market_data_pattern_allows_funding_and_valuation_figures(self):
+        # MARKET_DATA_PATTERN deliberately excludes raw currency figures and
+        # funding/valuation phrasing: customer-graph and supply-chain packets
+        # legitimately carry funding amounts for SIVE-style inference. This
+        # locks the deliberate-exclusion invariant so a future broadening of
+        # the regex cannot silently break those dispatches.
+        scout = role_for_slug("frontier_scout")
+        passages = [
+            "Supplier raised $500M Series C in 2024.",
+            "Company valued at $1.2 billion post-money.",
+            "Funding round: 100亿人民币.",
+            "Revenue reached $200M last year.",
+            "Cap table shows founders retain 40%.",
+        ]
+        for text in passages:
+            with self.subTest(text=text):
+                self.assertEqual([], forbidden_input_violations(scout, text))
+
     def test_validate_catalog_covers_dispatch_facts(self):
         self.assertEqual([], validate_catalog(ROOT))
 
