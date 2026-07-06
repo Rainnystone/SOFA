@@ -243,7 +243,7 @@ def _read_ledger_loop_map(workspace: Path) -> dict[str, str]:
 
     loop_map: dict[str, str] = {}
     for raw_line in ledger_path.read_text(encoding="utf-8").splitlines():
-        match = LOOP_HEADER_RE.fullmatch(raw_line.strip())
+        match = LOOP_HEADER_RE.fullmatch(raw_line.rstrip())
         if match is not None:
             loop_map[match.group("loop")] = match.group("frontier_id")
     return loop_map

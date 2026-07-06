@@ -181,6 +181,34 @@ class TestPriorQueryDigest(unittest.TestCase):
         self.assertIn("orphan dispatch query", by_group["unbound"].queries)
         self.assertIn("loop without ledger header", by_group["unbound"].queries)
 
+    def test_ledger_headers_with_leading_space_do_not_bind_frontiers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            workspace.mkdir()
+            (workspace / "evidence_ledger.md").write_text(
+                "# Evidence Ledger\n\n ## Loop 1: F1 - Indented header\n",
+                encoding="utf-8",
+            )
+            (workspace / "search_log.jsonl").write_text(
+                json.dumps(
+                    {
+                        "loop_id": "loop_1",
+                        "query": "query with invalid ledger binding",
+                        "result_status": "completed",
+                        "evidence_refs": [],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            groups = build_prior_query_digest(workspace)
+
+        by_group = {group.group_id: group for group in groups}
+        self.assertNotIn("F1", by_group)
+        self.assertIn("query with invalid ledger binding", by_group["unbound"].queries)
+
     def test_rendered_digest_carries_negative_trace_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = make_workspace(Path(temp_dir))
@@ -341,6 +369,18 @@ class TestSearchIntelCli(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode)
         self.assertIn("advisory only", result.stdout)
+
+    def test_stats_loop_filter_accepts_numeric_loop_argument(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+
+            result = run_cli("stats", str(workspace), "--loop", "1")
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode)
+        self.assertIn("| loop_1 | 2 | 1 |", result.stdout)
+        self.assertNotIn("| loop_2 |", result.stdout)
+        self.assertNotIn("(no records)", result.stdout)
 
     def test_malformed_search_log_exits_1(self):
         with tempfile.TemporaryDirectory() as temp_dir:

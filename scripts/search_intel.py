@@ -61,8 +61,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         stats = build_search_yield_stats(args.workspace)
-        if args.loop:
-            stats = [entry for entry in stats if entry.loop_key == args.loop]
+        loop_filter = _normalize_loop_filter(args.loop)
+        if loop_filter:
+            stats = [entry for entry in stats if entry.loop_key == loop_filter]
         if args.json:
             print(
                 json.dumps(
@@ -77,6 +78,14 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"SEARCH INTEL ERROR: {exc}", file=sys.stderr)
         return 1
+
+
+def _normalize_loop_filter(loop: str | None) -> str | None:
+    if loop is None:
+        return None
+    if loop.isdecimal():
+        return f"loop_{int(loop)}"
+    return loop
 
 
 if __name__ == "__main__":
