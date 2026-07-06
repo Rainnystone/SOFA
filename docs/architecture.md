@@ -102,6 +102,7 @@ Scripts enforce rules that should not depend on agent memory:
 | `validate_dossier.py` / `redteam_debate_validator.py` | Validate final report and red-team artifacts. |
 | `capability_check.py` | Detect optional search and financial-data capabilities without silently installing them; renders provider names and recommendations from `capability_policy/`. |
 | `capability_policy/` | Own canonical capability facts: search chain order, provider ids and labels, finance recommendations, search-record status vocabulary, stage-0 binding, dead-end categories, and missing-tool confidence language. |
+| `search_intel.py` | Render advisory prior-query digests and search yield statistics from `search_log.jsonl`; negative trace only, no readiness role. |
 | `generate_ultra_packet.py` | Convert Sector Hunt outputs into bounded Ticker Dive packets. |
 
 The main analyst thread may decide whether a frontier should continue or retire. The scripts decide whether that decision is legal, persisted, and gate-compatible.
