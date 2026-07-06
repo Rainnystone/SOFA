@@ -20,6 +20,11 @@ import sys
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from capability_policy import (
+    render_chain_arrow,
+    render_finance_summary,
+    render_setup_recommendation_lines,
+)
 from frontier_lifecycle import make_registry
 from workspace_contract import ArtifactSpec, artifact_contract_for_mode
 
@@ -185,8 +190,8 @@ python SOFA/scripts/capability_check.py --json
 
 | Capability | Mode | Status | Notes |
 |------------|------|--------|-------|
-| Search | AnySearch -> Exa -> Tavily -> host-agent built-ins | pending | |
-| Financial data | Wind for Chinese data; yfinance for English/global public-market data | pending | |
+| Search | {render_chain_arrow()} | pending | |
+| Financial data | {render_finance_summary()} | pending | |
 | Degraded mode | Explicitly documented reduced capability | pending | |
 
 """)
@@ -279,8 +284,8 @@ python SOFA/scripts/capability_check.py --json
 
     print(f"  Capability check:")
     print(f"    Run python SOFA/scripts/capability_check.py --json from the project root.")
-    print(f"    SOFA recommends AnySearch -> Exa -> Tavily -> host-agent built-ins for general search.")
-    print(f"    SOFA recommends Wind for Chinese financial data and yfinance for English/global public-market data.")
+    for line in render_setup_recommendation_lines():
+        print(f"    {line}")
     print(f"")
     print(f"Proceed to Stage 0: Intake + Framing.")
 
