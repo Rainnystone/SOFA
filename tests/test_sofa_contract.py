@@ -1791,12 +1791,25 @@ class TestCodexCloudReviewRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
             write_base_workspace(workspace, stages_completed=[], current_stage="stage_0")
+            # Phase 5: a stage_0 -> stage_1 transition now requires a complete
+            # framing contract. This test is about the workflow-progress row
+            # update, not framing, so seed a complete contract to keep the
+            # framing gate from masking the regression under test.
+            write_complete_framing_contract(workspace, mode="ticker")
             # Mimic init_workspace.py: Stage Progress rows start as pending, not
             # pre-marked complete. complete_stage() must flip the row too.
+            # The framing managed mirror must also be present (the stage_0
+            # gate now requires it); this test is about the workflow-progress
+            # row update, not framing, so seed both to keep the framing gate
+            # from masking the regression under test.
             (workspace / "research_workflow.md").write_text(
                 "\n".join(
                     [
                         "# Research Workflow",
+                        "",
+                        "<!-- SOFA:framing-contract:start -->",
+                        "rendered mirror",
+                        "<!-- SOFA:framing-contract:end -->",
                         "",
                         "## Stage Progress",
                         "| Stage | Status | Output Files | Notes |",
@@ -2165,6 +2178,115 @@ class TestSearchRecordVocabulary(unittest.TestCase):
         codes = [issue.code for issue in result.failures]
         self.assertNotIn("SEARCH_LOG_LOOP_COVERAGE_MISSING", codes)
         self.assertNotIn("SEARCH_LOG_MISSING", codes)
+
+
+def write_complete_framing_contract(workspace: Path, mode: str = "ticker") -> None:
+    subject = {
+        "confirmed_name": "Coherent Corp" if mode == "ticker" else "AI optical components",
+        "tickers": ["COHR"] if mode == "ticker" else [],
+        "exchange": "NYSE" if mode == "ticker" else "",
+        "resolution_method": "deterministic_quote" if mode == "ticker" else "framing_search",
+        "candidates": [],
+    }
+    (workspace / "framing_contract.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "subject_resolution": subject,
+                "mode": mode,
+                "research_posture": "fresh",
+                "time_horizon": "6-12 months",
+                "market_scope": "US public market",
+                "risk_appetite": "unknown-accepted-by-user",
+                "output_expectation": "decision memo",
+                "report_language": "zh",
+                "budget_appetite": "unknown-accepted-by-user",
+                "clarifications": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+class SofaContractFramingTests(unittest.TestCase):
+    def test_stage0_transition_requires_framing_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            write_base_workspace(workspace)
+            profile = ContractProfile(mode="ticker", target="stage_transition", from_stage="stage_0", to_stage="stage_1")
+            result = evaluate_workspace(workspace, profile)
+            codes = [issue.code for issue in result.failures]
+            self.assertIn("FRAMING_CONTRACT_MISSING", codes)
+
+    def test_stage0_transition_reports_missing_fields_and_mode_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            write_base_workspace(workspace)
+            (workspace / "framing_contract.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "subject_resolution": {
+                            "confirmed_name": "",
+                            "tickers": [],
+                            "exchange": "",
+                            "resolution_method": "",
+                            "candidates": [],
+                        },
+                        "mode": "sector",
+                        "research_posture": "fresh",
+                        "time_horizon": "unknown-accepted-by-user",
+                        "market_scope": "",
+                        "risk_appetite": "",
+                        "output_expectation": "",
+                        "report_language": "",
+                        "budget_appetite": "",
+                        "clarifications": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profile = ContractProfile(mode="ticker", target="stage_transition", from_stage="stage_0", to_stage="stage_1")
+            result = evaluate_workspace(workspace, profile)
+            failures = {(issue.code, issue.path) for issue in result.failures}
+            self.assertIn(("FRAMING_MODE_DRIFT", "framing_contract.json:mode"), failures)
+            self.assertIn(("FRAMING_FIELD_MISSING", "framing_contract.json:subject_resolution.confirmed_name"), failures)
+            self.assertIn(("FRAMING_FIELD_MISSING", "framing_contract.json:market_scope"), failures)
+
+    def test_stage0_transition_accepts_complete_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            write_base_workspace(workspace)
+            write_complete_framing_contract(workspace, mode="ticker")
+            # write_base_workspace does not scaffold the framing managed
+            # block, so add it here: the gate must require the mirror.
+            workflow_path = workspace / "research_workflow.md"
+            workflow_path.write_text(
+                workflow_path.read_text(encoding="utf-8")
+                + "\n<!-- SOFA:framing-contract:start -->\nrendered mirror\n<!-- SOFA:framing-contract:end -->\n",
+                encoding="utf-8",
+            )
+            profile = ContractProfile(mode="ticker", target="stage_transition", from_stage="stage_0", to_stage="stage_1")
+            result = evaluate_workspace(workspace, profile)
+            self.assertTrue(result.passed, result.failures)
+
+    def test_stage0_transition_requires_framing_managed_mirror(self):
+        # A complete framing_contract.json without the managed Markdown mirror
+        # must fail stage_0: the mirror is the post-compaction recovery
+        # anchor that justifies Phase 5, and the spec says Stage 0 is complete
+        # only when the contract is complete AND its mirror is rendered.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            write_base_workspace(workspace)
+            write_complete_framing_contract(workspace, mode="ticker")
+            # write_base_workspace's workflow has no framing markers.
+            profile = ContractProfile(mode="ticker", target="stage_transition", from_stage="stage_0", to_stage="stage_1")
+            result = evaluate_workspace(workspace, profile)
+            codes = [issue.code for issue in result.failures]
+            self.assertIn("FRAMING_MIRROR_MISSING", codes)
 
 
 if __name__ == "__main__":

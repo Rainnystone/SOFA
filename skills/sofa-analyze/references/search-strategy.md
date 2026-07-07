@@ -72,6 +72,14 @@ Stage 0 framing search is intentionally light. It may confirm:
 
 Stage 0 must not turn into thesis formation.
 
+Confirm the subject deterministically first when a ticker candidate exists — this costs zero search budget and resolves ticker→company mapping before any external search runs:
+
+```bash
+python scripts/fetch_financials.py COHR profile
+```
+
+The `profile` module returns `longName`, `exchange`, `sector`, and `industry`, which confirm the identity against user intent. Same-name tickers, multi-listing, ADR, renames, and parent/subsidiary ambiguity produce `framing_intake.py add-candidate` entries with exclusion rationale, and clarification questions are generated from the candidate table rather than improvised. Only then run framing search, and record `resolution_method` as `deterministic_quote`, `framing_search`, or `user_confirmed` honestly. Search is for unresolved identity, rename history, sector/theme framing, or evidence that deterministic quote/profile data cannot provide. When yfinance is unavailable (capability report), record `framing_search` or `user_confirmed` honestly.
+
 Log framing searches to `search_log.jsonl` with `loop_id: "stage_0"` so they join the machine-readable search trail before Loop 1 exists.
 
 ## Role-Specific Use

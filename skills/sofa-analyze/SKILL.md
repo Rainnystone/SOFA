@@ -56,7 +56,7 @@ Route first:
 - Sector Hunt: industry direction, technology trend, macro theme, or bottleneck question.
 - If the route is unclear, ask the user explicitly.
 
-Run `init_workspace.py` with the selected mode. Then perform a light framing search only to confirm the subject, current context, and user intent. Use [search-strategy.md](references/search-strategy.md). Do not form a thesis in Stage 0.
+Run `init_workspace.py` with the selected mode. Then perform a light framing search only to confirm the subject, current context, and user intent. Use [search-strategy.md](references/search-strategy.md). Do not form a thesis in Stage 0. Record the resolved subject, research posture (`fresh`/`verify-narrative`/`revisit`/`compare`), time horizon, market scope, risk appetite, output expectation, report language, and clarification outcomes into `framing_contract.json` via `scripts/framing_intake.py` (the only mutation path); the managed mirror renders into `research_workflow.md`. When the route is unclear, ask the user explicitly and record the answer with `add-clarification`. Stage 0 is complete only when the framing contract is complete and passes the `sofa_contract` stage_0 gate.
 
 Mandatory outputs:
 

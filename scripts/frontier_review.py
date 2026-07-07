@@ -20,9 +20,9 @@ from frontier_lifecycle import (
     get_frontier,
     render_discovery_log_md,
     render_review_log_md,
-    replace_managed_block,
     transition,
 )
+from workspace_contract import replace_managed_block
 
 
 REGISTRY_FILE = "frontier_registry.json"

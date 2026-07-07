@@ -322,6 +322,25 @@ class TestWorkspaceScripts(unittest.TestCase):
             self.assertEqual(0, force_result.returncode)
             self.assertIn("CPO laser bottleneck candidate", packet.read_text(encoding="utf-8"))
 
+    def test_init_workspace_creates_framing_contract_and_mirror_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            init_workspace.create_workspace("Coherent Corp", str(workspace), "ticker")
+            contract_path = workspace / "framing_contract.json"
+            self.assertTrue(contract_path.exists())
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            self.assertEqual(contract["schema_version"], "1.0")
+            self.assertEqual(contract["mode"], "")
+            self.assertEqual(contract["subject_resolution"]["tickers"], [])
+            workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+            self.assertIn("## Framing Intent Contract", workflow)
+            self.assertIn("<!-- SOFA:framing-contract:start -->", workflow)
+            self.assertIn("<!-- SOFA:framing-contract:end -->", workflow)
+            self.assertLess(
+                workflow.index("## Framing Intent Contract"),
+                workflow.index("## Stage Progress"),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

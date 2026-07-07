@@ -122,6 +122,23 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
                 if "## Architecture Shift" not in wf_content and "## 架构迁移" not in wf_content:
                     missing.append("research_workflow.md missing Architecture Shift Brief (Sector Hunt Stage 0 requirement)")
 
+        # Delegate framing-contract completeness to sofa_contract (the single
+        # readiness authority), mirroring the Stage 5 branch shape. The
+        # existing Stage 0 heading checks above are deliberately retained;
+        # consolidating them into sofa_contract is a later cleanup.
+        contract_result = evaluate_workspace(
+            workspace_path,
+            ContractProfile(
+                mode=mode,
+                target="stage_transition",
+                from_stage="stage_0",
+                to_stage="stage_1",
+            ),
+        )
+        missing.extend(issue.display() for issue in contract_result.failures)
+        for warning in contract_result.warnings:
+            print(f"[WARN] {warning.display()}")
+
     elif from_stage == "stage_1":
         if "stage_1" not in state.get("stages_completed", []):
             missing.append("Stage 1 not marked as completed in state.json")

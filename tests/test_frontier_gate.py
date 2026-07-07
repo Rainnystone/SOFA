@@ -7,7 +7,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 GATE_SCRIPT = ROOT / "scripts/gate_check.py"
+FRAMING_INTAKE_SCRIPT = ROOT / "scripts/framing_intake.py"
+
+from init_workspace import create_workspace  # noqa: E402
 
 
 class TestFrontierGateIntegration(unittest.TestCase):
@@ -248,6 +252,92 @@ class TestFrontierGateIntegration(unittest.TestCase):
 
             self.assertNotEqual(0, result.returncode, result.stdout)
             self.assertIn("FINAL_REPORT_MISSING", result.stdout)
+
+
+def complete_stage0_framing_contract(workspace: Path) -> None:
+    commands = [
+        ["set", "--field", "mode", "--value", "ticker"],
+        ["set", "--field", "research_posture", "--value", "fresh"],
+        ["set", "--field", "time_horizon", "--value", "6-12 months"],
+        ["set", "--field", "market_scope", "--value", "US public market"],
+        ["set", "--field", "risk_appetite", "--unknown-accepted"],
+        ["set", "--field", "output_expectation", "--value", "decision memo"],
+        ["set", "--field", "report_language", "--value", "zh"],
+        ["set", "--field", "budget_appetite", "--unknown-accepted"],
+        [
+            "resolve-subject",
+            "--name",
+            "Coherent Corp",
+            "--ticker",
+            "COHR",
+            "--exchange",
+            "NYSE",
+            "--method",
+            "deterministic_quote",
+        ],
+    ]
+    for args in commands:
+        result = subprocess.run(
+            [sys.executable, str(FRAMING_INTAKE_SCRIPT), str(workspace), *args],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise AssertionError(result.stderr)
+
+
+class TestStage0FramingGate(unittest.TestCase):
+    def run_gate_transition(self, workspace: Path, from_stage: str, to_stage: str):
+        return subprocess.run(
+            [sys.executable, str(GATE_SCRIPT), str(workspace), from_stage, to_stage],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_stage_0_gate_fails_when_framing_contract_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            create_workspace("Coherent Corp", str(workspace), "ticker")
+            # A freshly-initialized workspace has an empty framing contract,
+            # so the stage_0 -> stage_1 gate must fail and surface framing
+            # issue codes in its missing-items output.
+            result = self.run_gate_transition(workspace, "stage_0", "stage_1")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            combined = result.stdout + result.stderr
+            self.assertIn("FRAMING_FIELD_MISSING", combined)
+
+    def test_stage_0_gate_accepts_complete_framing_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            create_workspace("Coherent Corp", str(workspace), "ticker")
+            # Mark stage_0 complete in state.json AND in the workflow Stage
+            # Progress row, so the existing "stage_0 not in stages_completed"
+            # check and the STATE_WORKFLOW_STAGE_CONFLICT check do not mask
+            # the framing-contract check (all run in the stage_0 branch).
+            state_path = workspace / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["stages_completed"] = ["stage_0"]
+            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            workflow_path = workspace / "research_workflow.md"
+            workflow = workflow_path.read_text(encoding="utf-8")
+            workflow = workflow.replace(
+                "| Stage 0: Intake + Framing | in_progress | | |",
+                "| Stage 0: Intake + Framing | complete | | |",
+            )
+            # Also satisfy the existing heading checks the stage_0 branch
+            # keeps, so the only remaining gate is the framing contract.
+            workflow_path.write_text(
+                workflow
+                + "\n## Methodology Alignment\n\nfilled\n"
+                + "\n## Demand Decomposition\n\nfilled\n"
+                + "\n## Blind Spot Report\n\nfilled\n",
+                encoding="utf-8",
+            )
+            complete_stage0_framing_contract(workspace)
+            result = self.run_gate_transition(workspace, "stage_0", "stage_1")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

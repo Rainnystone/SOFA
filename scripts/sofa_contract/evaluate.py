@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-from workspace_contract import core_required_files
+from workspace_contract import core_required_files, managed_block_for_name
 from capability_policy import RESULT_STATUS_COMPLETED, RESULT_STATUS_DEGRADED
 from worker_role_catalog import (
     SOURCE_TRACE_MARKERS,
@@ -15,6 +15,11 @@ from worker_role_catalog import (
     normalize_role_slug,
     role_for_slug,
 )
+
+try:
+    from framing_contract import FramingContractError, evaluate_contract, load_contract
+except ImportError:
+    from scripts.framing_contract import FramingContractError, evaluate_contract, load_contract
 
 from .result import ContractProfile, ContractResult
 from .workspace import (
@@ -91,6 +96,8 @@ def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> 
     state = _check_core_workspace_files(workspace, result)
     workflow_text = read_text_file(workspace / "research_workflow.md")
     _check_state_workflow_consistency(workspace, state, workflow_text, result)
+    if _requires_framing_contract(profile):
+        _check_framing_contract(workspace, state, result)
     _check_search_log(workspace, state, result)
     _check_dispatch_log(workspace, workflow_text, profile, result)
     _check_worker_outputs(workspace, profile, result)
@@ -107,6 +114,83 @@ def _requires_final_report(profile: ContractProfile) -> bool:
         and profile.from_stage == "stage_5"
         and profile.to_stage == "stage_6"
     )
+
+
+def _requires_framing_contract(profile: ContractProfile) -> bool:
+    return (
+        profile.target == "stage_transition"
+        and profile.from_stage == "stage_0"
+        and profile.to_stage in {None, "stage_1"}
+    )
+
+
+def _check_framing_contract(workspace: Path, state_payload: dict | None, result: ContractResult) -> None:
+    # Note: ContractResult.fail signature is fail(code, message, path, evidence).
+    # message comes before path. Tests assert (issue.code, issue.path) tuples,
+    # so getting this order right is load-bearing.
+    try:
+        contract = load_contract(workspace)
+    except FileNotFoundError:
+        result.fail(
+            code="FRAMING_CONTRACT_MISSING",
+            message="framing_contract.json is required before completing Stage 0. Run scripts/framing_intake.py <workspace> init.",
+            path="framing_contract.json",
+        )
+        return
+    except json.JSONDecodeError as exc:
+        result.fail(
+            code="FRAMING_CONTRACT_MALFORMED",
+            message=f"framing_contract.json is not valid JSON: {exc}",
+            path="framing_contract.json",
+        )
+        return
+    except FramingContractError as exc:
+        result.fail(
+            code="FRAMING_CONTRACT_MALFORMED",
+            message=str(exc),
+            path="framing_contract.json",
+        )
+        return
+
+    state_mode = None
+    if isinstance(state_payload, dict):
+        state_mode = str(state_payload.get("mode", "")) or None
+    evaluation = evaluate_contract(contract, state_mode=state_mode)
+    for issue in evaluation.issues:
+        result.fail(
+            code=issue.code,
+            message=issue.message,
+            path=f"framing_contract.json:{issue.field}",
+        )
+
+    # The managed Markdown mirror is the post-compaction recovery anchor —
+    # Phase 5's reason for existing. A complete JSON without the mirror in
+    # research_workflow.md means intent is not recoverable across context
+    # loss, so Stage 0 cannot be complete. Check marker presence only (not
+    # content parity with the JSON); content consistency is the CLI's
+    # discipline and the gate must not diff prose.
+    _require_framing_mirror(workspace, result)
+
+
+def _require_framing_mirror(workspace: Path, result: ContractResult) -> None:
+    block = managed_block_for_name("framing-contract")
+    workflow_text = read_text_file(workspace / "research_workflow.md")
+    if workflow_text is None:
+        result.fail(
+            code="FRAMING_MIRROR_MISSING",
+            message="research_workflow.md is missing the framing-contract managed mirror required for Stage 0.",
+            path="research_workflow.md",
+        )
+        return
+    if block.start_marker not in workflow_text or block.end_marker not in workflow_text:
+        result.fail(
+            code="FRAMING_MIRROR_MISSING",
+            message=(
+                "research_workflow.md is missing the framing-contract managed block "
+                f"({block.start_marker}/{block.end_marker}). Run scripts/framing_intake.py <workspace> render."
+            ),
+            path="research_workflow.md",
+        )
 
 
 def _check_core_workspace_files(workspace: Path, result: ContractResult) -> dict | None:

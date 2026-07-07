@@ -111,6 +111,7 @@ COMMON_FILE_SPECS = (
     ArtifactSpec("capability_report.md", "capability_report.md", "file"),
     ArtifactSpec("state.json", "state.json", "file"),
     ArtifactSpec("frontier_registry.json", "frontier_registry.json", "file"),
+    ArtifactSpec("framing_contract.json", "framing_contract.json", "file"),
 )
 
 SECTOR_FILE_SPECS = (
@@ -118,6 +119,7 @@ SECTOR_FILE_SPECS = (
 )
 
 MACHINE_LEDGERS = (
+    "framing_contract.json",
     "search_log.jsonl",
     "dispatch_log.jsonl",
     "state.json",
@@ -131,6 +133,12 @@ CORE_REQUIRED_FILES = (
 )
 
 MANAGED_BLOCKS = (
+    ManagedBlock(
+        name="framing-contract",
+        heading="Framing Intent Contract",
+        start_marker="<!-- SOFA:framing-contract:start -->",
+        end_marker="<!-- SOFA:framing-contract:end -->",
+    ),
     ManagedBlock(
         name="frontier-review-log",
         heading="Frontier Review Log",
@@ -240,6 +248,51 @@ def core_required_files() -> tuple[str, ...]:
 
 def is_main_thread_artifact(relative_path: str | Path) -> bool:
     return _normalize_relative_path(relative_path) in MAIN_THREAD_ARTIFACTS
+
+
+def managed_block_for_name(name: str) -> ManagedBlock:
+    """Return the registered ManagedBlock for a block name.
+
+    O(n) lookup over the tuple; n is small (3 blocks today). Raises ValueError
+    for an unknown name so callers fail loudly rather than silently no-op.
+    """
+    for block in MANAGED_BLOCKS:
+        if block.name == name:
+            return block
+    raise ValueError(f"Unknown managed block: {name!r}")
+
+
+def replace_managed_block(text: str, block_name: str, replacement: str) -> str:
+    """Replace one named managed Markdown block by its registered markers.
+
+    Consumes the ManagedBlock data markers (no f-string re-derivation, which
+    was the marker double-source this migration kills). Preserves the
+    duplicate-marker and misordered-marker validation the frontier_lifecycle
+    version provided: exactly one start marker and exactly one end marker,
+    start before end.
+    """
+    block = managed_block_for_name(block_name)
+    begin = block.start_marker
+    end = block.end_marker
+
+    begin_count = text.count(begin)
+    end_count = text.count(end)
+    if begin_count == 0:
+        raise ValueError(f"managed block {block_name!r} has no start marker")
+    if end_count == 0:
+        raise ValueError(f"managed block {block_name!r} has no end marker")
+    if begin_count != 1:
+        raise ValueError(f"managed block {block_name!r} must have exactly one start marker")
+    if end_count != 1:
+        raise ValueError(f"managed block {block_name!r} must have exactly one end marker")
+
+    start = text.find(begin)
+    stop = text.find(end)
+    if start > stop:
+        raise ValueError(f"managed block {block_name!r} end marker appears before start marker")
+
+    block_text = f"{begin}\n{replacement.rstrip()}\n{end}"
+    return f"{text[:start]}{block_text}{text[stop + len(end):]}"
 
 
 def _normalize_relative_path(relative_path: str | Path) -> str:
