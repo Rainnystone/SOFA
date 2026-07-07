@@ -26,6 +26,7 @@ from framing_contract import (  # noqa: E402
     resolve_subject,
     save_contract,
 )
+from init_workspace import create_workspace  # noqa: E402
 
 
 class FramingContractCoreTests(unittest.TestCase):
@@ -243,6 +244,111 @@ class TestPackageImport(unittest.TestCase):
             text=True,
         )
         self.assertEqual(0, result.returncode, result.stderr)
+
+
+class FramingIntakeCliTests(unittest.TestCase):
+    def run_cli(self, workspace: Path, *args: str):
+        command = [
+            sys.executable,
+            str(ROOT / "scripts" / "framing_intake.py"),
+            str(workspace),
+            *args,
+        ]
+        return subprocess.run(command, text=True, capture_output=True, check=False)
+
+    def test_init_is_idempotent_and_renders_mirror(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            create_workspace("Coherent Corp", str(workspace), "ticker")
+            first = self.run_cli(workspace, "init")
+            second = self.run_cli(workspace, "init")
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+            self.assertEqual(workflow.count("<!-- SOFA:framing-contract:start -->"), 1)
+            self.assertEqual(workflow.count("<!-- SOFA:framing-contract:end -->"), 1)
+
+    def test_set_resolve_candidate_clarification_status_and_render(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            create_workspace("Coherent Corp", str(workspace), "ticker")
+            self.assertEqual(self.run_cli(workspace, "set", "--field", "mode", "--value", "ticker").returncode, 0)
+            self.assertEqual(self.run_cli(workspace, "set", "--field", "research_posture", "--value", "fresh").returncode, 0)
+            self.assertEqual(self.run_cli(workspace, "set", "--field", "time_horizon", "--value", "6-12 months").returncode, 0)
+            self.assertEqual(self.run_cli(workspace, "set", "--field", "market_scope", "--value", "US public market").returncode, 0)
+            self.assertEqual(self.run_cli(workspace, "set", "--field", "risk_appetite", "--unknown-accepted").returncode, 0)
+            self.assertEqual(self.run_cli(workspace, "set", "--field", "output_expectation", "--value", "decision memo").returncode, 0)
+            self.assertEqual(self.run_cli(workspace, "set", "--field", "report_language", "--value", "zh").returncode, 0)
+            self.assertEqual(self.run_cli(workspace, "set", "--field", "budget_appetite", "--unknown-accepted").returncode, 0)
+            self.assertEqual(
+                self.run_cli(
+                    workspace,
+                    "resolve-subject",
+                    "--name",
+                    "Coherent Corp",
+                    "--ticker",
+                    "COHR",
+                    "--exchange",
+                    "NYSE",
+                    "--method",
+                    "deterministic_quote",
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                self.run_cli(
+                    workspace,
+                    "add-candidate",
+                    "--name",
+                    "II-VI Inc",
+                    "--ticker",
+                    "IIVI",
+                    "--exchange",
+                    "NASDAQ",
+                    "--reason",
+                    "Historical issuer name, not current quote target.",
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                self.run_cli(
+                    workspace,
+                    "add-clarification",
+                    "--question",
+                    "行动导向还是观察导向？",
+                    "--answer",
+                    "先观察。",
+                ).returncode,
+                0,
+            )
+            status = self.run_cli(workspace, "status", "--json")
+            self.assertEqual(status.returncode, 0, status.stderr)
+            payload = json.loads(status.stdout)
+            self.assertTrue(payload["complete"])
+            self.assertEqual(payload["issues"], [])
+            rendered = self.run_cli(workspace, "render")
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+            self.assertIn("Coherent Corp", workflow)
+            self.assertIn("unknown-accepted-by-user", workflow)
+
+    def test_set_rejects_conflicting_value_arguments_and_malformed_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            create_workspace("Coherent Corp", str(workspace), "ticker")
+            conflict = self.run_cli(
+                workspace,
+                "set",
+                "--field",
+                "time_horizon",
+                "--value",
+                "6 months",
+                "--unknown-accepted",
+            )
+            self.assertNotEqual(conflict.returncode, 0)
+            (workspace / "framing_contract.json").write_text("{not-json", encoding="utf-8")
+            malformed = self.run_cli(workspace, "status")
+            self.assertNotEqual(malformed.returncode, 0)
 
 
 if __name__ == "__main__":
