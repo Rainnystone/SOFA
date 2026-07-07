@@ -106,9 +106,14 @@ Scripts enforce rules that should not depend on agent memory:
 | `capability_policy/` | Own canonical capability facts: search chain order, provider ids and labels, finance recommendations, search-record status vocabulary, stage-0 binding, dead-end categories, and missing-tool confidence language. |
 | `search_intel.py` | Render advisory prior-query digests and search yield statistics from `search_log.jsonl`; negative trace only, no readiness role. |
 | `dispatch_assembly/` + `assemble_dispatch.py` | Assemble worker dispatch text deterministically from catalog slot facts, curated prompt templates, and machine-trace attachments. Read-only: no workspace writes, no dispatch-log writes, no dispatching, no readiness role. |
+| `framing_contract/` + `framing_intake.py` | Own the Stage 0 framing intent contract: schema, field vocabulary, completeness evaluation, JSON authority, Markdown mirror, and mutation CLI. Consumed by `sofa_contract` for the stage_0 gate; never enters worker dispatches. |
 | `generate_ultra_packet.py` | Convert Sector Hunt outputs into bounded Ticker Dive packets. |
 
 The main analyst thread may decide whether a frontier should continue or retire. The scripts decide whether that decision is legal, persisted, and gate-compatible.
+
+### Framing Intent Contract
+
+`scripts/framing_contract/` owns the structured Stage 0 framing intent facts as a `framing_contract.json` workspace authority artifact plus a managed Markdown mirror in `research_workflow.md` (the `frontier_registry.json` authority-and-mirror pattern). The module owns the research-posture vocabulary (`fresh`, `verify-narrative`, `revisit`, `compare`) that future revisit work consumes. `sofa_contract` consumes its completeness facts for the stage_0 readiness gate; the module itself never decides advancement. All mutations go through `scripts/framing_intake.py`, which re-renders the mirror in the same operation. The framing contract is main-thread intent; it never enters worker dispatches, packets, or prompts (intent is thesis-adjacent context that worker isolation rules exclude). Extension seam: a new framing field adds a fact in `framing_contract/` plus a focused test; no consumer outside the contract, CLI, and stage_0 gate needs to change.
 
 ### Compliance Contract
 

@@ -123,6 +123,9 @@
 
 ### Next Evidence to Monitor
 （在 Watch Protocol 中详述）
+
+### Question Answered（对照原始意图）
+定稿前，对照 `framing_contract.json` 确认本报告回答了用户原始问题：读取契约的 `output_expectation`、`time_horizon`、`subject_resolution.confirmed_name`，逐项确认报告覆盖了请求的输出类型、时间框架与对象。`research_posture` 为 `verify-narrative` 时必须显式回应原叙事；`compare` 时必须给出对比结论。如有刻意偏离，必须在报告中说明原因。
 ```
 
 ---

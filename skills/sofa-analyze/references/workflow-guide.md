@@ -119,16 +119,29 @@
 
 ⛔ **禁止跳过 Blind Spot Scan 直接进入 Stage 1。**
 
-### 输出：Framing Brief + Decomposition Sketch + Blind Spot Report
+### 输出：Framing Intent Contract + Decomposition Sketch + Blind Spot Report
+
+Stage 0 is complete only when `framing_contract.json` is complete and its managed mirror is rendered inside `research_workflow.md` (the `<!-- SOFA:framing-contract:start/end -->` block). The Framing Intent Contract is the machine-readable authority for user intent; the rendered mirror is narration. Record intent through the mutation CLI (the only supported mutation path):
+
+```bash
+python scripts/framing_intake.py "<workspace>" init
+python scripts/framing_intake.py "<workspace>" set --field mode --value ticker
+python scripts/framing_intake.py "<workspace>" set --field research_posture --value fresh
+python scripts/framing_intake.py "<workspace>" set --field time_horizon --value "6-12 months"
+python scripts/framing_intake.py "<workspace>" set --field market_scope --value "US public market"
+python scripts/framing_intake.py "<workspace>" set --field risk_appetite --unknown-accepted
+python scripts/framing_intake.py "<workspace>" set --field output_expectation --value "decision memo"
+python scripts/framing_intake.py "<workspace>" set --field report_language --value zh
+python scripts/framing_intake.py "<workspace>" set --field budget_appetite --unknown-accepted
+python scripts/framing_intake.py "<workspace>" resolve-subject --name "Coherent Corp" --ticker COHR --exchange NYSE --method deterministic_quote
+python scripts/framing_intake.py "<workspace>" status
+```
+
+Field rules: `mode` (`ticker`/`sector`), `research_posture` (`fresh`/`verify-narrative`/`revisit`/`compare`), and subject resolution (`confirmed_name`, at least one `ticker` + `exchange` in ticker mode, `resolution_method`) are required and may **not** use the `unknown-accepted-by-user` sentinel. The preference fields (`time_horizon`, `market_scope`, `risk_appetite`, `output_expectation`, `report_language`, `budget_appetite`) accept the sentinel so the contract never blocks a user who declines to state a preference, but silent omission is not valid. Posture changes frontier design templates only; it never changes loop, challenge, or red-team floors. Record disambiguation candidates with `add-candidate` (all four of `--name`/`--ticker`/`--exchange`/`--reason` required) and clarification outcomes with `add-clarification`.
+
+近期语境校准（最近关键事件，包括行业会议、产品发布、财报）仍以 prose 写在 Framing Intent Contract 之上，作为人读补充；契约字段是 authority。
 
 ```markdown
-【Framing Brief】
-研究对象：[确认的公司/行业]
-研究模式：Ticker Dive / Sector Hunt
-近期语境：[最近关键事件，包括行业会议、产品发布、财报]
-可能研究目标：[1-3 个方向]
-需要你确认：[澄清问题]
-
 【Demand Decomposition Sketch】
 Layer 0: [终端应用] → 关键节点: [...], 瓶颈候选: [...]
 Layer 1: [系统级] → 关键节点: [...], 瓶颈候选: [...]
