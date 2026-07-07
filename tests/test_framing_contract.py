@@ -199,7 +199,7 @@ class FramingContractCoreTests(unittest.TestCase):
             )
 
             save_contract(workspace, contract)
-            raw = json.loads((workspace / FRAMING_CONTRACT_FILENAME).read_text())
+            raw = json.loads((workspace / FRAMING_CONTRACT_FILENAME).read_text(encoding="utf-8"))
             self.assertEqual(raw, contract)
             self.assertEqual(
                 raw["subject_resolution"]["candidates"][0]["reason_excluded"],
