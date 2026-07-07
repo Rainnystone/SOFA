@@ -16,6 +16,11 @@ from worker_role_catalog import (
     role_for_slug,
 )
 
+try:
+    from framing_contract import FramingContractError, evaluate_contract, load_contract
+except ImportError:
+    from scripts.framing_contract import FramingContractError, evaluate_contract, load_contract
+
 from .result import ContractProfile, ContractResult
 from .workspace import (
     find_markdown_reports,
@@ -91,6 +96,8 @@ def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> 
     state = _check_core_workspace_files(workspace, result)
     workflow_text = read_text_file(workspace / "research_workflow.md")
     _check_state_workflow_consistency(workspace, state, workflow_text, result)
+    if _requires_framing_contract(profile):
+        _check_framing_contract(workspace, state, result)
     _check_search_log(workspace, state, result)
     _check_dispatch_log(workspace, workflow_text, profile, result)
     _check_worker_outputs(workspace, profile, result)
@@ -107,6 +114,54 @@ def _requires_final_report(profile: ContractProfile) -> bool:
         and profile.from_stage == "stage_5"
         and profile.to_stage == "stage_6"
     )
+
+
+def _requires_framing_contract(profile: ContractProfile) -> bool:
+    return (
+        profile.target == "stage_transition"
+        and profile.from_stage == "stage_0"
+        and profile.to_stage in {None, "stage_1"}
+    )
+
+
+def _check_framing_contract(workspace: Path, state_payload: dict | None, result: ContractResult) -> None:
+    # Note: ContractResult.fail signature is fail(code, message, path, evidence).
+    # message comes before path. Tests assert (issue.code, issue.path) tuples,
+    # so getting this order right is load-bearing.
+    try:
+        contract = load_contract(workspace)
+    except FileNotFoundError:
+        result.fail(
+            code="FRAMING_CONTRACT_MISSING",
+            message="framing_contract.json is required before completing Stage 0. Run scripts/framing_intake.py <workspace> init.",
+            path="framing_contract.json",
+        )
+        return
+    except json.JSONDecodeError as exc:
+        result.fail(
+            code="FRAMING_CONTRACT_MALFORMED",
+            message=f"framing_contract.json is not valid JSON: {exc}",
+            path="framing_contract.json",
+        )
+        return
+    except FramingContractError as exc:
+        result.fail(
+            code="FRAMING_CONTRACT_MALFORMED",
+            message=str(exc),
+            path="framing_contract.json",
+        )
+        return
+
+    state_mode = None
+    if isinstance(state_payload, dict):
+        state_mode = str(state_payload.get("mode", "")) or None
+    evaluation = evaluate_contract(contract, state_mode=state_mode)
+    for issue in evaluation.issues:
+        result.fail(
+            code=issue.code,
+            message=issue.message,
+            path=f"framing_contract.json:{issue.field}",
+        )
 
 
 def _check_core_workspace_files(workspace: Path, result: ContractResult) -> dict | None:
