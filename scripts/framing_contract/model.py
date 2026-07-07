@@ -115,7 +115,14 @@ def apply_field(contract: dict[str, Any], field: str, value: str) -> None:
     """
     if field not in TOP_LEVEL_REQUIRED_FIELDS:
         raise FramingContractError(f"Unsupported framing field: {field}")
-    if not isinstance(value, str) or value == "":
+    if not isinstance(value, str):
+        raise FramingContractError(f"{field} value must be a string.")
+    if value == UNKNOWN_ACCEPTED:
+        # The sentinel is a legal value for preference fields; evaluate owns
+        # the forbidden-class check. A whitespace-only value is still rejected
+        # below because silent omission encoded as whitespace is never valid.
+        pass
+    elif value.strip() == "":
         raise FramingContractError(f"{field} value must be a non-empty string.")
     contract[field] = value
 
@@ -236,7 +243,20 @@ def _check_top_level_fields(
     }
     for field in TOP_LEVEL_REQUIRED_FIELDS:
         value = contract.get(field, "")
-        if value == "":
+        # Non-string values (hand-edited or generated contracts) cannot be a
+        # valid intent field: mark invalid rather than letting them fall
+        # through to "complete" and satisfy the Stage 0 gate.
+        if not isinstance(value, str):
+            issues.append(
+                FramingIssue(
+                    "FRAMING_VALUE_INVALID",
+                    field,
+                    f"{field} must be a string.",
+                )
+            )
+            fields.append(FieldStatus(field, "invalid", str(value)))
+            continue
+        if value.strip() == "":
             issues.append(FramingIssue("FRAMING_FIELD_MISSING", field, f"{field} is required."))
             fields.append(FieldStatus(field, "missing", ""))
             continue

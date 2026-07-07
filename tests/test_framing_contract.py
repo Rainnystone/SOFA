@@ -26,6 +26,7 @@ from framing_contract import (  # noqa: E402
     resolve_subject,
     save_contract,
 )
+from framing_contract import FramingContractError  # noqa: E402
 from init_workspace import create_workspace  # noqa: E402
 
 
@@ -216,6 +217,50 @@ class FramingContractCoreTests(unittest.TestCase):
             self.assertNotIn("Dispatch", rendered)
             self.assertNotIn("worker", rendered.lower())
 
+    def test_non_string_preference_value_is_invalid(self):
+        # A hand-edited or generated contract may carry a non-string value
+        # for a preference field (e.g. an empty list or number). evaluate
+        # must reject it as FRAMING_VALUE_INVALID rather than mark it
+        # complete — the Stage 0 gate relies on evaluate, so a malformed
+        # intent field cannot satisfy readiness.
+        contract = empty_contract()
+        contract["time_horizon"] = []
+        contract["market_scope"] = 42
+        apply_field(contract, "mode", "ticker")
+        apply_field(contract, "research_posture", "fresh")
+        apply_field(contract, "risk_appetite", UNKNOWN_ACCEPTED)
+        apply_field(contract, "output_expectation", "decision memo")
+        apply_field(contract, "report_language", "zh")
+        apply_field(contract, "budget_appetite", UNKNOWN_ACCEPTED)
+        result = evaluate_contract(contract)
+        failures = {(issue.code, issue.field) for issue in result.issues}
+        self.assertIn(("FRAMING_VALUE_INVALID", "time_horizon"), failures)
+        self.assertIn(("FRAMING_VALUE_INVALID", "market_scope"), failures)
+
+    def test_whitespace_only_preference_value_is_treated_as_missing(self):
+        # silent omission encoded as whitespace (e.g. --value " ") must not
+        # satisfy a required field. Phase 5 spec: silent omission is not valid.
+        contract = empty_contract()
+        apply_field(contract, "mode", "ticker")
+        apply_field(contract, "research_posture", "fresh")
+        contract["time_horizon"] = "   "
+        apply_field(contract, "market_scope", "US public market")
+        apply_field(contract, "risk_appetite", UNKNOWN_ACCEPTED)
+        apply_field(contract, "output_expectation", "decision memo")
+        apply_field(contract, "report_language", "zh")
+        apply_field(contract, "budget_appetite", UNKNOWN_ACCEPTED)
+        result = evaluate_contract(contract)
+        failures = {(issue.code, issue.field) for issue in result.issues}
+        self.assertIn(("FRAMING_FIELD_MISSING", "time_horizon"), failures)
+
+    def test_apply_field_rejects_whitespace_only_value(self):
+        # apply_field is the CLI's writer; it must refuse to encode a
+        # whitespace-only value rather than let it land and be caught only
+        # at evaluate time.
+        contract = empty_contract()
+        with self.assertRaises(FramingContractError):
+            apply_field(contract, "time_horizon", "   ")
+
 
 class TestPackageImport(unittest.TestCase):
     """Namespace-import lock (PR #12 dual-import convention).
@@ -349,6 +394,51 @@ class FramingIntakeCliTests(unittest.TestCase):
             (workspace / "framing_contract.json").write_text("{not-json", encoding="utf-8")
             malformed = self.run_cli(workspace, "status")
             self.assertNotEqual(malformed.returncode, 0)
+
+    def test_resolve_subject_allows_empty_exchange_in_sector_mode(self):
+        # Sector Hunt workspaces may legitimately have no exchange (the
+        # evaluator explicitly allows empty ticker+exchange in sector mode).
+        # The CLI must not force argparse to reject the command before the
+        # model can record the subject.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            create_workspace("AI optical components", str(workspace), "sector")
+            result = self.run_cli(
+                workspace,
+                "resolve-subject",
+                "--name",
+                "AI optical components",
+                "--method",
+                "framing_search",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            contract = json.loads((workspace / "framing_contract.json").read_text(encoding="utf-8"))
+            self.assertEqual(contract["subject_resolution"]["confirmed_name"], "AI optical components")
+            self.assertEqual(contract["subject_resolution"]["exchange"], "")
+
+    def test_mutation_does_not_leave_json_written_when_mirror_render_fails(self):
+        # If research_workflow.md has malformed framing markers, a mutating
+        # subcommand must not leave framing_contract.json updated while the
+        # Markdown mirror stays stale. The frontier_review precedent renders
+        # before persisting; framing_intake must follow the same shape.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            create_workspace("Coherent Corp", str(workspace), "ticker")
+            contract_path = workspace / "framing_contract.json"
+            original_json = contract_path.read_text(encoding="utf-8")
+            # Corrupt the workflow so the framing markers are malformed:
+            # duplicate start marker makes replace_managed_block raise.
+            workflow_path = workspace / "research_workflow.md"
+            workflow = workflow_path.read_text(encoding="utf-8")
+            workflow = workflow.replace(
+                "<!-- SOFA:framing-contract:start -->",
+                "<!-- SOFA:framing-contract:start -->\nold\n<!-- SOFA:framing-contract:start -->",
+            )
+            workflow_path.write_text(workflow, encoding="utf-8")
+            result = self.run_cli(workspace, "set", "--field", "mode", "--value", "ticker")
+            self.assertNotEqual(result.returncode, 0)
+            # JSON must be unchanged (rollback or render-before-save).
+            self.assertEqual(original_json, contract_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
