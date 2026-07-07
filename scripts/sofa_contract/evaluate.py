@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-from workspace_contract import core_required_files
+from workspace_contract import core_required_files, managed_block_for_name
 from capability_policy import RESULT_STATUS_COMPLETED, RESULT_STATUS_DEGRADED
 from worker_role_catalog import (
     SOURCE_TRACE_MARKERS,
@@ -161,6 +161,35 @@ def _check_framing_contract(workspace: Path, state_payload: dict | None, result:
             code=issue.code,
             message=issue.message,
             path=f"framing_contract.json:{issue.field}",
+        )
+
+    # The managed Markdown mirror is the post-compaction recovery anchor —
+    # Phase 5's reason for existing. A complete JSON without the mirror in
+    # research_workflow.md means intent is not recoverable across context
+    # loss, so Stage 0 cannot be complete. Check marker presence only (not
+    # content parity with the JSON); content consistency is the CLI's
+    # discipline and the gate must not diff prose.
+    _require_framing_mirror(workspace, result)
+
+
+def _require_framing_mirror(workspace: Path, result: ContractResult) -> None:
+    block = managed_block_for_name("framing-contract")
+    workflow_text = read_text_file(workspace / "research_workflow.md")
+    if workflow_text is None:
+        result.fail(
+            code="FRAMING_MIRROR_MISSING",
+            message="research_workflow.md is missing the framing-contract managed mirror required for Stage 0.",
+            path="research_workflow.md",
+        )
+        return
+    if block.start_marker not in workflow_text or block.end_marker not in workflow_text:
+        result.fail(
+            code="FRAMING_MIRROR_MISSING",
+            message=(
+                "research_workflow.md is missing the framing-contract managed block "
+                f"({block.start_marker}/{block.end_marker}). Run scripts/framing_intake.py <workspace> render."
+            ),
+            path="research_workflow.md",
         )
 
 

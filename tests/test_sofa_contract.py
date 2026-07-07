@@ -1798,10 +1798,18 @@ class TestCodexCloudReviewRegressions(unittest.TestCase):
             write_complete_framing_contract(workspace, mode="ticker")
             # Mimic init_workspace.py: Stage Progress rows start as pending, not
             # pre-marked complete. complete_stage() must flip the row too.
+            # The framing managed mirror must also be present (the stage_0
+            # gate now requires it); this test is about the workflow-progress
+            # row update, not framing, so seed both to keep the framing gate
+            # from masking the regression under test.
             (workspace / "research_workflow.md").write_text(
                 "\n".join(
                     [
                         "# Research Workflow",
+                        "",
+                        "<!-- SOFA:framing-contract:start -->",
+                        "rendered mirror",
+                        "<!-- SOFA:framing-contract:end -->",
                         "",
                         "## Stage Progress",
                         "| Stage | Status | Output Files | Notes |",
@@ -2253,9 +2261,32 @@ class SofaContractFramingTests(unittest.TestCase):
             workspace = Path(tmp)
             write_base_workspace(workspace)
             write_complete_framing_contract(workspace, mode="ticker")
+            # write_base_workspace does not scaffold the framing managed
+            # block, so add it here: the gate must require the mirror.
+            workflow_path = workspace / "research_workflow.md"
+            workflow_path.write_text(
+                workflow_path.read_text(encoding="utf-8")
+                + "\n<!-- SOFA:framing-contract:start -->\nrendered mirror\n<!-- SOFA:framing-contract:end -->\n",
+                encoding="utf-8",
+            )
             profile = ContractProfile(mode="ticker", target="stage_transition", from_stage="stage_0", to_stage="stage_1")
             result = evaluate_workspace(workspace, profile)
             self.assertTrue(result.passed, result.failures)
+
+    def test_stage0_transition_requires_framing_managed_mirror(self):
+        # A complete framing_contract.json without the managed Markdown mirror
+        # must fail stage_0: the mirror is the post-compaction recovery
+        # anchor that justifies Phase 5, and the spec says Stage 0 is complete
+        # only when the contract is complete AND its mirror is rendered.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            write_base_workspace(workspace)
+            write_complete_framing_contract(workspace, mode="ticker")
+            # write_base_workspace's workflow has no framing markers.
+            profile = ContractProfile(mode="ticker", target="stage_transition", from_stage="stage_0", to_stage="stage_1")
+            result = evaluate_workspace(workspace, profile)
+            codes = [issue.code for issue in result.failures]
+            self.assertIn("FRAMING_MIRROR_MISSING", codes)
 
 
 if __name__ == "__main__":
