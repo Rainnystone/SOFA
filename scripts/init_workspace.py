@@ -28,6 +28,11 @@ from capability_policy import (
 from frontier_lifecycle import make_registry
 from workspace_contract import ArtifactSpec, artifact_contract_for_mode
 
+try:
+    from framing_contract import empty_contract, render_contract_markdown
+except ImportError:
+    from scripts.framing_contract import empty_contract, render_contract_markdown
+
 
 def _artifact_path(workspace_path: str, artifact: ArtifactSpec) -> str:
     if artifact.path == ".":
@@ -47,10 +52,13 @@ def _create_directories(
             created.append(artifact.label)
 
 
-def _managed_block_markdown(contract, block_name: str) -> str:
+def _managed_block_markdown(contract, block_name: str, content: str = "") -> str:
     for block in contract.managed_blocks:
         if block.name == block_name:
-            return f"## {block.heading}\n{block.start_marker}\n{block.end_marker}"
+            body = content.rstrip()
+            if body:
+                body = body + "\n"
+            return f"## {block.heading}\n{block.start_marker}\n{body}{block.end_marker}"
     raise ValueError(f"Unknown SOFA managed block: {block_name}")
 
 
@@ -61,6 +69,12 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
     skipped_existing = []
     contract = artifact_contract_for_mode(mode)
     mode = contract.mode
+
+    # Compute the empty framing contract and its Markdown mirror once; both
+    # the workflow scaffold and the machine-ledger write consume this.
+    framing_contract_doc = empty_contract()
+    framing_mirror = render_contract_markdown(framing_contract_doc)
+    framing_block_md = _managed_block_markdown(contract, "framing-contract", framing_mirror)
 
     # Create directory structure (common)
     _create_directories(workspace_path, contract.directory_specs, created, skipped_existing)
@@ -78,6 +92,7 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
 - Current Stage: Stage 0 (Intake + Framing)
 - Workspace: {workspace_path}
 
+{framing_block_md}
 ## Stage Progress
 | Stage | Status | Output Files | Notes |
 |-------|--------|--------------|-------|
@@ -169,12 +184,17 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
         if ledger_name in {"state.json", "frontier_registry.json"}:
             continue
         ledger_path = os.path.join(workspace_path, ledger_name)
-        if not os.path.exists(ledger_path):
+        if os.path.exists(ledger_path):
+            skipped_existing.append(ledger_name)
+            continue
+        if ledger_name == "framing_contract.json":
+            with open(ledger_path, "w", encoding="utf-8") as f:
+                json.dump(framing_contract_doc, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+        else:
             with open(ledger_path, "w", encoding="utf-8"):
                 pass
-            created.append(ledger_name)
-        else:
-            skipped_existing.append(ledger_name)
+        created.append(ledger_name)
 
     # Create capability_report.md
     capability_report_path = os.path.join(workspace_path, "capability_report.md")

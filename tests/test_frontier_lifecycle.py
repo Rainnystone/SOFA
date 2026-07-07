@@ -890,74 +890,13 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertIn("custom: manual audit marker", review_md)
         self.assertIn("custom: manual audit marker", discovery_md)
 
-    def test_replace_managed_block_uses_v4_markers_and_rejects_malformed(self):
-        original = "\n".join(
-            [
-                "# Report",
-                "",
-                "<!-- SOFA:frontier_review:start -->",
-                "old content",
-                "<!-- SOFA:frontier_review:end -->",
-                "",
-            ]
-        )
-        expected = "\n".join(
-            [
-                "# Report",
-                "",
-                "<!-- SOFA:frontier_review:start -->",
-                "new content",
-                "<!-- SOFA:frontier_review:end -->",
-                "",
-            ]
-        )
-        replaced = self.module.replace_managed_block(original, "frontier_review", "new content\n")
-        self.assertEqual(expected, replaced)
-        self.assertEqual(expected, self.module.replace_managed_block(replaced, "frontier_review", "new content"))
-
-        with self.assertRaises(self.module.LifecycleError):
-            self.module.replace_managed_block("# Report\n", "frontier_review", "new content")
-        with self.assertRaises(self.module.LifecycleError):
-            self.module.replace_managed_block(
-                "<!-- SOFA:frontier_review:start -->\nold content\n",
-                "frontier_review",
-                "new content",
-            )
-
-    def test_replace_managed_block_rejects_duplicate_or_misordered_markers(self):
-        malformed_cases = [
-            "<!-- SOFA:frontier_review:end -->",
-            "\n".join(
-                [
-                    "<!-- SOFA:frontier_review:start -->",
-                    "first",
-                    "<!-- SOFA:frontier_review:start -->",
-                    "second",
-                    "<!-- SOFA:frontier_review:end -->",
-                ]
-            ),
-            "\n".join(
-                [
-                    "<!-- SOFA:frontier_review:start -->",
-                    "first",
-                    "<!-- SOFA:frontier_review:end -->",
-                    "<!-- SOFA:frontier_review:end -->",
-                ]
-            ),
-            "\n".join(
-                [
-                    "<!-- SOFA:frontier_review:end -->",
-                    "<!-- SOFA:frontier_review:start -->",
-                    "first",
-                    "<!-- SOFA:frontier_review:end -->",
-                ]
-            ),
-        ]
-
-        for malformed in malformed_cases:
-            with self.subTest(malformed=malformed):
-                with self.assertRaises(self.module.LifecycleError):
-                    self.module.replace_managed_block(malformed, "frontier_review", "new content")
+    # Note: the two replace_managed_block tests that previously lived here
+    # (test_replace_managed_block_uses_v4_markers_and_rejects_malformed and
+    # test_replace_managed_block_rejects_duplicate_or_misordered_markers) were
+    # migrated to tests/test_workspace_contract.py when replace_managed_block
+    # moved from frontier_lifecycle into workspace_contract (Phase 5). They
+    # now use the registered block name "frontier-review-log" and ValueError,
+    # and the framing-contract block is covered there too.
 
 
 if __name__ == "__main__":

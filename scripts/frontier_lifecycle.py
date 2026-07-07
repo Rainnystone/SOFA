@@ -375,31 +375,6 @@ def render_discovery_log_md(registry: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def replace_managed_block(text: str, block_name: str, replacement: str) -> str:
-    """Replace one named v4 managed Markdown block."""
-    begin = f"<!-- SOFA:{block_name}:start -->"
-    end = f"<!-- SOFA:{block_name}:end -->"
-    block = f"{begin}\n{replacement.rstrip()}\n{end}"
-
-    begin_count = text.count(begin)
-    end_count = text.count(end)
-    if begin_count == 0:
-        raise LifecycleError(f"managed block {block_name!r} has no start marker")
-    if end_count == 0:
-        raise LifecycleError(f"managed block {block_name!r} has no end marker")
-    if begin_count != 1:
-        raise LifecycleError(f"managed block {block_name!r} must have exactly one start marker")
-    if end_count != 1:
-        raise LifecycleError(f"managed block {block_name!r} must have exactly one end marker")
-
-    start = text.find(begin)
-    stop = text.find(end)
-    if start > stop:
-        raise LifecycleError(f"managed block {block_name!r} end marker appears before start marker")
-
-    return f"{text[:start]}{block}{text[stop + len(end):]}"
-
-
 def _next_frontier_id(registry: dict[str, Any]) -> str:
     max_seen = 0
     for frontier in registry.get("frontiers", []):
