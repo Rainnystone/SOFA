@@ -135,25 +135,37 @@ def command_render(workspace: Path, _args: argparse.Namespace) -> int:
 
 
 def save_and_render(workspace: Path, contract: dict) -> None:
+    # Render the mirror text BEFORE writing anything to disk, so a malformed
+    # workflow (missing/duplicate markers) fails before the JSON is updated.
+    # This mirrors the frontier_review.py precedent (render_workflow before
+    # persist_record_outputs) and keeps the "same operation" mutation
+    # promise: the JSON and its Markdown mirror never diverge.
+    updated = _render_workflow_text(workspace, contract)
     save_contract(workspace, contract)
-    render_into_workflow(workspace, contract)
+    (workspace / "research_workflow.md").write_text(updated, encoding="utf-8")
 
 
 def render_into_workflow(workspace: Path, contract: dict) -> None:
+    # Re-render only (init/render subcommands that do not change the JSON).
+    updated = _render_workflow_text(workspace, contract)
+    (workspace / "research_workflow.md").write_text(updated, encoding="utf-8")
+
+
+def _render_workflow_text(workspace: Path, contract: dict) -> str:
+    # Pure read+render: may raise on a malformed workflow (missing/duplicate
+    # markers). Callers persist only after this returns, so a render failure
+    # leaves the JSON untouched.
     workflow_path = workspace / "research_workflow.md"
     text = workflow_path.read_text(encoding="utf-8")
     block = managed_block_for_name("framing-contract")
     rendered = render_contract_markdown(contract)
     if block.start_marker in text or block.end_marker in text:
-        updated = replace_managed_block(text, "framing-contract", rendered)
-    else:
-        managed = f"## {block.heading}\n{block.start_marker}\n{rendered.rstrip()}\n{block.end_marker}\n\n"
-        marker = "\n## Stage Progress"
-        if marker in text:
-            updated = text.replace(marker, "\n" + managed.rstrip() + marker, 1)
-        else:
-            updated = text.rstrip() + "\n\n" + managed
-    workflow_path.write_text(updated, encoding="utf-8")
+        return replace_managed_block(text, "framing-contract", rendered)
+    managed = f"## {block.heading}\n{block.start_marker}\n{rendered.rstrip()}\n{block.end_marker}\n\n"
+    marker = "\n## Stage Progress"
+    if marker in text:
+        return text.replace(marker, "\n" + managed.rstrip() + marker, 1)
+    return text.rstrip() + "\n\n" + managed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -172,7 +184,10 @@ def build_parser() -> argparse.ArgumentParser:
     resolve_parser = subparsers.add_parser("resolve-subject", help="Record subject resolution")
     resolve_parser.add_argument("--name", required=True)
     resolve_parser.add_argument("--ticker", action="append", default=[])
-    resolve_parser.add_argument("--exchange", required=True)
+    # --exchange is optional: Sector Hunt workspaces may legitimately have no
+    # exchange (the evaluator explicitly allows empty ticker+exchange in
+    # sector mode). Ticker mode enforces exchange at evaluate time.
+    resolve_parser.add_argument("--exchange", default="")
     resolve_parser.add_argument("--method", required=True)
     resolve_parser.set_defaults(func=command_resolve_subject)
 
