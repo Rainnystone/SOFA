@@ -223,6 +223,22 @@ class TestCliStdoutBehaviorUnderLegacyEncoding(unittest.TestCase):
         self.assertNotIn("UnicodeEncodeError", stderr)
         self.assertNotEqual(result.returncode, -1)
 
+    def test_framing_intake_error_path_prints_chinese_on_stderr_under_legacy_encoding(
+        self,
+    ):
+        # framing_intake.py reports failures as "错误: ..." on stderr. Without
+        # sys.stderr.reconfigure the error path does not preserve visible
+        # Chinese under a non-UTF-8 pipe; depending on runtime it may escape
+        # the text or fail during emission.
+        workspace = self._make_workspace()
+        result = _run_script(
+            SCRIPTS / "framing_intake.py", str(workspace), "status", cwd=ROOT,
+        )
+        self.assertNotEqual(0, result.returncode)
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        self.assertIn("错误", stderr)
+        self.assertNotIn("UnicodeEncodeError", stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
