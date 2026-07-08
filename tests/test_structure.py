@@ -79,6 +79,7 @@ class TestSofaStructure(unittest.TestCase):
             "skills/sofa-analyze/references/method-card-spec.md",
             "skills/sofa-analyze/references/knowledge/methodology.md",
             "skills/sofa-analyze/method-cards/index.md",
+            "scripts/archive_source.py",
             "scripts/capability_check.py",
             "scripts/frontier_lifecycle.py",
             "scripts/frontier_review.py",

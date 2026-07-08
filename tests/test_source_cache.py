@@ -268,6 +268,169 @@ class BibliographyTests(unittest.TestCase):
                 render_source_bibliography(workspace)
 
 
+class ArchiveSourceCliTests(unittest.TestCase):
+    def run_cli(self, workspace: Path, *args: str):
+        command = [
+            sys.executable,
+            str(ROOT / "scripts" / "archive_source.py"),
+            str(workspace),
+            *args,
+        ]
+        return subprocess.run(command, text=True, capture_output=True, check=False)
+
+    def _add_args(self, excerpt_file: Path):
+        return (
+            "add",
+            "--url", "https://www.sec.gov/acme-10k",
+            "--title", "FY2025 10-K – Coherent Corp",
+            "--retrieved", "2026-07-08",
+            "--grade", "A",
+            "--excerpt-file", str(excerpt_file),
+        )
+
+    def test_add_status_bibliography_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            excerpt_file = Path(tmp) / "excerpt.md"
+            excerpt_file.write_text(EXCERPT, encoding="utf-8")
+
+            added = self.run_cli(workspace, *self._add_args(excerpt_file))
+            self.assertEqual(0, added.returncode, added.stderr)
+            self.assertIn("src-001", added.stdout)
+            self.assertTrue((workspace / SOURCE_INDEX_FILENAME).exists())
+
+            deduped = self.run_cli(workspace, *self._add_args(excerpt_file))
+            self.assertEqual(0, deduped.returncode, deduped.stderr)
+            self.assertIn("src-001", deduped.stdout)
+            self.assertIn("未新增", deduped.stdout)
+
+            status = self.run_cli(workspace, "status")
+            self.assertEqual(0, status.returncode, status.stderr)
+            self.assertIn("已归档来源: 1", status.stdout)
+
+            status_json = self.run_cli(workspace, "status", "--json")
+            self.assertEqual(0, status_json.returncode, status_json.stderr)
+            payload = json.loads(status_json.stdout)
+            self.assertEqual(1, payload["records"])
+            self.assertEqual([], payload["issues"])
+
+            bibliography = self.run_cli(workspace, "bibliography")
+            self.assertEqual(0, bibliography.returncode, bibliography.stderr)
+            self.assertIn(BIBLIOGRAPHY_HEADING, bibliography.stdout)
+
+    def test_status_exits_zero_on_readable_index_with_issues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            record = {
+                "source_id": "src-001",
+                "url": "https://example.com",
+                "title": "Missing excerpt",
+                "retrieved": "2026-07-08",
+                "grade": "B",
+                "excerpt_path": "sources/src-001.md",
+                "sha256": "0" * 64,
+            }
+            (workspace / SOURCE_INDEX_FILENAME).write_text(
+                json.dumps(record) + "\n", encoding="utf-8"
+            )
+            status = self.run_cli(workspace, "status")
+            self.assertEqual(0, status.returncode, status.stderr)
+            self.assertIn("SOURCE_EXCERPT_MISSING", status.stdout)
+
+    def test_every_subcommand_fails_loudly_on_unparseable_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            (workspace / SOURCE_INDEX_FILENAME).write_text("not json\n", encoding="utf-8")
+            excerpt_file = Path(tmp) / "excerpt.md"
+            excerpt_file.write_text(EXCERPT, encoding="utf-8")
+            for args in (self._add_args(excerpt_file), ("status",), ("bibliography",)):
+                with self.subTest(args=args):
+                    result = self.run_cli(workspace, *args)
+                    self.assertEqual(1, result.returncode)
+                    self.assertIn("错误", result.stderr)
+
+    def test_add_rejects_readable_invalid_index_without_writing(self):
+        cases = {
+            "missing-field": lambda record: {
+                key: value for key, value in record.items() if key != "title"
+            },
+            "bad-grade": lambda record: dict(record, grade="Z"),
+            "out-of-folder": lambda record: dict(record, excerpt_path="../src-001.md"),
+            "duplicate-hash": lambda record: (
+                record,
+                dict(record, source_id="src-002", excerpt_path="sources/src-002.md"),
+            ),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp) / "ws"
+                workspace.mkdir()
+                add_fixture_source(workspace)
+                if name == "duplicate-hash":
+                    (workspace / SOURCES_DIRNAME / "src-002.md").write_text(
+                        EXCERPT, encoding="utf-8"
+                    )
+                    records = mutate(
+                        json.loads(
+                            (workspace / SOURCE_INDEX_FILENAME).read_text(encoding="utf-8")
+                        )
+                    )
+                    (workspace / SOURCE_INDEX_FILENAME).write_text(
+                        "\n".join(
+                            json.dumps(record, ensure_ascii=False) for record in records
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    record = mutate(
+                        json.loads(
+                            (workspace / SOURCE_INDEX_FILENAME).read_text(encoding="utf-8")
+                        )
+                    )
+                    (workspace / SOURCE_INDEX_FILENAME).write_text(
+                        json.dumps(record, ensure_ascii=False) + "\n",
+                        encoding="utf-8",
+                    )
+                before_index = (workspace / SOURCE_INDEX_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+                before_files = sorted(
+                    path.name for path in (workspace / SOURCES_DIRNAME).iterdir()
+                )
+                excerpt_file = Path(tmp) / "excerpt.md"
+                excerpt_file.write_text("new excerpt\n", encoding="utf-8")
+                result = self.run_cli(workspace, *self._add_args(excerpt_file))
+                self.assertEqual(1, result.returncode)
+                self.assertIn("错误", result.stderr)
+                self.assertEqual(
+                    before_index,
+                    (workspace / SOURCE_INDEX_FILENAME).read_text(encoding="utf-8"),
+                )
+                self.assertEqual(
+                    before_files,
+                    sorted(path.name for path in (workspace / SOURCES_DIRNAME).iterdir()),
+                )
+
+    def test_add_rejects_bad_flags_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            excerpt_file = Path(tmp) / "excerpt.md"
+            excerpt_file.write_text(EXCERPT, encoding="utf-8")
+            bad = self.run_cli(
+                workspace, "add",
+                "--url", "https://example.com", "--title", "t",
+                "--retrieved", "2026-07-08", "--grade", "Z",
+                "--excerpt-file", str(excerpt_file),
+            )
+            self.assertEqual(1, bad.returncode)
+            self.assertFalse((workspace / SOURCE_INDEX_FILENAME).exists())
+
+
 class TestPackageImport(unittest.TestCase):
     """Namespace-import lock (PR #12 dual-import convention)."""
 
