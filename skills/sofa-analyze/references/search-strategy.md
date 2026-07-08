@@ -61,6 +61,17 @@ The stats table is advisory input for the Gate Scorecard's Next Yield judgment. 
 
 `{PLUGIN_DIR}/scripts/assemble_dispatch.py` attaches this digest to assembled dispatches automatically when `search_log.jsonl` exists; pass `--no-digest` to bypass explicitly.
 
+## Source Reuse Before Refetch
+
+Before spending search budget on a document-shaped target (a filing, prospectus, transcript, or archived page), check whether it is already archived:
+
+```bash
+python {PLUGIN_DIR}/scripts/archive_source.py "{WORKSPACE}" status
+python {PLUGIN_DIR}/scripts/archive_source.py "{WORKSPACE}" bibliography
+```
+
+A hit means the excerpt in `sources/` is read locally instead of re-fetched. Cached excerpts are research support only: they never become authoritative over live filings, exchange releases, or company disclosures, and revisit flows must re-verify staleness rather than trust the cache. `assemble_dispatch.py` attaches the identifiers-only bibliography to assembled dispatches automatically when the index has records; pass `--no-sources` to bypass explicitly.
+
 ## Framing Search
 
 Stage 0 framing search is intentionally light. It may confirm:

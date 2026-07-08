@@ -21,6 +21,19 @@ try:
 except ImportError:
     from scripts.framing_contract import FramingContractError, evaluate_contract, load_contract
 
+try:
+    from source_cache import (
+        SOURCE_INDEX_FILENAME,
+        evaluate_index,
+        has_registered_source_id_reference,
+    )
+except ImportError:
+    from scripts.source_cache import (
+        SOURCE_INDEX_FILENAME,
+        evaluate_index,
+        has_registered_source_id_reference,
+    )
+
 from .result import ContractProfile, ContractResult
 from .workspace import (
     find_markdown_reports,
@@ -99,6 +112,7 @@ def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> 
     if _requires_framing_contract(profile):
         _check_framing_contract(workspace, state, result)
     _check_search_log(workspace, state, result)
+    _check_source_cache(workspace, result)
     _check_dispatch_log(workspace, workflow_text, profile, result)
     _check_worker_outputs(workspace, profile, result)
     if _requires_final_report(profile):
@@ -329,6 +343,19 @@ def _check_search_log(workspace: Path, state: dict | None, result: ContractResul
         path="search_log.jsonl",
         evidence="no valid search record found",
     )
+
+
+def _check_source_cache(workspace: Path, result: ContractResult) -> None:
+    # Stage-independent: a present index must be internally consistent at
+    # every gate. An absent index passes because legacy or fresh workspaces
+    # are not failed retroactively when no records exist yet.
+    if not (workspace / SOURCE_INDEX_FILENAME).exists():
+        return
+    evaluation = evaluate_index(workspace)
+    for issue in evaluation.issues:
+        result.fail(code=issue.code, message=issue.message, path=issue.location)
+    for warning in evaluation.warnings:
+        result.warn(code=warning.code, message=warning.message, path=warning.location)
 
 
 def _read_dispatch_records(workspace: Path, result: ContractResult) -> list[dict] | None:
@@ -638,7 +665,9 @@ def _check_worker_outputs(workspace: Path, profile: ContractProfile, result: Con
                 message="worker output must declare Method cards loaded",
                 path=rel,
             )
-        has_trace = has_source_trace(text, candidate_roles[0])
+        has_trace = has_source_trace(text, candidate_roles[0]) or has_registered_source_id_reference(
+            workspace, text
+        )
         if not has_trace:
             if _requires_source_trace(role, candidate_roles):
                 result.fail(

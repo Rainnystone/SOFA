@@ -140,6 +140,8 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
 
 > This file is the single source of truth for all evidence collected during research.
 > Only the main thread writes to this file. Subagents deliver to scouts/challenges/etc.
+> Deep-read excerpts are archived append-only via scripts/archive_source.py;
+> evidence entries reference archived sources by source id (src-NNN).
 
 ---
 

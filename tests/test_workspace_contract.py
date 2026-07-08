@@ -117,6 +117,18 @@ class TestFramingContractArtifactAndManagedBlocks(unittest.TestCase):
         # ManagedBlock has no path field; the file it renders into is the
         # caller's responsibility (research_workflow.md owns this block).
 
+    def test_source_cache_artifacts_are_registered(self):
+        contract = artifact_contract_for_mode("ticker")
+        self.assertIn("sources", contract.common_directories)
+        self.assertIn("sources_index.jsonl", contract.common_files)
+        self.assertIn("sources_index.jsonl", contract.machine_ledgers)
+        # sources/ holds main-thread archived excerpts; it must never be a
+        # worker output directory or find_worker_outputs would drag archived
+        # excerpts into worker-output compliance checks.
+        self.assertNotIn("sources", contract.worker_output_directories)
+        sector = artifact_contract_for_mode("sector")
+        self.assertNotIn("sources", sector.worker_output_directories)
+
     def test_managed_block_for_name_rejects_unknown_block(self):
         with self.assertRaises(ValueError):
             managed_block_for_name("does-not-exist")

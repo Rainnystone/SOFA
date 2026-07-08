@@ -107,6 +107,7 @@ Scripts enforce rules that should not depend on agent memory:
 | `search_intel.py` | Render advisory prior-query digests and search yield statistics from `search_log.jsonl`; negative trace only, no readiness role. |
 | `dispatch_assembly/` + `assemble_dispatch.py` | Assemble worker dispatch text deterministically from catalog slot facts, curated prompt templates, and machine-trace attachments. Read-only: no workspace writes, no dispatch-log writes, no dispatching, no readiness role. |
 | `framing_contract/` + `framing_intake.py` | Own the Stage 0 framing intent contract: schema, field vocabulary, completeness evaluation, JSON authority, Markdown mirror, and mutation CLI. Consumed by `sofa_contract` for the stage_0 gate; never enters worker dispatches. |
+| `source_cache/` + `archive_source.py` | Own the workspace source cache: append-only excerpt archive (`sources/` + `sources_index.jsonl`), hash dedupe, index validation, and the identifiers-only bibliography renderer. Mutation is main-thread-only through the CLI; workers surface candidates in deliveries. |
 | `generate_ultra_packet.py` | Convert Sector Hunt outputs into bounded Ticker Dive packets. |
 
 The main analyst thread may decide whether a frontier should continue or retire. The scripts decide whether that decision is legal, persisted, and gate-compatible.
@@ -114,6 +115,10 @@ The main analyst thread may decide whether a frontier should continue or retire.
 ### Framing Intent Contract
 
 `scripts/framing_contract/` owns the structured Stage 0 framing intent facts as a `framing_contract.json` workspace authority artifact plus a managed Markdown mirror in `research_workflow.md` (the `frontier_registry.json` authority-and-mirror pattern). The module owns the research-posture vocabulary (`fresh`, `verify-narrative`, `revisit`, `compare`) that future revisit work consumes. `sofa_contract` consumes its completeness facts for the stage_0 readiness gate; the module itself never decides advancement. All mutations go through `scripts/framing_intake.py`, which re-renders the mirror in the same operation. The framing contract is main-thread intent; it never enters worker dispatches, packets, or prompts (intent is thesis-adjacent context that worker isolation rules exclude). Extension seam: a new framing field adds a fact in `framing_contract/` plus a focused test; no consumer outside the contract, CLI, and stage_0 gate needs to change.
+
+### Workspace Source Cache
+
+`scripts/source_cache/` owns the deep-read-once-reuse-everywhere seam: `sources_index.jsonl` is the machine authority (source id, URL, title, retrieval date, grade, excerpt path, content hash) and `sources/` holds bounded key excerpts. All mutation goes through `scripts/archive_source.py` (append-only, hash-deduplicating); workers never write the cache — they surface `Source Archive Candidates` in deliveries and the main thread archives after acceptance. `sofa_contract` validates a present index at every gate and accepts registered source-id citations from the current workspace's valid index as worker source traces; `dispatch_assembly` attaches the screened identifiers-only bibliography. The cache is research support: grades are recorded but never computed with, and cached excerpts never become authoritative over live filings. Extension seam: a new index field adds a fact in `source_cache/` plus a focused test.
 
 ### Compliance Contract
 

@@ -296,7 +296,16 @@ def _check_subject_resolution(
     mode = contract.get("mode")
 
     confirmed_name = subject.get("confirmed_name", "")
-    if not confirmed_name:
+    if confirmed_name == UNKNOWN_ACCEPTED:
+        issues.append(
+            FramingIssue(
+                "FRAMING_SENTINEL_FORBIDDEN",
+                "subject_resolution.confirmed_name",
+                "subject_resolution.confirmed_name cannot use the unknown-accepted sentinel.",
+            )
+        )
+        fields.append(FieldStatus("subject_resolution.confirmed_name", "invalid", confirmed_name))
+    elif not confirmed_name:
         issues.append(
             FramingIssue(
                 "FRAMING_FIELD_MISSING",
@@ -333,7 +342,20 @@ def _check_subject_resolution(
 
     tickers = [str(item) for item in subject.get("tickers", []) if str(item).strip()]
     exchange = str(subject.get("exchange", ""))
-    if mode == "ticker":
+
+    # SENTINEL_FORBIDDEN_FIELDS names the whole subject_resolution class:
+    # the sentinel in tickers or exchange is forbidden in every mode, not
+    # only where the field is required.
+    if any(item == UNKNOWN_ACCEPTED for item in tickers):
+        issues.append(
+            FramingIssue(
+                "FRAMING_SENTINEL_FORBIDDEN",
+                "subject_resolution.tickers",
+                "subject_resolution.tickers cannot contain the unknown-accepted sentinel.",
+            )
+        )
+        fields.append(FieldStatus("subject_resolution.tickers", "invalid", ", ".join(tickers)))
+    elif mode == "ticker":
         if not tickers:
             issues.append(
                 FramingIssue(
@@ -345,6 +367,19 @@ def _check_subject_resolution(
             fields.append(FieldStatus("subject_resolution.tickers", "missing", ""))
         else:
             fields.append(FieldStatus("subject_resolution.tickers", "complete", ", ".join(tickers)))
+    else:
+        fields.append(FieldStatus("subject_resolution.tickers", "complete", ", ".join(tickers)))
+
+    if exchange == UNKNOWN_ACCEPTED:
+        issues.append(
+            FramingIssue(
+                "FRAMING_SENTINEL_FORBIDDEN",
+                "subject_resolution.exchange",
+                "subject_resolution.exchange cannot use the unknown-accepted sentinel.",
+            )
+        )
+        fields.append(FieldStatus("subject_resolution.exchange", "invalid", exchange))
+    elif mode == "ticker":
         if not exchange:
             issues.append(
                 FramingIssue(
@@ -357,5 +392,4 @@ def _check_subject_resolution(
         else:
             fields.append(FieldStatus("subject_resolution.exchange", "complete", exchange))
     else:
-        fields.append(FieldStatus("subject_resolution.tickers", "complete", ", ".join(tickers)))
         fields.append(FieldStatus("subject_resolution.exchange", "complete", exchange))

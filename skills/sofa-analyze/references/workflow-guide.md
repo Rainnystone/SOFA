@@ -183,6 +183,17 @@ python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 
 ---
 
+### Research Posture 对 frontier 设计的影响
+
+frontier 设计前读取 `framing_contract.json` 的 `research_posture`（Stage 0 已记录，禁哨兵）：
+
+- `fresh`：默认流程，无额外要求。
+- `verify-narrative`：第一个 frontier 必须对传入叙事取 contrarian 方向——传入叙事按 D 级线索处理，该 frontier 的 Key Claims 直接检验叙事最脆弱的前提。
+- `compare`：对比对象各自独立走完整 dive（两个 workspace 或先后两轮），最后做对比 synthesis；不新增研究模式。
+- `revisit`：本阶段仅记录；revisit 工作流属 Phase 8，落地前按 `fresh` 执行并在 workflow 中注明。
+
+posture 只改变 frontier 设计模板；loop/challenge/red-team floors 不受任何 posture 或 `budget_appetite` 影响。
+
 ## Stage 2: Evidence Frontier Loop（核心引擎）{#stage-2}
 
 ### 核心原则
@@ -216,7 +227,8 @@ python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 **Step 3 — Evidence Ledger Update + Synthesis Notes**（主线程写）
 
 1. Read scout 文件，提取关键发现，追加到 `evidence_ledger.md`
-2. **强制**：写 2-3 句话到 `research_workflow.md` 的"综合分析笔记"区——记录本轮发现对 thesis 的影响、与其他 loop 的关联或矛盾、对下一轮 frontier 优先级的启示
+2. Scout 交付物含 `Source Archive Candidates` 节时，审阅每条候选，把确认有证据价值的摘录归档：`python {PLUGIN_DIR}/scripts/archive_source.py "{WORKSPACE}" add --url <URL> --title <标题> --retrieved <YYYY-MM-DD> --grade <A|B|C|D> --excerpt-file <摘录文件>`（append-only，同内容自动去重）。ledger 中的证据条目引用对应 `src-NNN`。缓存摘录只是研究支撑，不取代 live filings；revisit 时必须重新核验时效。
+3. **强制**：写 2-3 句话到 `research_workflow.md` 的"综合分析笔记"区——记录本轮发现对 thesis 的影响、与其他 loop 的关联或矛盾、对下一轮 frontier 优先级的启示
 
 **Step 4 — Challenge Probe**（派遣 subagent worker）
 

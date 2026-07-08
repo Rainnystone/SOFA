@@ -15,6 +15,9 @@ from framing_contract import (  # noqa: E402
     RESOLUTION_METHODS,
     RESEARCH_POSTURES,
     SCHEMA_VERSION,
+    SENTINEL_ALLOWED_FIELDS,
+    SENTINEL_FORBIDDEN_FIELDS,
+    TOP_LEVEL_REQUIRED_FIELDS,
     UNKNOWN_ACCEPTED,
     add_candidate,
     add_clarification,
@@ -154,6 +157,42 @@ class FramingContractCoreTests(unittest.TestCase):
         self.assertIn(("FRAMING_SENTINEL_FORBIDDEN", "mode"), failures)
         self.assertIn(("FRAMING_SENTINEL_FORBIDDEN", "research_posture"), failures)
 
+    def test_sentinel_field_classes_are_disjoint_and_cover_schema(self):
+        allowed = set(SENTINEL_ALLOWED_FIELDS)
+        forbidden = set(SENTINEL_FORBIDDEN_FIELDS)
+        self.assertEqual(set(), allowed & forbidden)
+        self.assertEqual(
+            set(TOP_LEVEL_REQUIRED_FIELDS) | {"subject_resolution"},
+            allowed | forbidden,
+        )
+
+    def test_sentinel_forbidden_across_subject_resolution_fields(self):
+        # SENTINEL_FORBIDDEN_FIELDS names the whole "subject_resolution"
+        # class; enforcement previously covered only resolution_method.
+        contract = empty_contract()
+        apply_field(contract, "mode", "ticker")
+        resolve_subject(
+            contract,
+            name=UNKNOWN_ACCEPTED,
+            tickers=[UNKNOWN_ACCEPTED],
+            exchange=UNKNOWN_ACCEPTED,
+            method="user_confirmed",
+        )
+        result = evaluate_contract(contract)
+        failures = {(issue.code, issue.field) for issue in result.issues}
+        self.assertIn(
+            ("FRAMING_SENTINEL_FORBIDDEN", "subject_resolution.confirmed_name"),
+            failures,
+        )
+        self.assertIn(
+            ("FRAMING_SENTINEL_FORBIDDEN", "subject_resolution.tickers"),
+            failures,
+        )
+        self.assertIn(
+            ("FRAMING_SENTINEL_FORBIDDEN", "subject_resolution.exchange"),
+            failures,
+        )
+
     def test_mode_drift_is_detected_with_real_enum_values(self):
         # Mode-drift is tested with real enum values, not the sentinel: a
         # sentinel mode is already a FRAMING_SENTINEL_FORBIDDEN failure, and
@@ -278,6 +317,7 @@ class TestPackageImport(unittest.TestCase):
             cwd=str(ROOT),
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
@@ -287,6 +327,7 @@ class TestPackageImport(unittest.TestCase):
             cwd=str(ROOT / "scripts"),
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
@@ -299,7 +340,13 @@ class FramingIntakeCliTests(unittest.TestCase):
             str(workspace),
             *args,
         ]
-        return subprocess.run(command, text=True, capture_output=True, check=False)
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+        )
 
     def test_init_is_idempotent_and_renders_mirror(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -312,6 +359,39 @@ class FramingIntakeCliTests(unittest.TestCase):
             workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
             self.assertEqual(workflow.count("<!-- SOFA:framing-contract:start -->"), 1)
             self.assertEqual(workflow.count("<!-- SOFA:framing-contract:end -->"), 1)
+
+    def test_init_adopts_legacy_workspace_without_block_or_json(self):
+        # The advertised legacy-adoption path (pre-Phase-5 workspace: no
+        # managed block, no JSON). Previously untested - every CLI test ran
+        # on a post-Phase-5 create_workspace fixture.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "research_workflow.md").write_text(
+                "# Research Workflow: Legacy\n\n## Basic Info\n- Subject: Legacy\n\n"
+                "## Stage Progress\n| Stage | Status |\n|-------|--------|\n",
+                encoding="utf-8",
+            )
+            first = self.run_cli(workspace, "init")
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertTrue((workspace / "framing_contract.json").exists())
+            workflow = (workspace / "research_workflow.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(workflow.count("<!-- SOFA:framing-contract:start -->"), 1)
+            self.assertLess(
+                workflow.index("## Framing Intent Contract"),
+                workflow.index("## Stage Progress"),
+            )
+            second = self.run_cli(workspace, "init")
+            self.assertEqual(second.returncode, 0, second.stderr)
+            workflow_again = (workspace / "research_workflow.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(
+                workflow_again.count("<!-- SOFA:framing-contract:start -->"),
+                1,
+            )
 
     def test_set_resolve_candidate_clarification_status_and_render(self):
         with tempfile.TemporaryDirectory() as tmp:

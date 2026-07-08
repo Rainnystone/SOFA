@@ -95,6 +95,7 @@ COMMON_DIRECTORY_SPECS = (
     ArtifactSpec("redteam", "redteam/", "directory"),
     ArtifactSpec("reports", "reports/", "directory"),
     ArtifactSpec("dive_packets", "dive_packets/", "directory"),
+    ArtifactSpec("sources", "sources/", "directory"),
 )
 
 SECTOR_DIRECTORY_SPECS = (
@@ -112,6 +113,7 @@ COMMON_FILE_SPECS = (
     ArtifactSpec("state.json", "state.json", "file"),
     ArtifactSpec("frontier_registry.json", "frontier_registry.json", "file"),
     ArtifactSpec("framing_contract.json", "framing_contract.json", "file"),
+    ArtifactSpec("sources_index.jsonl", "sources_index.jsonl", "file"),
 )
 
 SECTOR_FILE_SPECS = (
@@ -124,6 +126,7 @@ MACHINE_LEDGERS = (
     "dispatch_log.jsonl",
     "state.json",
     "frontier_registry.json",
+    "sources_index.jsonl",
 )
 
 CORE_REQUIRED_FILES = (

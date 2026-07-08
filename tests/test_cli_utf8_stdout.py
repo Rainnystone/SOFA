@@ -49,6 +49,7 @@ CLI_SCRIPTS_WITH_NON_ASCII_OUTPUT = (
     "search_intel.py",
     "assemble_dispatch.py",
     "framing_intake.py",
+    "archive_source.py",
     # validate_dossier.py is the reference implementation: already fixed.
     "validate_dossier.py",
 )
@@ -222,6 +223,39 @@ class TestCliStdoutBehaviorUnderLegacyEncoding(unittest.TestCase):
         stderr = result.stderr.decode("utf-8", errors="replace")
         self.assertNotIn("UnicodeEncodeError", stderr)
         self.assertNotEqual(result.returncode, -1)
+
+    def test_framing_intake_error_path_prints_chinese_on_stderr_under_legacy_encoding(
+        self,
+    ):
+        # framing_intake.py reports failures as "错误: ..." on stderr. Without
+        # sys.stderr.reconfigure the error path does not preserve visible
+        # Chinese under a non-UTF-8 pipe; depending on runtime it may escape
+        # the text or fail during emission.
+        workspace = self._make_workspace()
+        result = _run_script(
+            SCRIPTS / "framing_intake.py", str(workspace), "status", cwd=ROOT,
+        )
+        self.assertNotEqual(0, result.returncode)
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        self.assertIn("错误", stderr)
+        self.assertNotIn("UnicodeEncodeError", stderr)
+
+    def test_archive_source_status_and_error_survive_legacy_encoding(self):
+        workspace = self._make_workspace()
+        status = _run_script(
+            SCRIPTS / "archive_source.py", str(workspace), "status", cwd=ROOT
+        )
+        self.assertEqual(0, status.returncode)
+        self.assertIn("已归档来源", status.stdout.decode("utf-8"))
+
+        (workspace / "sources_index.jsonl").write_text("not json\n", encoding="utf-8")
+        broken = _run_script(
+            SCRIPTS / "archive_source.py", str(workspace), "status", cwd=ROOT
+        )
+        self.assertEqual(1, broken.returncode)
+        stderr = broken.stderr.decode("utf-8", errors="replace")
+        self.assertIn("错误", stderr)
+        self.assertNotIn("UnicodeEncodeError", stderr)
 
 
 if __name__ == "__main__":
