@@ -178,7 +178,7 @@ def assemble_dispatch(
             )
             raise AssemblyError(
                 f"prior-query digest for role {worker.slug} failed input "
-                f"screening: {details} (clean the search_log or use --no-digest)"
+                f"screening: {details} (use --no-digest to dispatch without the digest)"
             )
         text = text.rstrip() + "\n\n" + digest_text
         attachments.append("prior_query_digest")

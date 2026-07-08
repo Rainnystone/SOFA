@@ -220,6 +220,23 @@ class TestDigestAttachment(unittest.TestCase):
             self.assertIn("prior_query_digest", result.attachments)
             self.assertNotIn("CONTAMINANT", result.dispatch_text)
 
+    def test_no_digest_bypasses_existing_search_log(self):
+        # The advertised recovery path: attach_digest=False must skip the
+        # attachment even when search_log.jsonl exists (previously proven
+        # only on logless fixtures).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir), with_search_log=True)
+            result = assemble_dispatch(
+                repo_root=ROOT,
+                workspace=workspace,
+                role="scout",
+                slot_values={"frontier_packet": PACKET},
+                name_fields={"loop": "1", "frontier_slug": "substrate_supply"},
+                attach_digest=False,
+            )
+            self.assertNotIn("### Prior Search Trace", result.dispatch_text)
+            self.assertNotIn("prior_query_digest", result.attachments)
+
     def test_malformed_log_fails_loud(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = make_workspace(Path(temp_dir), with_search_log=True)
