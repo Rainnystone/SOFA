@@ -317,6 +317,7 @@ class TestPackageImport(unittest.TestCase):
             cwd=str(ROOT),
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
@@ -326,6 +327,7 @@ class TestPackageImport(unittest.TestCase):
             cwd=str(ROOT / "scripts"),
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
@@ -338,7 +340,13 @@ class FramingIntakeCliTests(unittest.TestCase):
             str(workspace),
             *args,
         ]
-        return subprocess.run(command, text=True, capture_output=True, check=False)
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+        )
 
     def test_init_is_idempotent_and_renders_mirror(self):
         with tempfile.TemporaryDirectory() as tmp:

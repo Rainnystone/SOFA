@@ -369,7 +369,13 @@ class ArchiveSourceCliTests(unittest.TestCase):
             str(workspace),
             *args,
         ]
-        return subprocess.run(command, text=True, capture_output=True, check=False)
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+        )
 
     def _add_args(self, excerpt_file: Path):
         return (
@@ -533,6 +539,7 @@ class TestPackageImport(unittest.TestCase):
             cwd=str(ROOT),
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
@@ -542,6 +549,7 @@ class TestPackageImport(unittest.TestCase):
             cwd=str(ROOT / "scripts"),
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         self.assertEqual(0, result.returncode, result.stderr)
 

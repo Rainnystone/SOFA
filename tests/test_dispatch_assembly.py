@@ -424,6 +424,7 @@ class TestSourceBibliographyCli(unittest.TestCase):
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
             )
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertNotIn("Prior Source Index", result.stdout)
