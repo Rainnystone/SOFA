@@ -67,6 +67,10 @@ dive_packets/
 
 Do not overwrite prior worker files. Use loop, round, or version identifiers in filenames.
 
+### Main-thread-only artifacts
+
+`sources/` and `sources_index.jsonl` are main-thread-only source-cache artifacts, not worker delivery folders. Workers never write these paths. A deep read of a high-value document is surfaced as a `Source Archive Candidates` section in the delivery; the main thread reviews the candidates and archives confirmed excerpts append-only via `python {PLUGIN_DIR}/scripts/archive_source.py "{WORKSPACE}" add ...` after accepting the product.
+
 ## Role Reference
 
 This table is a dispatch guide summary. The authoritative worker role facts for prompt paths, delivery folders, method-card expectations, source-trace rules, required output markers, forbidden worker-output classes, and dispatch aliases live in `../../../scripts/worker_role_catalog/`.
@@ -89,10 +93,12 @@ Dispatch slot literals and delivery filename templates are catalog facts in `../
 Assemble dispatch text deterministically:
 
 ```bash
-python {PLUGIN_DIR}/scripts/assemble_dispatch.py --workspace "{WORKSPACE}" --role <role> --packet-file <packet.md> [--loop N] [--frontier-slug slug] [--round N] [--ticker T] [--version N]
+python {PLUGIN_DIR}/scripts/assemble_dispatch.py --workspace "{WORKSPACE}" --role <role> --packet-file <packet.md> [--loop N] [--frontier-slug slug] [--round N] [--ticker T] [--version N] [--no-digest] [--no-sources]
 ```
 
-The assembler fills the catalog-declared slots in the curated prompt template, computes the canonical delivery path, screens the packet against role forbidden-input tripwires (pattern-based only — semantic isolation stays the main thread's responsibility), and attaches the prior-query digest when available. The main thread still authors the packet, reviews the assembled text, and dispatches through the host subagent mechanism. After dispatch, the main thread records the dispatch_log.jsonl entry; the assembler never writes it.
+The assembler fills the catalog-declared slots in the curated prompt template, computes the canonical delivery path, screens the packet against role forbidden-input tripwires (pattern-based only — semantic isolation stays the main thread's responsibility), and attaches the prior-query digest and the identifiers-only source bibliography when available (pass --no-digest / --no-sources to bypass explicitly). The main thread still authors the packet, reviews the assembled text, and dispatches through the host subagent mechanism. After dispatch, the main thread records the dispatch_log.jsonl entry; the assembler never writes it.
+
+Name-field values (`--loop`, `--frontier-slug`, `--round`, `--ticker`, `--version`) are ASCII-only (`[A-Za-z0-9_-]`); romanize Chinese frontier names before using them in filenames.
 
 Degraded fallback (manual assembly):
 

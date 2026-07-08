@@ -125,6 +125,15 @@ Layer 5: [Geography/Regulation] → [关键节点]
 
 ### Open Questions
 
+### Source Archive Candidates
+
+如果本轮深读了支撑证据的高价值文档（10-K、招股书、电话会纪要、存档页面等），在交付文件中加入本节，每个文档一条：
+
+- Source: [标题] | [URL] | [检索日期 YYYY-MM-DD]
+- Key excerpt: [支撑证据的关键原文摘录——只保留支撑判断的段落，不是全文]
+
+没有深读文档时省略本节。主线程会将确认的条目归档到 workspace 的 sources/（append-only）；你不写入 sources/，只在交付物中呈报候选。
+
 ## Placeholders
 
 The following placeholders must be filled in by the main thread before dispatching:
