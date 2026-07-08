@@ -18,6 +18,10 @@ _SOURCE_ID_EXACT = re.compile(r"^src-\d{3,}$")
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
+def _has_control_character(value: str) -> bool:
+    return any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
 class SourceCacheError(ValueError):
     """Raised when the source cache cannot be read or mutated safely."""
 
@@ -75,6 +79,14 @@ def validate_record(record: dict, line_number: int) -> list[SourceIssue]:
         value = record[field]
         if not isinstance(value, str) or not value.strip():
             issues.append(SourceIssue("SOURCE_INDEX_MALFORMED", location, f"{field} must be a non-empty string"))
+        elif _has_control_character(value):
+            issues.append(
+                SourceIssue(
+                    "SOURCE_INDEX_MALFORMED",
+                    location,
+                    f"{field} must be single-line text without control characters",
+                )
+            )
     if issues:
         return issues
     if parse_source_number(record["source_id"]) is None:

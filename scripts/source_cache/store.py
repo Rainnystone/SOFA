@@ -15,6 +15,7 @@ try:
         SourceCacheError,
         SourceCacheEvaluation,
         SourceIssue,
+        _has_control_character,
         excerpt_sha256,
         format_source_id,
         normalize_excerpt_text,
@@ -32,6 +33,7 @@ except ImportError:
         SourceCacheError,
         SourceCacheEvaluation,
         SourceIssue,
+        _has_control_character,
         excerpt_sha256,
         format_source_id,
         normalize_excerpt_text,
@@ -50,7 +52,11 @@ def load_index(workspace: str | Path) -> list[tuple[int, dict]]:
     if not path.exists():
         return []
     entries: list[tuple[int, dict]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    try:
+        index_text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise SourceCacheError(f"cannot read {SOURCE_INDEX_FILENAME} as UTF-8 text: {exc}") from exc
+    for line_number, line in enumerate(index_text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped:
             continue
@@ -108,12 +114,33 @@ def evaluate_index(workspace: str | Path) -> SourceCacheEvaluation:
             )
         else:
             seen_hashes[digest] = source_id
-        if not (workspace_path / record["excerpt_path"]).is_file():
+        excerpt_path = workspace_path / record["excerpt_path"]
+        if not excerpt_path.is_file():
             issues.append(
                 SourceIssue(
                     "SOURCE_EXCERPT_MISSING",
                     record["excerpt_path"],
                     f"{source_id} points at a missing excerpt file",
+                )
+            )
+            continue
+        try:
+            excerpt_text = excerpt_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            issues.append(
+                SourceIssue(
+                    "SOURCE_INDEX_MALFORMED",
+                    record["excerpt_path"],
+                    f"{source_id} excerpt cannot be read as UTF-8 text: {exc}",
+                )
+            )
+            continue
+        if excerpt_sha256(excerpt_text) != digest:
+            issues.append(
+                SourceIssue(
+                    "SOURCE_INDEX_MALFORMED",
+                    record["excerpt_path"],
+                    f"{source_id} sha256 does not match excerpt contents",
                 )
             )
     referenced = {record["excerpt_path"] for record in records}
@@ -177,6 +204,8 @@ def add_source(
     for label, value in (("url", url), ("title", title)):
         if not str(value).strip():
             raise SourceCacheError(f"{label} must be non-empty")
+        if _has_control_character(str(value)):
+            raise SourceCacheError(f"{label} must be single-line text without control characters")
     if grade not in GRADES:
         raise SourceCacheError(f"grade must be one of: {', '.join(GRADES)}")
     try:
