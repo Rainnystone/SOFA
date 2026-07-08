@@ -136,6 +136,18 @@ class TestWorkspaceScripts(unittest.TestCase):
                 "coverage", artifact_contract_for_mode("ticker").all_scaffold_paths()
             )
 
+    def test_init_workspace_scaffolds_source_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            init_workspace.create_workspace("Coherent Corp", str(workspace), "ticker")
+            self.assertTrue((workspace / "sources").is_dir())
+            index = workspace / "sources_index.jsonl"
+            self.assertTrue(index.exists())
+            self.assertEqual("", index.read_text(encoding="utf-8"))
+            ledger = (workspace / "evidence_ledger.md").read_text(encoding="utf-8")
+            self.assertIn("src-NNN", ledger)
+            self.assertIn("archive_source.py", ledger)
+
     def test_init_workspace_preserves_existing_state_json_and_reports_skipped(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "sector-workspace"
