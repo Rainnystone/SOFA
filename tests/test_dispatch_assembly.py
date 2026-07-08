@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -34,6 +35,23 @@ SEARCH_RECORD = (
     '"query": "InP substrate qualified supplier", '
     '"evidence_refs": ["https://www.sec.gov/acme-10k"], "notes": "CONTAMINANT"}\n'
 )
+
+
+def add_source_fixture(workspace: Path, title: str = "FY2025 10-K Coherent segment disclosure") -> None:
+    (workspace / "sources").mkdir(exist_ok=True)
+    excerpt = "Segment revenue detail.\n"
+    (workspace / "sources" / "src-001.md").write_text(excerpt, encoding="utf-8")
+    record = {
+        "source_id": "src-001",
+        "url": "https://www.sec.gov/acme-10k",
+        "title": title,
+        "retrieved": "2026-07-08",
+        "grade": "A",
+        "excerpt_path": "sources/src-001.md",
+        "sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+    }
+    with open(workspace / "sources_index.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def make_workspace(base: Path, with_search_log: bool = False) -> Path:
@@ -316,6 +334,99 @@ class TestDigestAttachment(unittest.TestCase):
                     slot_values={"frontier_packet": PACKET},
                     name_fields={"loop": "2", "frontier_slug": "x"},
                 )
+
+
+class TestSourceBibliographyAttachment(unittest.TestCase):
+    def _assemble(self, workspace, role="scout", **kwargs):
+        slot = primary_input_slot_name(role)
+        name_fields = kwargs.pop(
+            "name_fields", {"loop": "1", "frontier_slug": "substrate_supply"}
+        )
+        return assemble_dispatch(
+            repo_root=ROOT,
+            workspace=workspace,
+            role=role,
+            slot_values={slot: PACKET},
+            name_fields=name_fields,
+            attach_digest=False,
+            **kwargs,
+        )
+
+    def test_attaches_identifiers_only_bibliography(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            add_source_fixture(workspace)
+            result = self._assemble(workspace)
+            self.assertIn("### Prior Source Index (identifiers only)", result.dispatch_text)
+            self.assertIn("src-001", result.dispatch_text)
+            self.assertIn("https://www.sec.gov/acme-10k", result.dispatch_text)
+            self.assertIn("retrieved 2026-07-08", result.dispatch_text)
+            self.assertNotIn("Segment revenue detail", result.dispatch_text)
+            self.assertNotIn('"grade"', result.dispatch_text)
+            self.assertIn("source_bibliography", result.attachments)
+
+    def test_absent_or_empty_index_attaches_nothing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            result = self._assemble(workspace)
+            self.assertNotIn("Prior Source Index", result.dispatch_text)
+            self.assertNotIn("source_bibliography", result.attachments)
+            (workspace / "sources_index.jsonl").write_text("", encoding="utf-8")
+            result = self._assemble(workspace)
+            self.assertNotIn("Prior Source Index", result.dispatch_text)
+            self.assertNotIn("source_bibliography", result.attachments)
+
+    def test_no_sources_bypasses_populated_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            add_source_fixture(workspace)
+            result = self._assemble(workspace, attach_sources=False)
+            self.assertNotIn("Prior Source Index", result.dispatch_text)
+            self.assertNotIn("source_bibliography", result.attachments)
+
+    def test_market_data_title_blocks_scout_but_passes_bridge(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            add_source_fixture(workspace, title="Analyst target price roundup")
+            with self.assertRaises(AssemblyError) as ctx:
+                self._assemble(workspace)
+            self.assertIn("--no-sources", str(ctx.exception))
+            bridge = self._assemble(
+                workspace, role="financial_bridge", name_fields={"ticker": "COHR"}
+            )
+            self.assertIn("source_bibliography", bridge.attachments)
+
+    def test_malformed_index_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            (workspace / "sources_index.jsonl").write_text("not json\n", encoding="utf-8")
+            with self.assertRaises(AssemblyError):
+                self._assemble(workspace)
+
+
+class TestSourceBibliographyCli(unittest.TestCase):
+    def test_no_sources_flag_bypasses_populated_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            add_source_fixture(workspace)
+            packet_file = Path(temp_dir) / "packet.md"
+            packet_file.write_text(PACKET, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "assemble_dispatch.py"),
+                    "--workspace", str(workspace),
+                    "--role", "scout",
+                    "--packet-file", str(packet_file),
+                    "--loop", "1",
+                    "--frontier-slug", "substrate_supply",
+                    "--no-sources",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotIn("Prior Source Index", result.stdout)
 
 
 class TestEveryCatalogRoleAssembles(unittest.TestCase):
