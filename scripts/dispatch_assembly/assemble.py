@@ -34,6 +34,7 @@ try:
         build_prior_query_digest,
         render_prior_query_digest,
     )
+    from ..source_cache import SOURCE_INDEX_FILENAME, render_source_bibliography
 except ImportError:
     from worker_role_catalog import (
         WorkerRole,
@@ -46,6 +47,7 @@ except ImportError:
         build_prior_query_digest,
         render_prior_query_digest,
     )
+    from source_cache import SOURCE_INDEX_FILENAME, render_source_bibliography
 
 
 PLACEHOLDERS_HEADING = "\n## Placeholders"
@@ -82,6 +84,7 @@ def assemble_dispatch(
     slot_values: dict[str, str],
     name_fields: dict[str, str] | None = None,
     attach_digest: bool = True,
+    attach_sources: bool = True,
     out_path: str | None = None,
 ) -> AssembledDispatch:
     repo_root_path = Path(repo_root)
@@ -182,6 +185,27 @@ def assemble_dispatch(
             )
         text = text.rstrip() + "\n\n" + digest_text
         attachments.append("prior_query_digest")
+
+    if attach_sources and (workspace_path / SOURCE_INDEX_FILENAME).exists():
+        try:
+            bibliography_text = render_source_bibliography(workspace_path)
+        except ValueError as exc:
+            raise AssemblyError(f"source bibliography failed: {exc}") from exc
+        if bibliography_text:
+            # Titles are external text and may carry market-data or action
+            # terms; attaching them unscreened would reintroduce exactly what
+            # packet screening just blocked.
+            bibliography_violations = forbidden_input_violations(worker, bibliography_text)
+            if bibliography_violations:
+                details = "; ".join(
+                    f"{issue.issue_code}: {issue.message}" for issue in bibliography_violations
+                )
+                raise AssemblyError(
+                    f"source bibliography for role {worker.slug} failed input "
+                    f"screening: {details} (use --no-sources to dispatch without it)"
+                )
+            text = text.rstrip() + "\n\n" + bibliography_text
+            attachments.append("source_bibliography")
 
     # suggested_record_fields is a partial dispatch_log.jsonl skeleton. The
     # assembler fills only what it can derive deterministically; the main

@@ -45,6 +45,7 @@ def main(argv=None) -> int:
     parser.add_argument("--out", default=None, help="Override the workspace-relative delivery path")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--no-digest", action="store_true")
+    parser.add_argument("--no-sources", action="store_true", dest="no_sources")
     args = parser.parse_args(argv)
 
     try:
@@ -63,6 +64,7 @@ def main(argv=None) -> int:
             slot_values={input_slot: input_text},
             name_fields=name_fields,
             attach_digest=not args.no_digest,
+            attach_sources=not args.no_sources,
             out_path=args.out,
         )
     except (AssemblyError, OSError, ValueError) as exc:
