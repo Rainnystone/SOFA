@@ -2,6 +2,7 @@
 
 > Ticker Dive 模式的 Stage 2-5 完整流程。由 SKILL.md 路由加载。
 > 公共阶段（Pre-Stage 0 ~ Stage 1, Stage 6）见 workflow-guide.md。
+> 进入本 guide 各 stage 前，Stage 0 的 Framing Intent Contract 必须已完备并通过 stage_0 gate（`python {PLUGIN_DIR}/scripts/framing_intake.py "{WORKSPACE}" status` 检查字段状态；契约与 CLI 详见 workflow-guide.md Stage 0）。
 > 域知识参考见 `domains/ticker-dive.md`。
 
 ---

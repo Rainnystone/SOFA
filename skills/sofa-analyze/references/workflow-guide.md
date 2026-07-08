@@ -183,6 +183,15 @@ python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 
 ---
 
+### Research Posture 对 frontier 设计的影响
+
+frontier 设计前读取 `framing_contract.json` 的 `research_posture`（Stage 0 已记录，禁哨兵）：
+
+- `fresh`：默认流程，无额外要求。
+- `verify-narrative`：第一个 frontier 必须对传入叙事取 contrarian 方向——传入叙事按 D 级线索处理，该 frontier 的 Key Claims 直接检验叙事最脆弱的前提。
+- `compare`：对比对象各自独立走完整 dive（两个 workspace 或先后两轮），最后做对比 synthesis；不新增研究模式。
+- `revisit`：本阶段仅记录；revisit 工作流属 Phase 8，落地前按 `fresh` 执行并在 workflow 中注明。
+
 ## Stage 2: Evidence Frontier Loop（核心引擎）{#stage-2}
 
 ### 核心原则
