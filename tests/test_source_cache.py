@@ -29,6 +29,7 @@ from source_cache import (  # noqa: E402
     source_ids_in_text,
 )
 import source_cache.store as source_cache_store  # noqa: E402
+from sofa_contract import ContractProfile, evaluate_workspace  # noqa: E402
 
 EXCERPT = "Segment revenue detail: datacom transceivers grew 40% YoY.\n"
 
@@ -43,6 +44,17 @@ def add_fixture_source(workspace: Path, **overrides):
     }
     payload.update(overrides)
     return add_source(workspace, **payload)
+
+
+def build_contract_workspace(base: Path) -> Path:
+    workspace = base / "ws"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps({"mode": "ticker", "stages_completed": []}), encoding="utf-8"
+    )
+    (workspace / "research_workflow.md").write_text("# Workflow\n", encoding="utf-8")
+    (workspace / "evidence_ledger.md").write_text("# Evidence Ledger\n", encoding="utf-8")
+    return workspace
 
 
 class SourceCacheVocabularyTests(unittest.TestCase):
@@ -241,6 +253,87 @@ class EvaluateIndexTests(unittest.TestCase):
                 ("SOURCE_EXCERPT_UNREGISTERED", "sources/nested/orphan.md"),
                 warnings,
             )
+
+
+class SofaContractIntegrationTests(unittest.TestCase):
+    def _failure_codes(self, workspace: Path) -> set:
+        result = evaluate_workspace(workspace, ContractProfile(mode="ticker"))
+        return {issue.code for issue in result.failures}
+
+    def test_absent_index_produces_no_source_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = build_contract_workspace(Path(tmp))
+            codes = self._failure_codes(workspace)
+            self.assertFalse({code for code in codes if code.startswith("SOURCE_")})
+
+    def test_present_index_is_validated_strictly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = build_contract_workspace(Path(tmp))
+            record = {
+                "source_id": "src-001",
+                "url": "https://example.com",
+                "title": "Missing excerpt",
+                "retrieved": "2026-07-08",
+                "grade": "B",
+                "excerpt_path": "sources/src-001.md",
+                "sha256": "0" * 64,
+            }
+            (workspace / SOURCE_INDEX_FILENAME).write_text(
+                json.dumps(record) + "\n", encoding="utf-8"
+            )
+            self.assertIn("SOURCE_EXCERPT_MISSING", self._failure_codes(workspace))
+
+            (workspace / SOURCE_INDEX_FILENAME).write_text("not json\n", encoding="utf-8")
+            self.assertIn("SOURCE_INDEX_MALFORMED", self._failure_codes(workspace))
+
+    def test_unregistered_excerpt_is_a_warning_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = build_contract_workspace(Path(tmp))
+            add_fixture_source(workspace)
+            (workspace / SOURCES_DIRNAME / "stray.md").write_text("stray\n", encoding="utf-8")
+            result = evaluate_workspace(workspace, ContractProfile(mode="ticker"))
+            self.assertIn(
+                "SOURCE_EXCERPT_UNREGISTERED",
+                {warning.code for warning in result.warnings},
+            )
+            self.assertNotIn(
+                "SOURCE_EXCERPT_UNREGISTERED",
+                {issue.code for issue in result.failures},
+            )
+
+    def test_source_id_citation_requires_registered_source_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = build_contract_workspace(Path(tmp))
+            scouts = workspace / "scouts"
+            scouts.mkdir()
+            without_trace = (
+                "# Scout Output\n\nFinding: capacity is concentrated.\n\n"
+                "### Method Cards Loaded\n- none\n"
+            )
+            (scouts / "loop1_substrate.md").write_text(without_trace, encoding="utf-8")
+            self.assertIn("WORKER_SOURCE_TRACE_MISSING", self._failure_codes(workspace))
+
+            no_index_citation = (
+                "# Scout Output\n\nFinding: capacity is concentrated (src-001).\n\n"
+                "### Method Cards Loaded\n- none\n"
+            )
+            (scouts / "loop1_substrate.md").write_text(no_index_citation, encoding="utf-8")
+            self.assertIn("WORKER_SOURCE_TRACE_MISSING", self._failure_codes(workspace))
+
+            add_fixture_source(workspace)
+            unregistered_citation = (
+                "# Scout Output\n\nFinding: capacity is concentrated (src-999).\n\n"
+                "### Method Cards Loaded\n- none\n"
+            )
+            (scouts / "loop1_substrate.md").write_text(unregistered_citation, encoding="utf-8")
+            self.assertIn("WORKER_SOURCE_TRACE_MISSING", self._failure_codes(workspace))
+
+            registered_citation = (
+                "# Scout Output\n\nFinding: capacity is concentrated (src-001).\n\n"
+                "### Method Cards Loaded\n- none\n"
+            )
+            (scouts / "loop1_substrate.md").write_text(registered_citation, encoding="utf-8")
+            self.assertNotIn("WORKER_SOURCE_TRACE_MISSING", self._failure_codes(workspace))
 
 
 class BibliographyTests(unittest.TestCase):
