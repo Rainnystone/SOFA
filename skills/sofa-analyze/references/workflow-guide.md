@@ -192,6 +192,8 @@ frontier 设计前读取 `framing_contract.json` 的 `research_posture`（Stage 
 - `compare`：对比对象各自独立走完整 dive（两个 workspace 或先后两轮），最后做对比 synthesis；不新增研究模式。
 - `revisit`：本阶段仅记录；revisit 工作流属 Phase 8，落地前按 `fresh` 执行并在 workflow 中注明。
 
+posture 只改变 frontier 设计模板；loop/challenge/red-team floors 不受任何 posture 或 `budget_appetite` 影响。
+
 ## Stage 2: Evidence Frontier Loop（核心引擎）{#stage-2}
 
 ### 核心原则
