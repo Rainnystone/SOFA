@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -27,6 +28,7 @@ from source_cache import (  # noqa: E402
     render_source_bibliography,
     source_ids_in_text,
 )
+import source_cache.store as source_cache_store  # noqa: E402
 
 EXCERPT = "Segment revenue detail: datacom transceivers grew 40% YoY.\n"
 
@@ -161,6 +163,20 @@ class AddSourceTests(unittest.TestCase):
             self.assertFalse((workspace / SOURCE_INDEX_FILENAME).exists())
             self.assertFalse((workspace / SOURCES_DIRNAME).exists())
 
+    def test_add_removes_new_excerpt_if_index_append_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+
+            def fail_open(*args, **kwargs):
+                raise OSError("disk full during append")
+
+            with patch.object(source_cache_store, "open", side_effect=fail_open):
+                with self.assertRaises(SourceCacheError):
+                    add_fixture_source(workspace)
+
+            self.assertFalse((workspace / SOURCE_INDEX_FILENAME).exists())
+            self.assertFalse((workspace / SOURCES_DIRNAME / "src-001.md").exists())
+
 
 class EvaluateIndexTests(unittest.TestCase):
     def test_absent_and_empty_index_evaluate_clean(self):
@@ -207,6 +223,24 @@ class EvaluateIndexTests(unittest.TestCase):
             evaluation = evaluate_index(workspace)
             self.assertEqual((), evaluation.records)
             self.assertEqual(["SOURCE_INDEX_MALFORMED"], [issue.code for issue in evaluation.issues])
+
+    def test_nested_unregistered_excerpt_file_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            nested_orphan = workspace / SOURCES_DIRNAME / "nested" / "orphan.md"
+            nested_orphan.parent.mkdir(parents=True, exist_ok=True)
+            nested_orphan.write_text("stray nested excerpt\n", encoding="utf-8")
+
+            evaluation = evaluate_index(workspace)
+            warnings = [
+                (warning.code, warning.location)
+                for warning in evaluation.warnings
+            ]
+            self.assertIn(
+                ("SOURCE_EXCERPT_UNREGISTERED", "sources/nested/orphan.md"),
+                warnings,
+            )
 
 
 class BibliographyTests(unittest.TestCase):

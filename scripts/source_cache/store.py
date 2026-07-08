@@ -119,10 +119,10 @@ def evaluate_index(workspace: str | Path) -> SourceCacheEvaluation:
     referenced = {record["excerpt_path"] for record in records}
     sources_dir = workspace_path / SOURCES_DIRNAME
     if sources_dir.is_dir():
-        for path in sorted(sources_dir.iterdir()):
+        for path in sorted(sources_dir.rglob("*")):
             if not path.is_file():
                 continue
-            relative = f"{SOURCES_DIRNAME}/{path.name}"
+            relative = path.relative_to(workspace_path).as_posix()
             if relative not in referenced:
                 warnings.append(
                     SourceIssue(
@@ -226,6 +226,11 @@ def add_source(
         "excerpt_path": excerpt_relative,
         "sha256": digest,
     }
-    with open(index_path(workspace_path), "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    try:
+        with open(index_path(workspace_path), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        if excerpt_absolute.exists():
+            excerpt_absolute.unlink()
+        raise SourceCacheError(f"failed to append {SOURCE_INDEX_FILENAME}: {exc}") from exc
     return AddResult(source_id, True, url_duplicates)
