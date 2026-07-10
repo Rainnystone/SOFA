@@ -68,13 +68,38 @@ class TestFrontierLifecycle(unittest.TestCase):
             "portfolio_limits": {"max_active": 3, "max_active_plus_new": 5},
         }
 
+    def test_make_registry_creates_v3_with_empty_layer_labels(self):
+        registry = self.module.make_registry("MXL", "ticker")
+
+        self.assertEqual(
+            {"version": 3, "layer_labels": []},
+            {key: registry.get(key) for key in ("version", "layer_labels")},
+        )
+
+    def test_create_frontier_in_v3_defaults_layer_and_parent_to_none(self):
+        registry = self.module.make_registry("MXL", "ticker")
+
+        updated = self.module.create_frontier(
+            registry,
+            name="InP substrate supply concentration",
+            proposed_at_loop=1,
+            source="initial",
+        )
+        frontier = self.module.get_frontier(updated, "F1")
+
+        required_keys = {"layer", "parent_frontier"}
+        self.assertEqual(required_keys, required_keys.intersection(frontier))
+        self.assertIsNone(frontier["layer"])
+        self.assertIsNone(frontier["parent_frontier"])
+
     def test_make_registry_and_create_frontier_build_schema(self):
         registry = self.module.make_registry("MXL", "ticker")
         self.assertEqual(
             {
-                "version": 2,
+                "version": 3,
                 "subject": "MXL",
                 "mode": "ticker",
+                "layer_labels": [],
                 "frontiers": [],
                 "portfolio_limits": {"max_active": 3, "max_active_plus_new": 5},
                 "review_trigger": {"every_loops": 3, "max_reviews": 3},

@@ -91,9 +91,10 @@ class TestWorkspaceScripts(unittest.TestCase):
             registry = json.loads(
                 (workspace / "frontier_registry.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(2, registry["version"])
+            self.assertEqual(3, registry["version"])
             self.assertEqual("AI Optical Interconnect", registry["subject"])
             self.assertEqual("sector", registry["mode"])
+            self.assertEqual([], registry["layer_labels"])
             self.assertEqual([], registry["frontiers"])
             self.assertEqual(
                 {"max_active": 3, "max_active_plus_new": 5},

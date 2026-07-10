@@ -10,6 +10,10 @@ from typing import Any
 STATUSES = ("New", "Active", "Continued", "Retired")
 SUPPORTED_MODES = ("sector", "ticker")
 FRONTIER_SOURCES = ("initial", "discovery", "serendipity")
+CURRENT_REGISTRY_VERSION = 3
+LEGACY_REGISTRY_VERSION = 2
+LAYER_COUNT = 6
+PERSISTED_FRONTIER_SOURCES = frozenset((*FRONTIER_SOURCES, "user"))
 VALID_RETIRE_CATEGORIES = frozenset(
     {"blocked", "invalidated", "barren", "superseded", "bad_pick", "answered_out"}
 )
@@ -32,18 +36,19 @@ class BindingError(LifecycleError):
 
 
 class InvalidTransition(LifecycleError):
-    """Raised when a requested lifecycle transition violates v4 semantics."""
+    """Raised when a requested lifecycle transition violates lifecycle rules."""
 
 
 def make_registry(subject: str, mode: str) -> dict[str, Any]:
-    """Create an empty v4 frontier registry."""
+    """Create an empty frontier registry using registry schema v3."""
     if mode not in SUPPORTED_MODES:
         raise LifecycleError(f"unsupported mode: {mode}")
 
     return {
-        "version": 2,
+        "version": CURRENT_REGISTRY_VERSION,
         "subject": subject,
         "mode": mode,
+        "layer_labels": [],
         "frontiers": [],
         "portfolio_limits": {"max_active": 3, "max_active_plus_new": 5},
         "review_trigger": {"every_loops": 3, "max_reviews": 3},
@@ -84,22 +89,25 @@ def create_frontier(
     if initial_status == "Active":
         lifecycle.append({"to": "Active", "at_loop": proposed_at_loop, "ts": ts})
 
-    updated.setdefault("frontiers", []).append(
-        {
-            "id": frontier_id,
-            "name": name,
-            "proposed_at_loop": proposed_at_loop,
-            "source": source,
-            "source_frontier": source_frontier,
-            "status": initial_status,
-            "review_count": 0,
-            "max_reviews": int(updated.get("review_trigger", {}).get("max_reviews", 3)),
-            "retire_category": None,
-            "lifecycle": lifecycle,
-            "review_decisions": [],
-            "evidence_pointers": [],
-        }
-    )
+    frontier_record = {
+        "id": frontier_id,
+        "name": name,
+        "proposed_at_loop": proposed_at_loop,
+        "source": source,
+        "source_frontier": source_frontier,
+        "status": initial_status,
+        "review_count": 0,
+        "max_reviews": int(updated.get("review_trigger", {}).get("max_reviews", 3)),
+        "retire_category": None,
+        "lifecycle": lifecycle,
+        "review_decisions": [],
+        "evidence_pointers": [],
+    }
+    if updated["version"] == CURRENT_REGISTRY_VERSION:
+        frontier_record["layer"] = None
+        frontier_record["parent_frontier"] = None
+
+    updated.setdefault("frontiers", []).append(frontier_record)
 
     violations = enforce_portfolio_limits(updated)
     if violations:
