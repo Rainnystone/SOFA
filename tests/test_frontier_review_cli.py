@@ -268,6 +268,251 @@ class TestFrontierReviewCli(unittest.TestCase):
         )
         write_bytes.assert_called_once_with(registry_path, original_registry)
 
+    def test_rollback_failure_reports_primary_and_rollback_errors_and_actual_state(self):
+        workspace = self.make_workspace()
+        registry_path = workspace / "frontier_registry.json"
+        workflow_path = workspace / "research_workflow.md"
+        original_registry = registry_path.read_bytes()
+        original_workflow = workflow_path.read_bytes()
+        original_filenames = {path.name for path in workspace.iterdir()}
+        module = load_review_module()
+        real_replace = module.replace_with_retry
+        events = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def fail_workflow_replace(src, dst, **kwargs):
+            destination = Path(dst)
+            events.append(("replace", destination))
+            if destination == workflow_path:
+                raise OSError("simulated workflow failure")
+            return real_replace(src, dst, **kwargs)
+
+        def fail_registry_rollback(path, data):
+            events.append(("rollback", Path(path)))
+            raise OSError("simulated rollback failure")
+
+        with (
+            mock.patch.object(
+                module,
+                "replace_with_retry",
+                side_effect=fail_workflow_replace,
+            ),
+            mock.patch.object(
+                module,
+                "write_bytes",
+                side_effect=fail_registry_rollback,
+            ) as write_bytes,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.main(
+                [
+                    str(workspace),
+                    "add",
+                    "--name",
+                    "InP supply risk",
+                    "--source",
+                    "initial",
+                    "--at-loop",
+                    "1",
+                ]
+            )
+
+        actual_registry_bytes = registry_path.read_bytes()
+        actual_registry = json.loads(actual_registry_bytes.decode("utf-8"))
+        self.assertEqual(2, result)
+        self.assertIn(
+            "workflow write failed: simulated workflow failure",
+            stderr.getvalue(),
+        )
+        self.assertIn(
+            "registry rollback failed: simulated rollback failure",
+            stderr.getvalue(),
+        )
+        self.assertEqual("", stdout.getvalue())
+        self.assertNotEqual(original_registry, actual_registry_bytes)
+        self.assertEqual(
+            ["F1"],
+            [frontier["id"] for frontier in actual_registry["frontiers"]],
+        )
+        self.assertEqual("InP supply risk", actual_registry["frontiers"][0]["name"])
+        self.assertEqual(original_workflow, workflow_path.read_bytes())
+        self.assertEqual(
+            original_filenames,
+            {path.name for path in workspace.iterdir()},
+        )
+        self.assertEqual(
+            [
+                ("replace", registry_path),
+                ("replace", workflow_path),
+                ("rollback", registry_path),
+            ],
+            events,
+        )
+        write_bytes.assert_called_once_with(registry_path, original_registry)
+
+    def test_transaction_workflow_write_and_rollback_use_windows_replace_retry(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        workspace = Path(temp_dir.name)
+        registry_path = workspace / "frontier_registry.json"
+        workflow_path = workspace / "research_workflow.md"
+        registry_path.write_bytes(b'{"version": 3, "frontiers": []}\r\n')
+        workflow_path.write_bytes(b"original workflow\r\n")
+        original_registry = registry_path.read_bytes()
+        original_workflow = workflow_path.read_bytes()
+        original_filenames = {path.name for path in workspace.iterdir()}
+        module = load_review_module()
+        real_os_replace = module.os.replace
+        primary_error = OSError("simulated workflow failure")
+        destinations = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def scripted_replace(src, dst):
+            destination = Path(dst)
+            destinations.append(destination)
+            attempt = len(destinations)
+            if attempt in (1, 4):
+                raise PermissionError("simulated transient lock")
+            if attempt == 3:
+                raise primary_error
+            return real_os_replace(src, dst)
+
+        with (
+            mock.patch.object(module.sys, "platform", "win32"),
+            mock.patch.object(module.os, "replace", side_effect=scripted_replace),
+            mock.patch("time.sleep") as sleep,
+            mock.patch.object(
+                module,
+                "write_bytes",
+                wraps=module.write_bytes,
+            ) as write_bytes,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            with self.assertRaises(OSError) as raised:
+                module.persist_registry_and_workflow(
+                    registry_path=registry_path,
+                    workflow_path=workflow_path,
+                    original_registry_bytes=original_registry,
+                    rendered_registry='{"version": 3, "frontiers": [{"id": "F1"}]}\n',
+                    rendered_workflow="updated workflow\n",
+                )
+
+        self.assertIs(primary_error, raised.exception)
+        self.assertEqual(
+            [
+                registry_path,
+                registry_path,
+                workflow_path,
+                registry_path,
+                registry_path,
+            ],
+            destinations,
+        )
+        self.assertEqual(
+            [mock.call(0.05), mock.call(0.05)],
+            sleep.call_args_list,
+        )
+        write_bytes.assert_called_once_with(registry_path, original_registry)
+        self.assertEqual(original_registry, registry_path.read_bytes())
+        self.assertEqual(original_workflow, workflow_path.read_bytes())
+        self.assertEqual(
+            original_filenames,
+            {path.name for path in workspace.iterdir()},
+        )
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual("", stderr.getvalue())
+
+    def test_successful_rollback_preserves_valid_utf8_crlf_registry_bytes(self):
+        workspace = self.make_workspace()
+        registry_path = workspace / "frontier_registry.json"
+        workflow_path = workspace / "research_workflow.md"
+        registry = self.registry(workspace)
+        cjk_sentinel = "华语研究主题"
+        registry["subject"] = cjk_sentinel
+        noncanonical_json = json.dumps(
+            registry,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        registry_path.write_bytes(
+            ("\r\n  " + noncanonical_json + "\r\n\r\n").encode("utf-8")
+        )
+        original_registry = registry_path.read_bytes()
+        original_workflow = workflow_path.read_bytes()
+        original_filenames = {path.name for path in workspace.iterdir()}
+        original_decoded = original_registry.decode("utf-8")
+        self.assertIn(cjk_sentinel, original_decoded)
+        self.assertIn(b"\r\n", original_registry)
+        self.assertNotIn(b"\n", original_registry.replace(b"\r\n", b""))
+        module = load_review_module()
+        self.assertNotEqual(
+            module.registry_to_text(registry).encode("utf-8"),
+            original_registry,
+        )
+        real_replace = module.replace_with_retry
+        destinations = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def fail_workflow_replace(src, dst, **kwargs):
+            destination = Path(dst)
+            destinations.append(destination)
+            if destination == workflow_path:
+                raise OSError("simulated workflow failure")
+            return real_replace(src, dst, **kwargs)
+
+        with (
+            mock.patch.object(
+                module,
+                "replace_with_retry",
+                side_effect=fail_workflow_replace,
+            ),
+            mock.patch.object(
+                module,
+                "write_bytes",
+                wraps=module.write_bytes,
+            ) as write_bytes,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.main(
+                [
+                    str(workspace),
+                    "add",
+                    "--name",
+                    "InP supply risk",
+                    "--source",
+                    "initial",
+                    "--at-loop",
+                    "1",
+                ]
+            )
+
+        restored_registry = registry_path.read_bytes()
+        restored_decoded = restored_registry.decode("utf-8")
+        self.assertEqual(2, result)
+        self.assertIn("simulated workflow failure", stderr.getvalue())
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual(original_registry, restored_registry)
+        self.assertIn(cjk_sentinel, restored_decoded)
+        self.assertIn(b"\r\n", restored_registry)
+        self.assertNotIn(b"\n", restored_registry.replace(b"\r\n", b""))
+        self.assertEqual(original_workflow, workflow_path.read_bytes())
+        self.assertEqual(
+            original_filenames,
+            {path.name for path in workspace.iterdir()},
+        )
+        self.assertEqual(
+            [registry_path, workflow_path, registry_path],
+            destinations,
+        )
+        write_bytes.assert_called_once_with(registry_path, original_registry)
+
     def test_existing_mutation_handlers_use_shared_validated_persistence(self):
         module = load_review_module()
 
