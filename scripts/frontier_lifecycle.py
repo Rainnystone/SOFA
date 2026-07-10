@@ -72,6 +72,76 @@ def validate_registry(registry: Any) -> dict[str, Any]:
     return registry
 
 
+def set_layer_labels(
+    registry: dict[str, Any],
+    indexed_labels: list[tuple[int, str]],
+    *,
+    replace: bool = False,
+) -> dict[str, Any]:
+    """Return a validated copy with canonical Layer 0-5 labels."""
+    validate_registry(registry)
+    canonical_labels = _canonical_layer_labels(indexed_labels)
+
+    if registry["version"] == CURRENT_REGISTRY_VERSION:
+        existing_labels = registry["layer_labels"]
+        if existing_labels and existing_labels != canonical_labels and not replace:
+            raise LifecycleError("layer labels are already configured; use replace=True to change them")
+
+        updated = copy.deepcopy(registry)
+        updated["layer_labels"] = canonical_labels
+        return validate_registry(updated)
+
+    _validate_v2_for_adoption(registry)
+    updated = copy.deepcopy(registry)
+    updated["version"] = CURRENT_REGISTRY_VERSION
+    updated["layer_labels"] = canonical_labels
+    for frontier in updated["frontiers"]:
+        frontier["layer"] = None
+        frontier["parent_frontier"] = None
+
+    return validate_registry(updated)
+
+
+def _canonical_layer_labels(indexed_labels: list[tuple[int, str]]) -> list[str]:
+    if not isinstance(indexed_labels, list) or len(indexed_labels) != LAYER_COUNT:
+        raise LifecycleError(f"indexed_labels must contain exactly {LAYER_COUNT} entries")
+
+    labels_by_index: dict[int, str] = {}
+    for position, entry in enumerate(indexed_labels):
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            raise LifecycleError(f"indexed_labels entry {position} must be an index-label pair")
+        index, label = entry
+        _require_strict_int(
+            index,
+            f"indexed_labels entry {position} index",
+            minimum=0,
+            maximum=LAYER_COUNT - 1,
+        )
+        if index in labels_by_index:
+            raise LifecycleError(f"duplicate layer index: {index}")
+        if not isinstance(label, str):
+            raise LifecycleError(f"layer label {index} must be a string")
+        _validate_layer_label_characters(label, index)
+        labels_by_index[index] = label.strip()
+
+    canonical_labels = [labels_by_index[index] for index in range(LAYER_COUNT)]
+    _validate_persisted_layer_labels(canonical_labels)
+    return canonical_labels
+
+
+def _validate_v2_for_adoption(registry: dict[str, Any]) -> None:
+    candidate = copy.deepcopy(registry)
+    candidate["version"] = CURRENT_REGISTRY_VERSION
+    candidate["layer_labels"] = []
+    frontiers = candidate.get("frontiers")
+    if isinstance(frontiers, list):
+        for frontier in frontiers:
+            if isinstance(frontier, dict):
+                frontier["layer"] = None
+                frontier["parent_frontier"] = None
+    validate_registry(candidate)
+
+
 def _is_strict_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -212,15 +282,19 @@ def _validate_persisted_layer_labels(layer_labels: list[Any]) -> None:
             raise LifecycleError(f"layer label {index} must be a string")
         if label != label.strip() or not label:
             raise LifecycleError(f"layer label {index} must be non-empty and already trimmed")
-        if any(character in label for character in ("\n", "\r", "\u2028", "\u2029")):
-            raise LifecycleError(f"layer label {index} must be single-line")
-        if any(unicodedata.category(character) == "Cc" for character in label):
-            raise LifecycleError(f"layer label {index} cannot contain Unicode control characters")
+        _validate_layer_label_characters(label, index)
 
         folded = label.casefold()
         if folded in folded_labels:
             raise LifecycleError("layer labels must be unique after case-folding")
         folded_labels.add(folded)
+
+
+def _validate_layer_label_characters(label: str, index: int) -> None:
+    if any(character in label for character in ("\n", "\r", "\u2028", "\u2029")):
+        raise LifecycleError(f"layer label {index} must be single-line")
+    if any(unicodedata.category(character) == "Cc" for character in label):
+        raise LifecycleError(f"layer label {index} cannot contain Unicode control characters")
 
 
 def _validate_optional_frontier_id(value: Any, field: str) -> None:

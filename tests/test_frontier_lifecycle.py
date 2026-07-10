@@ -608,6 +608,60 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertIs(registry, validated)
         self.assertEqual(original, registry)
 
+    def test_set_layer_labels_adopts_v2_without_inference_or_history_loss(self):
+        registry = self.registry()
+        registry["frontiers"][0]["review_decisions"] = [
+            {
+                "decision": "continue",
+                "at_loop": 3,
+                "reason": "Supplier evidence remains incomplete",
+            }
+        ]
+        registry["frontiers"][0]["evidence_pointers"] = [
+            {"claim": "InP concentration", "evidence_id": "E-17"}
+        ]
+        registry["frontiers"][1]["source"] = "discovery"
+        registry["frontiers"][1]["source_frontier"] = "F1"
+        registry["frontiers"][1]["lifecycle"].append(
+            {"to": "Continued", "at_loop": 4, "ts": "2026-06-25T00:00:00Z"}
+        )
+        registry["portfolio_actions"] = [
+            {
+                "action": "continue",
+                "frontier": "F1",
+                "at_loop": 3,
+                "reason": "Preserve the full decision history",
+            }
+        ]
+        indexed_labels = [
+            (0, "End demand"),
+            (1, "System or platform"),
+            (2, "Component or module"),
+            (3, "Material or process"),
+            (4, "Constrained input or equipment"),
+            (5, "Geography or regulation"),
+        ]
+        original = copy.deepcopy(registry)
+        original_indexed_labels = copy.deepcopy(indexed_labels)
+
+        updated = self.module.set_layer_labels(registry, indexed_labels)
+
+        expected = copy.deepcopy(original)
+        expected["version"] = 3
+        expected["layer_labels"] = [label for _, label in indexed_labels]
+        for frontier in expected["frontiers"]:
+            frontier["layer"] = None
+            frontier["parent_frontier"] = None
+        self.assertEqual(expected, updated)
+        self.assertEqual(original, registry)
+        self.assertEqual(original_indexed_labels, indexed_labels)
+        self.assertIsNot(registry, updated)
+        for before, after in zip(registry["frontiers"], updated["frontiers"]):
+            self.assertIsNot(before, after)
+        self.assertEqual("F1", updated["frontiers"][1]["source_frontier"])
+        self.assertIsNone(updated["frontiers"][1]["parent_frontier"])
+        self.assertIs(updated, self.module.validate_registry(updated))
+
     def test_v2_ordinary_validation_adds_only_version_and_mixed_schema_checks(self):
         ordinary_cases = [
             self.registry(),
@@ -654,6 +708,455 @@ class TestFrontierLifecycle(unittest.TestCase):
                 with self.assertRaises(self.module.LifecycleError):
                     self.module.validate_registry(registry)
                 self.assertEqual(original, registry)
+
+    def test_set_layer_labels_canonicalizes_and_validates_six_indexed_labels(self):
+        indexed_labels = [
+            (5, " Geography | regulation "),
+            (2, " Component or module "),
+            (0, " End demand "),
+            (4, " Constrained input or equipment "),
+            (1, " System or platform "),
+            (3, " Material or process "),
+        ]
+        expected_labels = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography | regulation",
+        ]
+        registry = self.registry()
+        original_registry = copy.deepcopy(registry)
+        original_labels = copy.deepcopy(indexed_labels)
+
+        updated = self.module.set_layer_labels(registry, indexed_labels)
+
+        self.assertEqual(expected_labels, updated["layer_labels"])
+        self.assertEqual(original_registry, registry)
+        self.assertEqual(original_labels, indexed_labels)
+
+        def with_index(original_index, replacement_index):
+            return [
+                (replacement_index if index == original_index else index, label)
+                for index, label in indexed_labels
+            ]
+
+        invalid_indexes = {
+            "index_missing": indexed_labels[:-1],
+            "index_duplicate": [*indexed_labels, (0, "Duplicate index")],
+            "index_negative": with_index(5, -1),
+            "index_too_high": with_index(5, 6),
+            "index_extra": [*indexed_labels, (6, "Extra")],
+            "index_bool": with_index(1, True),
+            "index_float": with_index(1, 1.0),
+            "index_string": with_index(1, "1"),
+        }
+
+        def with_label(target_index, replacement_label):
+            return [
+                (index, replacement_label if index == target_index else label)
+                for index, label in indexed_labels
+            ]
+
+        invalid_labels = {
+            "label_bool": with_label(0, True),
+            "label_integer": with_label(0, 1),
+            "label_blank": with_label(0, "   "),
+            "label_newline": with_label(0, "End\ndemand"),
+            "label_carriage_return": with_label(0, "End\rdemand"),
+            "label_unicode_line_separator": with_label(0, "End\u2028demand"),
+            "label_unicode_paragraph_separator": with_label(0, "End\u2029demand"),
+            "label_control_character": with_label(0, "End\x00demand"),
+            "label_tab_control_character": with_label(0, "End\tdemand"),
+            "label_leading_newline": with_label(0, "\nEnd demand"),
+            "label_trailing_carriage_return": with_label(0, "End demand\r"),
+            "label_leading_unicode_line_separator": with_label(0, "\u2028End demand"),
+            "label_trailing_unicode_paragraph_separator": with_label(0, "End demand\u2029"),
+            "label_leading_tab_control_character": with_label(0, "\tEnd demand"),
+            "label_ascii_casefold_duplicate": with_label(0, "system OR PLATFORM"),
+        }
+        invalid_labels["label_unicode_casefold_duplicate"] = with_label(1, "STRASSE")
+        invalid_labels["label_unicode_casefold_duplicate"][2] = (0, "Stra\u00dfe")
+
+        for case, invalid in {**invalid_indexes, **invalid_labels}.items():
+            registry = self.registry()
+            original_registry = copy.deepcopy(registry)
+            original_labels = copy.deepcopy(invalid)
+            with self.subTest(case=case):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.set_layer_labels(registry, invalid)
+                self.assertEqual(original_registry, registry)
+                self.assertEqual(original_labels, invalid)
+
+    def test_set_layer_labels_v3_idempotence_replace_and_copy_on_write(self):
+        labels = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
+        indexed_labels = list(enumerate(labels))
+
+        unconfigured = self.v3_registry()
+        unconfigured["extension"] = {"preserve": ["nested", "value"]}
+        original_unconfigured = copy.deepcopy(unconfigured)
+        original_indexed_labels = copy.deepcopy(indexed_labels)
+
+        configured = self.module.set_layer_labels(unconfigured, indexed_labels)
+
+        expected_configured = copy.deepcopy(original_unconfigured)
+        expected_configured["layer_labels"] = labels
+        self.assertEqual(expected_configured, configured)
+        self.assertEqual(original_unconfigured, unconfigured)
+        self.assertEqual(original_indexed_labels, indexed_labels)
+        self.assertIsNot(unconfigured, configured)
+        self.assertIsNot(unconfigured["frontiers"][0], configured["frontiers"][0])
+        self.assertIs(configured, self.module.validate_registry(configured))
+
+        configured["frontiers"][0]["layer"] = 2
+        original_configured = copy.deepcopy(configured)
+        original_indexed_labels = copy.deepcopy(indexed_labels)
+
+        repeated = self.module.set_layer_labels(configured, indexed_labels)
+
+        self.assertEqual(original_configured, repeated)
+        self.assertEqual(original_configured, configured)
+        self.assertEqual(original_indexed_labels, indexed_labels)
+        self.assertIsNot(configured, repeated)
+        self.assertIsNot(configured["frontiers"][0], repeated["frontiers"][0])
+        self.assertIs(repeated, self.module.validate_registry(repeated))
+
+        replacement_labels = ["Demand", *labels[1:]]
+        replacement_indexed_labels = list(enumerate(replacement_labels))
+        original_configured = copy.deepcopy(configured)
+        original_replacement_labels = copy.deepcopy(replacement_indexed_labels)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.set_layer_labels(configured, replacement_indexed_labels)
+        self.assertEqual(original_configured, configured)
+        self.assertEqual(original_replacement_labels, replacement_indexed_labels)
+
+        bound = self.module.make_registry("MXL", "ticker")
+        bound = self.module.create_frontier(
+            bound,
+            name="Supply concentration",
+            proposed_at_loop=1,
+            source="initial",
+            initial_status="Active",
+        )
+        bound = self.module.create_frontier(
+            bound,
+            name="Qualification dependency",
+            proposed_at_loop=2,
+            source="discovery",
+            source_frontier="F1",
+        )
+        bound["layer_labels"] = labels
+        bound["frontiers"][0]["layer"] = 0
+        bound["frontiers"][1]["layer"] = 4
+        bound["frontiers"][1]["parent_frontier"] = "F1"
+        bound.pop("portfolio_limits")
+        bound.pop("review_trigger")
+        for optional in ("review_count", "max_reviews", "retire_category", "evidence_pointers"):
+            bound["frontiers"][1].pop(optional)
+        bound["extension"] = {"crlf_value": "line one\r\nline two"}
+        bound["frontiers"][1]["extension"] = {"owner": "research"}
+        self.module.validate_registry(bound)
+        original_bound = copy.deepcopy(bound)
+        original_replacement_labels = copy.deepcopy(replacement_indexed_labels)
+
+        replaced = self.module.set_layer_labels(
+            bound,
+            replacement_indexed_labels,
+            replace=True,
+        )
+
+        expected_replaced = copy.deepcopy(original_bound)
+        expected_replaced["layer_labels"] = replacement_labels
+        self.assertEqual(expected_replaced, replaced)
+        self.assertEqual(original_bound, bound)
+        self.assertEqual(original_replacement_labels, replacement_indexed_labels)
+        self.assertIsNot(bound, replaced)
+        for before, after in zip(bound["frontiers"], replaced["frontiers"]):
+            self.assertIsNot(before, after)
+        self.assertEqual([0, 4], [frontier["layer"] for frontier in replaced["frontiers"]])
+        self.assertEqual("F1", replaced["frontiers"][1]["parent_frontier"])
+        self.assertEqual("F1", replaced["frontiers"][1]["source_frontier"])
+        self.assertNotIn("portfolio_limits", replaced)
+        self.assertNotIn("review_trigger", replaced)
+        self.assertNotIn("review_count", replaced["frontiers"][1])
+        self.assertIs(replaced, self.module.validate_registry(replaced))
+
+    def test_v2_adoption_preserves_unknown_extensions_defaults_and_user_source(self):
+        labels = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
+        indexed_labels = list(enumerate(labels))
+        registry = self.registry()
+        registry["unknown_top_level_extension"] = {
+            "raw_note": "line one\r\nline two",
+            "ordered_values": ["alpha", "beta"],
+            "nested": {"enabled": True, "threshold": 0},
+        }
+        registry["frontiers"][0]["unknown_frontier_extension"] = {
+            "owner": "research",
+            "tags": ["supply", "qualification"],
+        }
+        registry["frontiers"][1]["source"] = "user"
+        registry["frontiers"][1]["source_frontier"] = None
+        registry["frontiers"][1]["unknown_frontier_extension"] = {
+            "user_note": "keep verbatim"
+        }
+        registry = json.loads(json.dumps(registry, indent=2).replace("\n", "\r\n"))
+        original_registry = copy.deepcopy(registry)
+        original_indexed_labels = copy.deepcopy(indexed_labels)
+
+        updated = self.module.set_layer_labels(registry, indexed_labels)
+
+        expected = copy.deepcopy(original_registry)
+        expected["version"] = 3
+        expected["layer_labels"] = labels
+        for frontier in expected["frontiers"]:
+            frontier["layer"] = None
+            frontier["parent_frontier"] = None
+        self.assertEqual(expected, updated)
+        self.assertEqual(original_registry, registry)
+        self.assertEqual(original_indexed_labels, indexed_labels)
+        self.assertEqual(
+            original_registry["unknown_top_level_extension"],
+            updated["unknown_top_level_extension"],
+        )
+        self.assertEqual("user", updated["frontiers"][1]["source"])
+        self.assertIsNone(updated["frontiers"][1]["source_frontier"])
+        self.assertEqual(["F1", "F2"], [frontier["id"] for frontier in updated["frontiers"]])
+        self.assertIs(updated, self.module.validate_registry(updated))
+
+    def test_v2_adoption_preserves_optional_omissions_without_materializing_defaults(self):
+        registry = {
+            "version": 2,
+            "subject": "MXL",
+            "mode": "ticker",
+            "frontiers": [
+                {
+                    "id": "F1",
+                    "name": "User-supplied frontier",
+                    "proposed_at_loop": 1,
+                    "source": "user",
+                    "status": "New",
+                }
+            ],
+            "extension": {"preserve": "without defaults"},
+        }
+        labels = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
+        indexed_labels = list(enumerate(labels))
+        original_registry = copy.deepcopy(registry)
+        original_indexed_labels = copy.deepcopy(indexed_labels)
+
+        updated = self.module.set_layer_labels(registry, indexed_labels)
+
+        expected = copy.deepcopy(original_registry)
+        expected["version"] = 3
+        expected["layer_labels"] = labels
+        expected["frontiers"][0]["layer"] = None
+        expected["frontiers"][0]["parent_frontier"] = None
+        self.assertEqual(expected, updated)
+        self.assertEqual(original_registry, registry)
+        self.assertEqual(original_indexed_labels, indexed_labels)
+        for optional in ("portfolio_limits", "review_trigger"):
+            self.assertNotIn(optional, updated)
+        for optional in (
+            "source_frontier",
+            "review_count",
+            "max_reviews",
+            "retire_category",
+            "lifecycle",
+            "review_decisions",
+            "evidence_pointers",
+        ):
+            self.assertNotIn(optional, updated["frontiers"][0])
+        self.assertIs(updated, self.module.validate_registry(updated))
+
+    def test_v2_adoption_rejects_ambiguous_or_nonconvertible_ids_without_writes(self):
+        labels = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
+        indexed_labels = list(enumerate(labels))
+
+        def without_frontier_field(field):
+            registry = self.registry()
+            registry["frontiers"][0].pop(field)
+            return registry
+
+        def with_frontier_field(field, value):
+            registry = self.registry()
+            registry["frontiers"][0][field] = value
+            return registry
+
+        cases = {
+            "id_missing": without_frontier_field("id"),
+            "id_bool": with_frontier_field("id", True),
+            "id_integer": with_frontier_field("id", 1),
+            "id_unprefixed": with_frontier_field("id", "1"),
+            "id_zero": with_frontier_field("id", "F0"),
+            "id_leading_zero": with_frontier_field("id", "F01"),
+            "id_negative": with_frontier_field("id", "F-1"),
+            "name_missing": without_frontier_field("name"),
+            "name_non_string": with_frontier_field("name", None),
+            "proposed_at_loop_missing": without_frontier_field("proposed_at_loop"),
+            "proposed_at_loop_bool": with_frontier_field("proposed_at_loop", True),
+            "proposed_at_loop_string": with_frontier_field("proposed_at_loop", "1"),
+            "proposed_at_loop_zero": with_frontier_field("proposed_at_loop", 0),
+            "source_missing": without_frontier_field("source"),
+            "source_unknown": with_frontier_field("source", "manual"),
+            "status_missing": without_frontier_field("status"),
+            "status_noncanonical": with_frontier_field("status", "active"),
+            "review_count_bool": with_frontier_field("review_count", True),
+            "max_reviews_negative": with_frontier_field("max_reviews", -1),
+            "lifecycle_non_list": with_frontier_field("lifecycle", {}),
+            "review_decisions_non_list": with_frontier_field("review_decisions", {}),
+            "evidence_pointers_non_list": with_frontier_field("evidence_pointers", {}),
+            "portfolio_limits_non_object": {
+                **self.registry(),
+                "portfolio_limits": "3/5",
+            },
+            "review_trigger_non_object": {
+                **self.registry(),
+                "review_trigger": "every three loops",
+            },
+            "frontiers_non_list": {
+                **self.registry(),
+                "frontiers": {"F1": "not a list"},
+            },
+            "frontier_non_object": {
+                **self.registry(),
+                "frontiers": [None],
+            },
+            "subject_missing": {
+                key: value for key, value in self.registry().items() if key != "subject"
+            },
+            "subject_non_string": {
+                **self.registry(),
+                "subject": None,
+            },
+            "mode_missing": {
+                key: value for key, value in self.registry().items() if key != "mode"
+            },
+            "mode_unknown": {
+                **self.registry(),
+                "mode": "legacy-mode",
+            },
+        }
+        duplicate = self.registry()
+        duplicate["frontiers"][1]["id"] = "F1"
+        cases["id_duplicate"] = duplicate
+        retired_without_category = self.registry()
+        retired_without_category["frontiers"][0]["status"] = "Retired"
+        retired_without_category["frontiers"][0].pop("retire_category")
+        cases["retired_without_category"] = retired_without_category
+        active_with_category = self.registry()
+        active_with_category["frontiers"][0]["retire_category"] = "blocked"
+        cases["active_with_retire_category"] = active_with_category
+        invalid_limit = self.registry()
+        invalid_limit["portfolio_limits"]["max_active"] = True
+        cases["portfolio_limit_bool"] = invalid_limit
+        invalid_trigger = self.registry()
+        invalid_trigger["review_trigger"] = {"every_loops": 0}
+        cases["review_trigger_zero"] = invalid_trigger
+
+        for case, registry in cases.items():
+            original_registry = copy.deepcopy(registry)
+            original_indexed_labels = copy.deepcopy(indexed_labels)
+            with self.subTest(case=case):
+                self.assertIs(registry, self.module.validate_registry(registry))
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.set_layer_labels(registry, indexed_labels)
+                self.assertEqual(original_registry, registry)
+                self.assertEqual(original_indexed_labels, indexed_labels)
+
+    def test_v2_adoption_rejects_incoherent_source_frontier_without_parent_inference(self):
+        labels = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
+        indexed_labels = list(enumerate(labels))
+
+        invalid_cases = {}
+        for source in ("discovery", "serendipity"):
+            for source_frontier_state, source_frontier in (
+                ("missing", None),
+                ("null", None),
+                ("self", "F2"),
+                ("unknown", "F999"),
+            ):
+                registry = self.registry()
+                frontier = registry["frontiers"][1]
+                frontier["source"] = source
+                if source_frontier_state == "missing":
+                    frontier.pop("source_frontier")
+                else:
+                    frontier["source_frontier"] = source_frontier
+                invalid_cases[f"{source}.{source_frontier_state}"] = registry
+
+        for source in ("initial", "user"):
+            registry = self.registry()
+            registry["frontiers"][1]["source"] = source
+            registry["frontiers"][1]["source_frontier"] = "F1"
+            invalid_cases[f"{source}.non_null"] = registry
+
+        for case, registry in invalid_cases.items():
+            original_registry = copy.deepcopy(registry)
+            original_indexed_labels = copy.deepcopy(indexed_labels)
+            with self.subTest(case=case):
+                self.assertIs(registry, self.module.validate_registry(registry))
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.set_layer_labels(registry, indexed_labels)
+                self.assertEqual(original_registry, registry)
+                self.assertEqual(original_indexed_labels, indexed_labels)
+
+        valid = self.registry()
+        valid["frontiers"][1]["source"] = "discovery"
+        valid["frontiers"][1]["source_frontier"] = "F1"
+        original_valid = copy.deepcopy(valid)
+        original_indexed_labels = copy.deepcopy(indexed_labels)
+
+        adopted = self.module.set_layer_labels(valid, indexed_labels)
+
+        expected = copy.deepcopy(original_valid)
+        expected["version"] = 3
+        expected["layer_labels"] = labels
+        for frontier in expected["frontiers"]:
+            frontier["layer"] = None
+            frontier["parent_frontier"] = None
+        self.assertEqual(expected, adopted)
+        self.assertEqual(original_valid, valid)
+        self.assertEqual(original_indexed_labels, indexed_labels)
+        self.assertEqual("F1", adopted["frontiers"][1]["source_frontier"])
+        self.assertIsNone(adopted["frontiers"][1]["parent_frontier"])
+        self.assertIsNone(adopted["frontiers"][1]["layer"])
+        self.assertIs(adopted, self.module.validate_registry(adopted))
 
     def test_make_registry_creates_v3_with_empty_layer_labels(self):
         registry = self.module.make_registry("MXL", "ticker")
