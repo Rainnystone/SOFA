@@ -68,6 +68,432 @@ class TestFrontierLifecycle(unittest.TestCase):
             "portfolio_limits": {"max_active": 3, "max_active_plus_new": 5},
         }
 
+    def v3_registry(self, mode="ticker"):
+        registry = self.module.make_registry("MXL", mode)
+        return self.module.create_frontier(
+            registry,
+            name="InP substrate supply concentration",
+            proposed_at_loop=1,
+            source="initial",
+            initial_status="Active",
+        )
+
+    def test_validate_registry_rejects_unknown_mixed_and_malformed_v3(self):
+        valid = self.v3_registry()
+        valid["extension"] = {"preserve": ["as-is"]}
+        valid["frontiers"][0]["extension"] = {"owner": "research"}
+        original = copy.deepcopy(valid)
+
+        self.assertIs(valid, self.module.validate_registry(valid))
+        self.assertEqual(original, valid)
+
+        invalid_roots_and_versions = [
+            None,
+            [],
+            {},
+            {"version": "3"},
+            {"version": True},
+            {"version": 1},
+            {"version": 4},
+        ]
+        for invalid in invalid_roots_and_versions:
+            with self.subTest(invalid=invalid):
+                original = copy.deepcopy(invalid)
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(invalid)
+                self.assertEqual(original, invalid)
+
+        mixed_registries = [
+            {"version": 2, "layer_labels": []},
+            {"version": 2, "frontiers": [{"layer": None}]},
+            {"version": 2, "frontiers": [{"parent_frontier": None}]},
+        ]
+        for mixed in mixed_registries:
+            with self.subTest(mixed=mixed):
+                original = copy.deepcopy(mixed)
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(mixed)
+                self.assertEqual(original, mixed)
+
+        for required_frontier_key in ("layer", "parent_frontier"):
+            malformed = self.v3_registry()
+            malformed["frontiers"][0].pop(required_frontier_key)
+            original = copy.deepcopy(malformed)
+            with self.subTest(required_frontier_key=required_frontier_key):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(malformed)
+                self.assertEqual(original, malformed)
+
+    def test_v3_required_optional_field_matrix_and_existing_defaults(self):
+        minimal = {
+            "version": 3,
+            "subject": "",
+            "mode": "sector",
+            "layer_labels": [],
+            "frontiers": [
+                {
+                    "id": "F1",
+                    "name": "",
+                    "proposed_at_loop": 1,
+                    "source": "initial",
+                    "status": "New",
+                    "layer": None,
+                    "parent_frontier": None,
+                }
+            ],
+            "extension": {"keep": True},
+        }
+        original = copy.deepcopy(minimal)
+
+        self.assertIs(minimal, self.module.validate_registry(minimal))
+        self.assertEqual(original, minimal)
+        for optional in ("portfolio_limits", "review_trigger"):
+            self.assertNotIn(optional, minimal)
+        for optional in (
+            "source_frontier",
+            "review_count",
+            "max_reviews",
+            "retire_category",
+            "lifecycle",
+            "review_decisions",
+            "evidence_pointers",
+        ):
+            self.assertNotIn(optional, minimal["frontiers"][0])
+
+        self.assertEqual([], self.module.check_review_due(minimal, {"F1": 3}))
+        with_new_frontier = self.module.create_frontier(
+            minimal,
+            name="Optional-default probe",
+            proposed_at_loop=2,
+            source="initial",
+        )
+        self.assertEqual(3, self.module.get_frontier(with_new_frontier, "F2")["max_reviews"])
+        self.assertEqual(original, minimal)
+
+        partial_optional_objects = [
+            ("portfolio_limits", {"max_active": 0}),
+            ("portfolio_limits", {"max_active_plus_new": 0}),
+            ("review_trigger", {"every_loops": 1}),
+            ("review_trigger", {"max_reviews": 0}),
+        ]
+        for field, value in partial_optional_objects:
+            registry = self.v3_registry()
+            registry[field] = value
+            original = copy.deepcopy(registry)
+            with self.subTest(partial_optional_object=(field, value)):
+                self.assertIs(registry, self.module.validate_registry(registry))
+                self.assertEqual(original, registry)
+
+        configured = self.v3_registry()
+        configured["layer_labels"] = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
+        configured["frontiers"][0]["layer"] = 0
+        configured["frontiers"][0]["parent_frontier"] = None
+        configured["frontiers"][0]["extension"] = ["untouched"]
+        original = copy.deepcopy(configured)
+        self.assertIs(configured, self.module.validate_registry(configured))
+        self.assertEqual(original, configured)
+
+        for field in ("subject", "mode", "layer_labels", "frontiers"):
+            malformed = self.v3_registry()
+            malformed.pop(field)
+            original = copy.deepcopy(malformed)
+            with self.subTest(required_top_level=field):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(malformed)
+                self.assertEqual(original, malformed)
+
+        for field in (
+            "id",
+            "name",
+            "proposed_at_loop",
+            "source",
+            "status",
+            "layer",
+            "parent_frontier",
+        ):
+            malformed = self.v3_registry()
+            malformed["frontiers"][0].pop(field)
+            original = copy.deepcopy(malformed)
+            with self.subTest(required_frontier=field):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(malformed)
+                self.assertEqual(original, malformed)
+
+        malformed_shapes = {
+            "subject": ("subject", None),
+            "mode": ("mode", None),
+            "layer_labels": ("layer_labels", {}),
+            "frontiers": ("frontiers", {}),
+            "portfolio_limits": ("portfolio_limits", []),
+            "review_trigger": ("review_trigger", []),
+        }
+        for case, (field, value) in malformed_shapes.items():
+            malformed = self.v3_registry()
+            malformed[field] = value
+            original = copy.deepcopy(malformed)
+            with self.subTest(malformed_top_level=case):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(malformed)
+                self.assertEqual(original, malformed)
+
+        malformed = self.v3_registry()
+        malformed["frontiers"] = [None]
+        original = copy.deepcopy(malformed)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(malformed)
+        self.assertEqual(original, malformed)
+
+        for field in ("id", "name", "source", "status"):
+            malformed = self.v3_registry()
+            malformed["frontiers"][0][field] = None
+            original = copy.deepcopy(malformed)
+            with self.subTest(non_string_frontier_field=field):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(malformed)
+                self.assertEqual(original, malformed)
+
+        for field in ("lifecycle", "review_decisions", "evidence_pointers"):
+            malformed = self.v3_registry()
+            malformed["frontiers"][0][field] = {}
+            original = copy.deepcopy(malformed)
+            with self.subTest(non_list_optional_frontier_field=field):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(malformed)
+                self.assertEqual(original, malformed)
+
+    def test_v3_rejects_noncanonical_persisted_values_without_normalizing(self):
+        canonical_labels = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
+
+        def reject(case, registry):
+            original = copy.deepcopy(registry)
+            with self.subTest(case=case):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(registry)
+                self.assertEqual(original, registry)
+
+        for field in ("max_active", "max_active_plus_new"):
+            for invalid in (True, -1, "3", 1.0):
+                registry = self.v3_registry()
+                registry["portfolio_limits"][field] = invalid
+                reject(f"portfolio_limits.{field}={invalid!r}", registry)
+
+        for invalid in (True, 0, -1, "3", 1.0):
+            registry = self.v3_registry()
+            registry["review_trigger"]["every_loops"] = invalid
+            reject(f"review_trigger.every_loops={invalid!r}", registry)
+
+        for invalid in (True, -1, "3", 1.0):
+            registry = self.v3_registry()
+            registry["review_trigger"]["max_reviews"] = invalid
+            reject(f"review_trigger.max_reviews={invalid!r}", registry)
+
+        invalid_label_sets = {
+            "partial": canonical_labels[:5],
+            "too_many": [*canonical_labels, "Extra"],
+            "non_string": [True, *canonical_labels[1:]],
+            "blank": ["", *canonical_labels[1:]],
+            "whitespace_only": ["   ", *canonical_labels[1:]],
+            "leading_whitespace": [" End demand", *canonical_labels[1:]],
+            "trailing_whitespace": ["End demand ", *canonical_labels[1:]],
+            "newline": ["End\ndemand", *canonical_labels[1:]],
+            "carriage_return": ["End\rdemand", *canonical_labels[1:]],
+            "unicode_line_separator": ["End\u2028demand", *canonical_labels[1:]],
+            "control_character": ["End\x00demand", *canonical_labels[1:]],
+            "casefold_duplicate": ["Layer", "layer", *canonical_labels[2:]],
+            "unicode_casefold_duplicate": ["Straße", "STRASSE", *canonical_labels[2:]],
+        }
+        for case, labels in invalid_label_sets.items():
+            registry = self.v3_registry()
+            registry["layer_labels"] = labels
+            reject(f"layer_labels.{case}", registry)
+
+        punctuation = self.v3_registry()
+        punctuation["layer_labels"] = ["End | demand", *canonical_labels[1:]]
+        original = copy.deepcopy(punctuation)
+        self.assertIs(punctuation, self.module.validate_registry(punctuation))
+        self.assertEqual(original, punctuation)
+
+        for field, value in (("layer", 0), ("parent_frontier", "F9")):
+            registry = self.v3_registry()
+            registry["frontiers"][0][field] = value
+            reject(f"empty_layer_labels_with_{field}", registry)
+
+        for invalid_id in ("F0", "F01", "F-1", 1):
+            registry = self.v3_registry()
+            registry["frontiers"][0]["id"] = invalid_id
+            reject(f"frontier.id={invalid_id!r}", registry)
+
+        duplicate = self.v3_registry()
+        duplicate["frontiers"].append(copy.deepcopy(duplicate["frontiers"][0]))
+        reject("duplicate_frontier_id", duplicate)
+
+        for invalid in (True, 0, -1, "1", 1.0):
+            registry = self.v3_registry()
+            registry["frontiers"][0]["proposed_at_loop"] = invalid
+            reject(f"frontier.proposed_at_loop={invalid!r}", registry)
+
+        for invalid in ("manual", [], {}):
+            registry = self.v3_registry()
+            registry["frontiers"][0]["source"] = invalid
+            reject(f"frontier.source={invalid!r}", registry)
+
+        for field in ("source_frontier", "parent_frontier"):
+            for invalid in ("F0", "F01", 1):
+                registry = self.v3_registry()
+                registry["layer_labels"] = canonical_labels
+                registry["frontiers"][0][field] = invalid
+                reject(f"frontier.{field}={invalid!r}", registry)
+
+        registry = self.v3_registry()
+        registry["frontiers"][0]["status"] = "active"
+        reject("frontier.status=active", registry)
+
+        for field in ("review_count", "max_reviews"):
+            for invalid in (True, -1, "0", 0.0):
+                registry = self.v3_registry()
+                registry["frontiers"][0][field] = invalid
+                reject(f"frontier.{field}={invalid!r}", registry)
+
+        for missing_or_invalid in (None, "unknown"):
+            registry = self.v3_registry()
+            registry["frontiers"][0]["status"] = "Retired"
+            registry["frontiers"][0]["retire_category"] = missing_or_invalid
+            reject(f"retired_category={missing_or_invalid!r}", registry)
+
+        registry = self.v3_registry()
+        registry["frontiers"][0]["status"] = "Retired"
+        registry["frontiers"][0].pop("retire_category")
+        reject("retired_category_missing", registry)
+
+        for status in ("New", "Active", "Continued"):
+            registry = self.v3_registry()
+            registry["frontiers"][0]["status"] = status
+            registry["frontiers"][0]["retire_category"] = "blocked"
+            reject(f"non_retired_category_status={status}", registry)
+
+        for invalid in (True, -1, 6, "0", 0.0):
+            registry = self.v3_registry()
+            registry["layer_labels"] = canonical_labels
+            registry["frontiers"][0]["layer"] = invalid
+            reject(f"frontier.layer={invalid!r}", registry)
+
+        valid_scalars = self.v3_registry()
+        valid_scalars["layer_labels"] = canonical_labels
+        valid_scalars["portfolio_limits"] = {"max_active": 0, "max_active_plus_new": 0}
+        valid_scalars["review_trigger"] = {"every_loops": 1, "max_reviews": 0}
+        frontier = valid_scalars["frontiers"][0]
+        frontier["proposed_at_loop"] = 1
+        frontier["review_count"] = 0
+        frontier["max_reviews"] = 0
+        frontier["layer"] = 5
+        original = copy.deepcopy(valid_scalars)
+        self.assertIs(valid_scalars, self.module.validate_registry(valid_scalars))
+        self.assertEqual(original, valid_scalars)
+
+        for category in self.module.VALID_RETIRE_CATEGORIES:
+            retired = self.v3_registry()
+            retired["frontiers"][0]["status"] = "Retired"
+            retired["frontiers"][0]["retire_category"] = category
+            original = copy.deepcopy(retired)
+            with self.subTest(valid_retire_category=category):
+                self.assertIs(retired, self.module.validate_registry(retired))
+                self.assertEqual(original, retired)
+
+        deferred_relations = self.v3_registry()
+        deferred_relations["layer_labels"] = canonical_labels
+        frontier = deferred_relations["frontiers"][0]
+        frontier["source"] = "discovery"
+        frontier["source_frontier"] = "F999"
+        frontier["layer"] = 0
+        frontier["parent_frontier"] = "F999"
+        original = copy.deepcopy(deferred_relations)
+        self.assertIs(deferred_relations, self.module.validate_registry(deferred_relations))
+        self.assertEqual(original, deferred_relations)
+
+        deferred_self_relations = self.v3_registry()
+        deferred_self_relations["layer_labels"] = canonical_labels
+        frontier = deferred_self_relations["frontiers"][0]
+        frontier["source_frontier"] = "F1"
+        frontier["layer"] = 0
+        frontier["parent_frontier"] = "F1"
+        original = copy.deepcopy(deferred_self_relations)
+        self.assertIs(deferred_self_relations, self.module.validate_registry(deferred_self_relations))
+        self.assertEqual(original, deferred_self_relations)
+
+    def test_validate_v3_accepts_persisted_user_source(self):
+        registry = self.v3_registry()
+        registry["frontiers"][0]["source"] = "user"
+        original = copy.deepcopy(registry)
+
+        try:
+            validated = self.module.validate_registry(registry)
+        except self.module.LifecycleError as exc:
+            self.fail(f"persisted source='user' must remain valid: {exc}")
+
+        self.assertIs(registry, validated)
+        self.assertEqual(original, registry)
+
+    def test_v2_ordinary_validation_adds_only_version_and_mixed_schema_checks(self):
+        ordinary_cases = [
+            self.registry(),
+            {"version": 2},
+            {
+                "version": 2,
+                "subject": None,
+                "mode": "legacy-extension-mode",
+                "frontiers": [
+                    None,
+                    {
+                        "id": "legacy-id",
+                        "source": "user",
+                        "unknown_frontier_extension": {"preserve": True},
+                    },
+                ],
+                "portfolio_limits": "legacy-value-left-to-existing-operations",
+                "unknown_top_level_extension": ["preserve", "order"],
+            },
+            {"version": 2, "frontiers": "not-a-list-left-to-existing-operations"},
+        ]
+        for registry in ordinary_cases:
+            original = copy.deepcopy(registry)
+            with self.subTest(ordinary=registry):
+                self.assertIs(registry, self.module.validate_registry(registry))
+                self.assertEqual(original, registry)
+
+        mixed_cases = [
+            {"version": 2, "layer_labels": None},
+            {"version": 2, "frontiers": [{"id": "F1", "layer": None}]},
+            {"version": 2, "frontiers": [{"id": "F1", "parent_frontier": None}]},
+        ]
+        for registry in mixed_cases:
+            original = copy.deepcopy(registry)
+            with self.subTest(mixed=registry):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(registry)
+                self.assertEqual(original, registry)
+
+        for version in (None, "2", True):
+            registry = {} if version is None else {"version": version}
+            original = copy.deepcopy(registry)
+            with self.subTest(invalid_version=version):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(registry)
+                self.assertEqual(original, registry)
+
     def test_make_registry_creates_v3_with_empty_layer_labels(self):
         registry = self.module.make_registry("MXL", "ticker")
 

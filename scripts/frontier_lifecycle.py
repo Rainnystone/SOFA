@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
+import unicodedata
 from typing import Any
 
 
@@ -53,6 +54,190 @@ def make_registry(subject: str, mode: str) -> dict[str, Any]:
         "portfolio_limits": {"max_active": 3, "max_active_plus_new": 5},
         "review_trigger": {"every_loops": 3, "max_reviews": 3},
     }
+
+
+def validate_registry(registry: Any) -> dict[str, Any]:
+    """Validate without mutation or normalization; return the same object."""
+    if not isinstance(registry, dict):
+        raise LifecycleError("registry must be an object")
+
+    version = _require_strict_int(registry.get("version"), "version")
+    if version == LEGACY_REGISTRY_VERSION:
+        _validate_v2_boundary(registry)
+    elif version == CURRENT_REGISTRY_VERSION:
+        _validate_v3_registry(registry)
+    else:
+        raise LifecycleError(f"unsupported registry version: {version}")
+
+    return registry
+
+
+def _is_strict_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _require_strict_int(
+    value: Any,
+    field: str,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    if not _is_strict_int(value):
+        raise LifecycleError(f"{field} must be an integer")
+    if minimum is not None and value < minimum:
+        raise LifecycleError(f"{field} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise LifecycleError(f"{field} must be at most {maximum}")
+    return value
+
+
+def _validate_v2_boundary(registry: dict[str, Any]) -> None:
+    if "layer_labels" in registry:
+        raise LifecycleError("registry v2 cannot contain layer_labels")
+
+    frontiers = registry.get("frontiers")
+    if not isinstance(frontiers, list):
+        return
+    for index, frontier in enumerate(frontiers):
+        if not isinstance(frontier, dict):
+            continue
+        if "layer" in frontier or "parent_frontier" in frontier:
+            raise LifecycleError(f"registry v2 frontier {index} cannot contain v3 layer fields")
+
+
+def _validate_v3_registry(registry: dict[str, Any]) -> None:
+    if not isinstance(registry.get("subject"), str):
+        raise LifecycleError("subject must be a string")
+    if registry.get("mode") not in SUPPORTED_MODES:
+        raise LifecycleError(f"unsupported registry mode: {registry.get('mode')}")
+
+    layer_labels = registry.get("layer_labels")
+    if not isinstance(layer_labels, list):
+        raise LifecycleError("layer_labels must be a list")
+    _validate_persisted_layer_labels(layer_labels)
+
+    if "portfolio_limits" in registry:
+        limits = registry["portfolio_limits"]
+        if not isinstance(limits, dict):
+            raise LifecycleError("portfolio_limits must be an object")
+        for field in ("max_active", "max_active_plus_new"):
+            if field in limits:
+                _require_strict_int(limits[field], f"portfolio_limits.{field}", minimum=0)
+
+    if "review_trigger" in registry:
+        trigger = registry["review_trigger"]
+        if not isinstance(trigger, dict):
+            raise LifecycleError("review_trigger must be an object")
+        if "every_loops" in trigger:
+            _require_strict_int(trigger["every_loops"], "review_trigger.every_loops", minimum=1)
+        if "max_reviews" in trigger:
+            _require_strict_int(trigger["max_reviews"], "review_trigger.max_reviews", minimum=0)
+
+    frontiers = registry.get("frontiers")
+    if not isinstance(frontiers, list):
+        raise LifecycleError("frontiers must be a list")
+
+    seen_ids: set[str] = set()
+    for index, frontier in enumerate(frontiers):
+        if not isinstance(frontier, dict):
+            raise LifecycleError(f"frontier {index} must be an object")
+
+        frontier_id = frontier.get("id")
+        if not isinstance(frontier_id, str) or FRONTIER_ID_RE.fullmatch(frontier_id) is None:
+            raise LifecycleError(f"frontier {index}.id must be a stable frontier ID")
+        if frontier_id in seen_ids:
+            raise LifecycleError(f"duplicate frontier id: {frontier_id}")
+        seen_ids.add(frontier_id)
+
+        if not isinstance(frontier.get("name"), str):
+            raise LifecycleError(f"frontier {frontier_id}.name must be a string")
+
+        _require_strict_int(
+            frontier.get("proposed_at_loop"),
+            f"frontier {frontier_id}.proposed_at_loop",
+            minimum=1,
+        )
+
+        source = frontier.get("source")
+        if not isinstance(source, str) or source not in PERSISTED_FRONTIER_SOURCES:
+            raise LifecycleError(f"frontier {frontier_id} has unsupported source: {source}")
+        _validate_optional_frontier_id(
+            frontier.get("source_frontier"),
+            f"frontier {frontier_id}.source_frontier",
+        )
+
+        status = frontier.get("status")
+        if status not in STATUSES:
+            raise LifecycleError(f"frontier {frontier_id} has unsupported status: {status}")
+        for field in ("review_count", "max_reviews"):
+            if field in frontier:
+                _require_strict_int(frontier[field], f"frontier {frontier_id}.{field}", minimum=0)
+        _validate_status_category(frontier, frontier_id)
+
+        for field in ("lifecycle", "review_decisions", "evidence_pointers"):
+            if field in frontier and not isinstance(frontier[field], list):
+                raise LifecycleError(f"frontier {frontier_id}.{field} must be a list")
+
+        if "layer" not in frontier:
+            raise LifecycleError(f"frontier {frontier_id}.layer is required")
+        layer = frontier["layer"]
+        if layer is not None:
+            _require_strict_int(layer, f"frontier {frontier_id}.layer", minimum=0, maximum=LAYER_COUNT - 1)
+
+        if "parent_frontier" not in frontier:
+            raise LifecycleError(f"frontier {frontier_id}.parent_frontier is required")
+        parent_frontier = frontier["parent_frontier"]
+        _validate_optional_frontier_id(parent_frontier, f"frontier {frontier_id}.parent_frontier")
+
+        if not layer_labels and (layer is not None or parent_frontier is not None):
+            raise LifecycleError(
+                f"frontier {frontier_id} must remain unbound while layer_labels is empty"
+            )
+
+
+def _validate_persisted_layer_labels(layer_labels: list[Any]) -> None:
+    if not layer_labels:
+        return
+    if len(layer_labels) != LAYER_COUNT:
+        raise LifecycleError(f"layer_labels must contain exactly {LAYER_COUNT} labels")
+
+    folded_labels: set[str] = set()
+    for index, label in enumerate(layer_labels):
+        if not isinstance(label, str):
+            raise LifecycleError(f"layer label {index} must be a string")
+        if label != label.strip() or not label:
+            raise LifecycleError(f"layer label {index} must be non-empty and already trimmed")
+        if any(character in label for character in ("\n", "\r", "\u2028", "\u2029")):
+            raise LifecycleError(f"layer label {index} must be single-line")
+        if any(unicodedata.category(character) == "Cc" for character in label):
+            raise LifecycleError(f"layer label {index} cannot contain Unicode control characters")
+
+        folded = label.casefold()
+        if folded in folded_labels:
+            raise LifecycleError("layer labels must be unique after case-folding")
+        folded_labels.add(folded)
+
+
+def _validate_optional_frontier_id(value: Any, field: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or FRONTIER_ID_RE.fullmatch(value) is None:
+        raise LifecycleError(f"{field} must be null or a stable frontier ID")
+
+
+def _validate_status_category(frontier: dict[str, Any], frontier_id: str) -> None:
+    status = frontier["status"]
+    retire_category = frontier.get("retire_category")
+    if status == "Retired":
+        if not isinstance(retire_category, str) or retire_category not in VALID_RETIRE_CATEGORIES:
+            raise LifecycleError(
+                f"frontier {frontier_id} must have a valid retire_category when Retired"
+            )
+    elif retire_category is not None:
+        raise LifecycleError(
+            f"frontier {frontier_id} must have retire_category=null unless Retired"
+        )
 
 
 def create_frontier(
