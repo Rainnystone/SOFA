@@ -111,6 +111,481 @@ class TestFrontierReviewCli(unittest.TestCase):
         self.assertEqual(0, start_result.returncode, start_result.stderr)
         self.assertIn(f"{expected_id} -> Active", start_result.stdout)
 
+    def test_render_failure_occurs_before_any_write(self):
+        workspace = self.make_workspace()
+        registry_path = workspace / "frontier_registry.json"
+        workflow_path = workspace / "research_workflow.md"
+        workflow_path.write_text(
+            workflow_path.read_text(encoding="utf-8").replace(
+                "<!-- SOFA:frontier-layer-coverage:start -->",
+                "<!-- missing frontier layer coverage start -->",
+            ),
+            encoding="utf-8",
+        )
+        original_registry = registry_path.read_bytes()
+        original_workflow = workflow_path.read_bytes()
+        original_filenames = {path.name for path in workspace.iterdir()}
+        module = load_review_module()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(module, "write_text", wraps=module.write_text) as write_text,
+            mock.patch.object(module, "write_bytes", create=True) as write_bytes,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.main(
+                [
+                    str(workspace),
+                    "add",
+                    "--name",
+                    "InP supply risk",
+                    "--source",
+                    "initial",
+                    "--at-loop",
+                    "1",
+                ]
+            )
+
+        self.assertEqual(2, result)
+        self.assertTrue(stderr.getvalue().startswith("ERROR:"), stderr.getvalue())
+        self.assertFalse(stdout.getvalue().startswith("Added "), stdout.getvalue())
+        self.assertEqual(original_registry, registry_path.read_bytes())
+        self.assertEqual(original_workflow, workflow_path.read_bytes())
+        self.assertEqual(original_filenames, {path.name for path in workspace.iterdir()})
+        write_text.assert_not_called()
+        write_bytes.assert_not_called()
+
+    def test_first_file_write_failure_leaves_both_files_unchanged(self):
+        workspace = self.make_workspace()
+        registry_path = workspace / "frontier_registry.json"
+        workflow_path = workspace / "research_workflow.md"
+        original_registry = registry_path.read_bytes()
+        original_workflow = workflow_path.read_bytes()
+        original_filenames = {path.name for path in workspace.iterdir()}
+        module = load_review_module()
+        write_atomic_impl = getattr(module, "write_atomic", lambda *args, **kwargs: None)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                module,
+                "write_atomic",
+                wraps=write_atomic_impl,
+                create=True,
+            ) as write_atomic,
+            mock.patch.object(
+                module,
+                "replace_with_retry",
+                side_effect=OSError("simulated first replace failure"),
+            ) as replace,
+            mock.patch.object(module, "write_bytes", create=True) as write_bytes,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.main(
+                [
+                    str(workspace),
+                    "add",
+                    "--name",
+                    "InP supply risk",
+                    "--source",
+                    "initial",
+                    "--at-loop",
+                    "1",
+                ]
+            )
+
+        self.assertEqual(2, result)
+        self.assertIn("simulated first replace failure", stderr.getvalue())
+        self.assertFalse(stdout.getvalue().startswith("Added "), stdout.getvalue())
+        self.assertEqual(original_registry, registry_path.read_bytes())
+        self.assertEqual(original_workflow, workflow_path.read_bytes())
+        self.assertEqual(original_filenames, {path.name for path in workspace.iterdir()})
+        write_atomic.assert_called_once()
+        replace.assert_called_once()
+        self.assertEqual(registry_path, Path(replace.call_args.args[1]))
+        write_bytes.assert_not_called()
+
+    def test_second_file_write_failure_restores_exact_original_registry_bytes(self):
+        workspace = self.make_workspace()
+        registry_path = workspace / "frontier_registry.json"
+        workflow_path = workspace / "research_workflow.md"
+        registry_path.write_bytes(
+            (json.dumps(self.registry(workspace), separators=(", ", ": ")) + "\n\n").encode(
+                "utf-8"
+            )
+        )
+        original_registry = registry_path.read_bytes()
+        original_workflow = workflow_path.read_bytes()
+        original_filenames = {path.name for path in workspace.iterdir()}
+        module = load_review_module()
+        real_replace = module.replace_with_retry
+        destinations = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def fail_workflow_replace(src, dst, **kwargs):
+            destinations.append(Path(dst).name)
+            if Path(dst) == workflow_path:
+                raise OSError("simulated workflow replace failure")
+            return real_replace(src, dst, **kwargs)
+
+        with (
+            mock.patch.object(
+                module,
+                "replace_with_retry",
+                side_effect=fail_workflow_replace,
+            ),
+            mock.patch.object(module, "write_bytes", wraps=module.write_bytes) as write_bytes,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.main(
+                [
+                    str(workspace),
+                    "add",
+                    "--name",
+                    "InP supply risk",
+                    "--source",
+                    "initial",
+                    "--at-loop",
+                    "1",
+                ]
+            )
+
+        self.assertEqual(2, result)
+        self.assertIn("simulated workflow replace failure", stderr.getvalue())
+        self.assertFalse(stdout.getvalue().startswith("Added "), stdout.getvalue())
+        self.assertEqual(original_registry, registry_path.read_bytes())
+        self.assertEqual(original_workflow, workflow_path.read_bytes())
+        self.assertEqual(original_filenames, {path.name for path in workspace.iterdir()})
+        self.assertEqual(
+            ["frontier_registry.json", "research_workflow.md", "frontier_registry.json"],
+            destinations,
+        )
+        write_bytes.assert_called_once_with(registry_path, original_registry)
+
+    def test_existing_mutation_handlers_use_shared_validated_persistence(self):
+        module = load_review_module()
+
+        def run(workspace, *args):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                result = module.main([str(workspace), *args])
+            self.assertEqual(0, result, stderr.getvalue())
+            return stdout.getvalue(), stderr.getvalue()
+
+        def run_legal_sequence(workspace, *, assert_ordinary_workflow_unchanged=False):
+            workflow_path = workspace / "research_workflow.md"
+            initial_workflow = workflow_path.read_bytes()
+            run(
+                workspace,
+                "add",
+                "--name",
+                "InP supply risk",
+                "--source",
+                "initial",
+                "--at-loop",
+                "1",
+            )
+            if assert_ordinary_workflow_unchanged:
+                self.assertEqual(initial_workflow, workflow_path.read_bytes())
+            else:
+                self.assertIn(
+                    "| F1 | none | none | none | New | none |",
+                    workflow_path.read_text(encoding="utf-8"),
+                )
+
+            run(workspace, "start", "F1")
+            if assert_ordinary_workflow_unchanged:
+                self.assertEqual(initial_workflow, workflow_path.read_bytes())
+            else:
+                self.assertIn(
+                    "| F1 | none | none | none | Active | none |",
+                    workflow_path.read_text(encoding="utf-8"),
+                )
+
+            self.write_loops(workspace)
+            run(
+                workspace,
+                "record",
+                "F1",
+                "--decision",
+                "Continued",
+                "--rationale",
+                "Evidence remains material",
+            )
+            after_record = workflow_path.read_bytes()
+            self.assertNotEqual(initial_workflow, after_record)
+            if assert_ordinary_workflow_unchanged:
+                self.assertNotIn(b"frontier-layer-coverage", after_record)
+            else:
+                self.assertIn(
+                    "| F1 | none | none | none | Continued | none |",
+                    after_record.decode("utf-8"),
+                )
+
+            run(workspace, "reactivate", "F1")
+            if assert_ordinary_workflow_unchanged:
+                self.assertEqual(after_record, workflow_path.read_bytes())
+            else:
+                self.assertIn(
+                    "| F1 | none | none | none | Active | none |",
+                    workflow_path.read_text(encoding="utf-8"),
+                )
+
+            run(
+                workspace,
+                "retire",
+                "F1",
+                "--category",
+                "invalidated",
+                "--reason",
+                "Later evidence invalidated the frontier",
+            )
+            if assert_ordinary_workflow_unchanged:
+                self.assertEqual(after_record, workflow_path.read_bytes())
+            else:
+                self.assertIn(
+                    "| F1 | none | none | none | Retired | invalidated |",
+                    workflow_path.read_text(encoding="utf-8"),
+                )
+
+        v3_workspace = self.make_workspace()
+        v3_registry = self.registry(v3_workspace)
+        v3_registry["layer_labels"] = [f"Layer {index}" for index in range(6)]
+        self.write_registry_document(v3_workspace, v3_registry)
+        with (
+            mock.patch.object(
+                module,
+                "read_registry_snapshot",
+                wraps=module.read_registry_snapshot,
+            ) as read_snapshot,
+            mock.patch.object(
+                module,
+                "read_registry",
+                wraps=module.read_registry,
+            ) as read_registry,
+            mock.patch.object(
+                module,
+                "persist_mutation",
+                wraps=module.persist_mutation,
+            ) as persist_mutation,
+        ):
+            run_legal_sequence(v3_workspace)
+
+        self.assertEqual(5, read_snapshot.call_count)
+        read_registry.assert_not_called()
+        self.assertEqual(5, persist_mutation.call_count)
+        self.assertEqual(
+            [False, False, True, False, False],
+            [
+                call.kwargs.get("refresh_review_logs", False)
+                for call in persist_mutation.call_args_list
+            ],
+        )
+        self.assertTrue(
+            all(
+                not call.kwargs.get("allow_layer_insert", False)
+                for call in persist_mutation.call_args_list
+            )
+        )
+        self.assertEqual(
+            ["New", "Active", "Continued", "Active", "Retired"],
+            [
+                call.kwargs["updated_registry"]["frontiers"][0]["status"]
+                for call in persist_mutation.call_args_list
+            ],
+        )
+
+        v2_workspace = self.make_v2_workspace()
+        with (
+            mock.patch.object(
+                module,
+                "read_registry_snapshot",
+                wraps=module.read_registry_snapshot,
+            ) as read_snapshot,
+            mock.patch.object(
+                module,
+                "read_registry",
+                wraps=module.read_registry,
+            ) as read_registry,
+            mock.patch.object(
+                module,
+                "persist_mutation",
+                wraps=module.persist_mutation,
+            ) as persist_mutation,
+        ):
+            run_legal_sequence(v2_workspace, assert_ordinary_workflow_unchanged=True)
+
+        self.assertEqual(5, read_snapshot.call_count)
+        read_registry.assert_not_called()
+        self.assertEqual(5, persist_mutation.call_count)
+        self.assertEqual(
+            [False, False, True, False, False],
+            [
+                call.kwargs.get("refresh_review_logs", False)
+                for call in persist_mutation.call_args_list
+            ],
+        )
+        self.assertTrue(
+            all(
+                not call.kwargs.get("allow_layer_insert", False)
+                for call in persist_mutation.call_args_list
+            )
+        )
+        self.assertEqual(
+            [2, 2, 2, 2, 2],
+            [
+                call.kwargs["updated_registry"]["version"]
+                for call in persist_mutation.call_args_list
+            ],
+        )
+
+    def test_record_uses_canonical_registry_validation_before_mutation(self):
+        workspace = self.make_workspace()
+        self.add_and_start_frontier(workspace)
+        self.write_loops(workspace)
+        registry_path = workspace / "frontier_registry.json"
+        workflow_path = workspace / "research_workflow.md"
+        malformed_registry = self.registry(workspace)
+        malformed_registry["layer_labels"] = ["Only one layer"]
+        self.write_registry_document(workspace, malformed_registry)
+        original_registry = registry_path.read_bytes()
+        original_workflow = workflow_path.read_bytes()
+        original_filenames = {path.name for path in workspace.iterdir()}
+        module = load_review_module()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                module,
+                "read_registry_snapshot",
+                wraps=module.read_registry_snapshot,
+            ) as read_snapshot,
+            mock.patch.object(
+                module,
+                "validate_registry",
+                wraps=module.validate_registry,
+            ) as validate_registry,
+            mock.patch.object(module, "transition", wraps=module.transition) as transition,
+            mock.patch.object(
+                module,
+                "apply_portfolio_actions",
+                wraps=module.apply_portfolio_actions,
+            ) as apply_actions,
+            mock.patch.object(
+                module,
+                "render_workflow",
+                wraps=module.render_workflow,
+            ) as render_workflow,
+            mock.patch.object(
+                module,
+                "persist_mutation",
+                wraps=module.persist_mutation,
+            ) as persist_mutation,
+            mock.patch.object(module, "write_text", wraps=module.write_text) as write_text,
+            mock.patch.object(module, "write_bytes", wraps=module.write_bytes) as write_bytes,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.main(
+                [
+                    str(workspace),
+                    "record",
+                    "F1",
+                    "--decision",
+                    "Continued",
+                    "--rationale",
+                    "Evidence remains material",
+                ]
+            )
+
+        self.assertEqual(2, result)
+        self.assertIn(
+            "layer_labels must contain exactly 6 labels",
+            stderr.getvalue(),
+        )
+        self.assertFalse(stdout.getvalue().startswith("Recorded "), stdout.getvalue())
+        self.assertEqual(original_registry, registry_path.read_bytes())
+        self.assertEqual(original_workflow, workflow_path.read_bytes())
+        self.assertEqual(original_filenames, {path.name for path in workspace.iterdir()})
+        read_snapshot.assert_called_once_with(workspace)
+        validate_registry.assert_called_once()
+        transition.assert_not_called()
+        apply_actions.assert_not_called()
+        render_workflow.assert_not_called()
+        persist_mutation.assert_not_called()
+        write_text.assert_not_called()
+        write_bytes.assert_not_called()
+
+    def test_all_registry_readers_reject_malformed_v3_shape(self):
+        module = load_review_module()
+        commands = [
+            ("add", "--name", "Candidate", "--source", "initial", "--at-loop", "1"),
+            ("start", "F1"),
+            ("check-review",),
+            (
+                "record",
+                "F1",
+                "--decision",
+                "Continued",
+                "--rationale",
+                "Evidence remains material",
+            ),
+            (
+                "retire",
+                "F1",
+                "--category",
+                "invalidated",
+                "--reason",
+                "Evidence invalidated the frontier",
+            ),
+            ("reactivate", "F1"),
+            ("status",),
+        ]
+
+        for command in commands:
+            with self.subTest(command=command[0]):
+                workspace = self.make_workspace()
+                registry_path = workspace / "frontier_registry.json"
+                workflow_path = workspace / "research_workflow.md"
+                malformed_registry = self.registry(workspace)
+                malformed_registry["layer_labels"] = ["Only one layer"]
+                self.write_registry_document(workspace, malformed_registry)
+                original_registry = registry_path.read_bytes()
+                original_workflow = workflow_path.read_bytes()
+                original_filenames = {path.name for path in workspace.iterdir()}
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                with (
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    result = module.main([str(workspace), *command])
+
+                self.assertEqual(2, result)
+                self.assertEqual("", stdout.getvalue())
+                self.assertIn(
+                    "layer_labels must contain exactly 6 labels",
+                    stderr.getvalue(),
+                )
+                self.assertEqual(original_registry, registry_path.read_bytes())
+                self.assertEqual(original_workflow, workflow_path.read_bytes())
+                self.assertEqual(
+                    original_filenames,
+                    {path.name for path in workspace.iterdir()},
+                )
+
     def test_v2_ordinary_mutations_preserve_version_shape_and_missing_layer_block(self):
         workspace = self.make_v2_workspace()
 
@@ -435,10 +910,13 @@ class TestFrontierReviewCli(unittest.TestCase):
         module = load_review_module()
         registry_path = workspace / "frontier_registry.json"
         workflow_path = workspace / "research_workflow.md"
-        original_registry = registry_path.read_text(encoding="utf-8")
-        original_workflow = workflow_path.read_text(encoding="utf-8")
+        original_registry = registry_path.read_bytes()
+        original_workflow = workflow_path.read_bytes()
+        original_filenames = {path.name for path in workspace.iterdir()}
         original_write_text = module.write_text
         calls = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
 
         def fail_second_write(path, text):
             calls.append(Path(path).name)
@@ -448,8 +926,8 @@ class TestFrontierReviewCli(unittest.TestCase):
 
         with (
             mock.patch.object(module, "write_text", side_effect=fail_second_write),
-            contextlib.redirect_stdout(io.StringIO()),
-            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
         ):
             result = module.main(
                 [
@@ -463,9 +941,16 @@ class TestFrontierReviewCli(unittest.TestCase):
                 ]
             )
 
-        self.assertNotEqual(0, result)
-        self.assertEqual(original_registry, registry_path.read_text(encoding="utf-8"))
-        self.assertEqual(original_workflow, workflow_path.read_text(encoding="utf-8"))
+        self.assertEqual(2, result)
+        self.assertIn("simulated second write failure", stderr.getvalue())
+        self.assertFalse(stdout.getvalue().startswith("Recorded "), stdout.getvalue())
+        self.assertEqual(
+            ["frontier_registry.json", "research_workflow.md"],
+            calls,
+        )
+        self.assertEqual(original_registry, registry_path.read_bytes())
+        self.assertEqual(original_workflow, workflow_path.read_bytes())
+        self.assertEqual(original_filenames, {path.name for path in workspace.iterdir()})
 
     def test_record_applies_portfolio_retires_before_adds_but_keeps_metadata_order(self):
         workspace = self.make_workspace("ticker")

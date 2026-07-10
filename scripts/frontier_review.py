@@ -13,16 +13,19 @@ from pathlib import Path
 from typing import Any
 
 from frontier_lifecycle import (
+    CURRENT_REGISTRY_VERSION,
     LifecycleError,
     check_review_due,
     create_frontier,
     derive_loop_counts,
     get_frontier,
+    render_frontier_layer_coverage_md,
     render_discovery_log_md,
     render_review_log_md,
     transition,
+    validate_registry,
 )
-from workspace_contract import replace_managed_block
+from workspace_contract import replace_managed_block, upsert_managed_block_after
 
 
 REGISTRY_FILE = "frontier_registry.json"
@@ -30,6 +33,7 @@ LEDGER_FILE = "evidence_ledger.md"
 WORKFLOW_FILE = "research_workflow.md"
 REVIEW_BLOCK = "frontier-review-log"
 DISCOVERY_BLOCK = "frontier-discovery-log"
+LAYER_BLOCK = "frontier-layer-coverage"
 COMMANDS = frozenset(
     {
         "add",
@@ -41,6 +45,10 @@ COMMANDS = frozenset(
         "status",
     }
 )
+
+
+class PersistenceRollbackError(OSError):
+    """Both workflow persistence and registry rollback failed."""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -116,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def command_add(args: argparse.Namespace) -> int:
     workspace = workspace_path(args)
-    registry = read_registry(workspace)
+    registry, original_registry_bytes = read_registry_snapshot(workspace)
     updated = create_frontier_for_cli(
         registry,
         name=args.name,
@@ -125,14 +133,18 @@ def command_add(args: argparse.Namespace) -> int:
         source_frontier=args.source_frontier,
     )
     added = updated["frontiers"][-1]
-    write_registry(workspace, updated)
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_registry_bytes,
+        updated_registry=updated,
+    )
     print(f"Added {added['id']} ({added['status']}): {added['name']}")
     return 0
 
 
 def command_start(args: argparse.Namespace) -> int:
     workspace = workspace_path(args)
-    registry = read_registry(workspace)
+    registry, original_registry_bytes = read_registry_snapshot(workspace)
     loop_counts = read_loop_counts(workspace, registry)
     frontier = get_frontier(registry, args.frontier_id)
     at_loop = loop_counts.get(args.frontier_id) or frontier.get("proposed_at_loop")
@@ -146,7 +158,11 @@ def command_start(args: argparse.Namespace) -> int:
         at_loop=at_loop,
         ts=utc_now(),
     )
-    write_registry(workspace, updated)
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_registry_bytes,
+        updated_registry=updated,
+    )
     print(f"{args.frontier_id} -> Active")
     return 0
 
@@ -168,8 +184,7 @@ def command_check_review(args: argparse.Namespace) -> int:
 
 def command_record(args: argparse.Namespace) -> int:
     workspace = workspace_path(args)
-    original_registry_text = read_required_text(workspace / REGISTRY_FILE)
-    registry = json.loads(original_registry_text)
+    registry, original_registry_bytes = read_registry_snapshot(workspace)
     loop_counts = read_loop_counts(workspace, registry)
     at_loop = loop_counts.get(args.frontier_id, 0)
 
@@ -194,15 +209,11 @@ def command_record(args: argparse.Namespace) -> int:
     reviewed = get_frontier(updated, args.frontier_id)
     reviewed["review_decisions"][-1]["portfolio_actions"] = portfolio_actions
 
-    workflow_text = read_required_text(workspace / WORKFLOW_FILE)
-    rendered_workflow = render_workflow(workflow_text, updated)
-    rendered_registry = registry_to_text(updated)
-
-    persist_record_outputs(
+    persist_mutation(
         workspace=workspace,
-        original_registry_text=original_registry_text,
-        rendered_registry=rendered_registry,
-        rendered_workflow=rendered_workflow,
+        original_registry_bytes=original_registry_bytes,
+        updated_registry=updated,
+        refresh_review_logs=True,
     )
     print(f"Recorded {args.frontier_id} -> {args.decision}")
     return 0
@@ -210,7 +221,7 @@ def command_record(args: argparse.Namespace) -> int:
 
 def command_retire(args: argparse.Namespace) -> int:
     workspace = workspace_path(args)
-    registry = read_registry(workspace)
+    registry, original_registry_bytes = read_registry_snapshot(workspace)
     loop_counts = read_loop_counts(workspace, registry)
     updated = transition(
         registry,
@@ -224,14 +235,18 @@ def command_retire(args: argparse.Namespace) -> int:
         at_loop=loop_counts.get(args.frontier_id, 0),
         ts=utc_now(),
     )
-    write_registry(workspace, updated)
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_registry_bytes,
+        updated_registry=updated,
+    )
     print(f"{args.frontier_id} -> Retired ({args.category})")
     return 0
 
 
 def command_reactivate(args: argparse.Namespace) -> int:
     workspace = workspace_path(args)
-    registry = read_registry(workspace)
+    registry, original_registry_bytes = read_registry_snapshot(workspace)
     loop_counts = read_loop_counts(workspace, registry)
     updated = transition(
         registry,
@@ -243,7 +258,11 @@ def command_reactivate(args: argparse.Namespace) -> int:
         at_loop=loop_counts.get(args.frontier_id, 0),
         ts=utc_now(),
     )
-    write_registry(workspace, updated)
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_registry_bytes,
+        updated_registry=updated,
+    )
     print(f"{args.frontier_id} -> Active")
     return 0
 
@@ -424,9 +443,37 @@ def parse_exact_parts(
     return parts
 
 
-def render_workflow(workflow_text: str, registry: dict[str, Any]) -> str:
-    updated = replace_managed_block(workflow_text, REVIEW_BLOCK, render_review_log_md(registry))
-    return replace_managed_block(updated, DISCOVERY_BLOCK, render_discovery_log_md(registry))
+def render_workflow(
+    workflow_text: str,
+    registry: dict[str, Any],
+    *,
+    refresh_review_logs: bool = False,
+    allow_layer_insert: bool = False,
+) -> str:
+    updated = workflow_text
+    if refresh_review_logs:
+        updated = replace_managed_block(
+            updated,
+            REVIEW_BLOCK,
+            render_review_log_md(registry),
+        )
+        updated = replace_managed_block(
+            updated,
+            DISCOVERY_BLOCK,
+            render_discovery_log_md(registry),
+        )
+    if registry["version"] == CURRENT_REGISTRY_VERSION:
+        rendered = render_frontier_layer_coverage_md(registry)
+        if allow_layer_insert:
+            updated = upsert_managed_block_after(
+                updated,
+                LAYER_BLOCK,
+                rendered,
+                after_block_name=DISCOVERY_BLOCK,
+            )
+        else:
+            updated = replace_managed_block(updated, LAYER_BLOCK, rendered)
+    return updated
 
 
 def read_loop_counts(workspace: Path, registry: dict[str, Any]) -> dict[str, int]:
@@ -440,38 +487,94 @@ def read_loop_counts(workspace: Path, registry: dict[str, Any]) -> dict[str, int
     return counts
 
 
+def read_registry_snapshot(workspace: Path) -> tuple[dict[str, Any], bytes]:
+    original, text = read_required_utf8(workspace / REGISTRY_FILE)
+    registry = json.loads(text)
+    validate_registry(registry)
+    return registry, original
+
+
 def read_registry(workspace: Path) -> dict[str, Any]:
-    registry_path = workspace / REGISTRY_FILE
-    return json.loads(read_required_text(registry_path))
-
-
-def write_registry(workspace: Path, registry: dict[str, Any]) -> None:
-    write_text(workspace / REGISTRY_FILE, registry_to_text(registry))
+    registry, _ = read_registry_snapshot(workspace)
+    return registry
 
 
 def registry_to_text(registry: dict[str, Any]) -> str:
     return json.dumps(registry, indent=2, ensure_ascii=False) + "\n"
 
 
-def persist_record_outputs(
+def persist_registry_and_workflow(
     *,
-    workspace: Path,
-    original_registry_text: str,
+    registry_path: Path,
+    workflow_path: Path,
+    original_registry_bytes: bytes,
     rendered_registry: str,
     rendered_workflow: str,
 ) -> None:
-    registry_path = workspace / REGISTRY_FILE
-    workflow_path = workspace / WORKFLOW_FILE
     write_text(registry_path, rendered_registry)
     try:
         write_text(workflow_path, rendered_workflow)
-    except OSError:
-        write_text(registry_path, original_registry_text)
+    except (OSError, UnicodeError) as primary:
+        try:
+            write_bytes(registry_path, original_registry_bytes)
+        except (OSError, UnicodeError) as rollback:
+            raise PersistenceRollbackError(
+                f"workflow write failed: {primary}; "
+                f"registry rollback failed: {rollback}"
+            ) from rollback
         raise
 
 
+def persist_mutation(
+    *,
+    workspace: Path,
+    original_registry_bytes: bytes,
+    updated_registry: dict[str, Any],
+    refresh_review_logs: bool = False,
+    allow_layer_insert: bool = False,
+) -> None:
+    validate_registry(updated_registry)
+    rendered_registry = registry_to_text(updated_registry)
+    needs_workflow = (
+        updated_registry["version"] == CURRENT_REGISTRY_VERSION
+        or refresh_review_logs
+    )
+    if not needs_workflow:
+        write_text(workspace / REGISTRY_FILE, rendered_registry)
+        return
+
+    original_workflow_bytes, workflow_text = read_required_utf8(
+        workspace / WORKFLOW_FILE
+    )
+    rendered_workflow = render_workflow(
+        workflow_text,
+        updated_registry,
+        refresh_review_logs=refresh_review_logs,
+        allow_layer_insert=allow_layer_insert,
+    )
+    _ = original_workflow_bytes
+    persist_registry_and_workflow(
+        registry_path=workspace / REGISTRY_FILE,
+        workflow_path=workspace / WORKFLOW_FILE,
+        original_registry_bytes=original_registry_bytes,
+        rendered_registry=rendered_registry,
+        rendered_workflow=rendered_workflow,
+    )
+
+
+def read_required_utf8(path: Path) -> tuple[bytes, str]:
+    original = Path(path).read_bytes()
+    try:
+        decoded = original.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise LifecycleError(f"{Path(path).name} must be valid UTF-8") from exc
+    normalized = decoded.replace("\r\n", "\n").replace("\r", "\n")
+    return original, normalized
+
+
 def read_required_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    _, text = read_required_utf8(path)
+    return text
 
 
 def replace_with_retry(
@@ -491,7 +594,7 @@ def replace_with_retry(
     ``os.replace`` — so behavior there is unchanged.
 
     Like ``os.replace`` itself, this does not clean up ``src`` on failure; the
-    caller (``write_text``) owns temp-file cleanup. ``delay`` grows slightly
+    caller (``write_atomic``) owns temp-file cleanup. ``delay`` grows slightly
     between attempts (linear backoff) to give the lock holder time to release.
     """
     if is_windows is None:
@@ -511,13 +614,21 @@ def replace_with_retry(
             time.sleep(delay * (attempt + 1))
 
 
-def write_text(path: Path, text: str) -> None:
+def write_atomic(path: Path, payload: str | bytes) -> None:
     path = Path(path)
-    temp_path = None
+    binary = isinstance(payload, bytes)
+    mode = "wb" if binary else "w"
+    kwargs = {} if binary else {"encoding": "utf-8"}
+    temp_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        with tempfile.NamedTemporaryFile(
+            mode,
+            dir=path.parent,
+            delete=False,
+            **kwargs,
+        ) as handle:
             temp_path = Path(handle.name)
-            handle.write(text)
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         replace_with_retry(temp_path, path)
@@ -525,6 +636,14 @@ def write_text(path: Path, text: str) -> None:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
         raise
+
+
+def write_text(path: Path, text: str) -> None:
+    write_atomic(path, text)
+
+
+def write_bytes(path: Path, data: bytes) -> None:
+    write_atomic(path, data)
 
 
 def workspace_path(args: argparse.Namespace) -> Path:
