@@ -102,6 +102,34 @@ def set_layer_labels(
     return validate_registry(updated)
 
 
+def bind_frontier_layer(
+    registry: dict[str, Any],
+    frontier_id: str,
+    *,
+    layer: int | None,
+    parent_frontier: str | None = None,
+) -> dict[str, Any]:
+    """Return a validated copy with one complete frontier binding replaced."""
+    validate_registry(registry)
+    if registry["version"] != CURRENT_REGISTRY_VERSION or not registry["layer_labels"]:
+        raise LifecycleError("frontier layer labels are unavailable; run set-layers")
+    if parent_frontier is not None and layer is None:
+        raise LifecycleError("parent_frontier requires layer")
+    if layer is not None:
+        _require_strict_int(
+            layer,
+            f"frontier {frontier_id}.layer",
+            minimum=0,
+            maximum=LAYER_COUNT - 1,
+        )
+
+    updated = copy.deepcopy(registry)
+    frontier = get_frontier(updated, frontier_id)
+    frontier["layer"] = layer
+    frontier["parent_frontier"] = parent_frontier if layer is not None else None
+    return validate_registry(updated)
+
+
 def _canonical_layer_labels(indexed_labels: list[tuple[int, str]]) -> list[str]:
     if not isinstance(indexed_labels, list) or len(indexed_labels) != LAYER_COUNT:
         raise LifecycleError(f"indexed_labels must contain exactly {LAYER_COUNT} entries")
@@ -379,6 +407,8 @@ def create_frontier(
     proposed_at_loop: int,
     source: str,
     source_frontier: str | None = None,
+    layer: int | None = None,
+    parent_frontier: str | None = None,
     initial_status: str = "New",
     ts: str | None = None,
 ) -> dict[str, Any]:
@@ -391,6 +421,10 @@ def create_frontier(
         raise InvalidTransition("frontiers can only be created as New or Active")
     if int(proposed_at_loop) < 1:
         raise InvalidTransition("proposed_at_loop must be positive")
+    if registry["version"] == LEGACY_REGISTRY_VERSION and (
+        layer is not None or parent_frontier is not None
+    ):
+        raise LifecycleError("registry v2 cannot set layer facts; run set-layers")
 
     updated = copy.deepcopy(registry)
     existing_ids = {frontier.get("id") for frontier in updated.get("frontiers", [])}
@@ -423,8 +457,8 @@ def create_frontier(
         "evidence_pointers": [],
     }
     if updated["version"] == CURRENT_REGISTRY_VERSION:
-        frontier_record["layer"] = None
-        frontier_record["parent_frontier"] = None
+        frontier_record["layer"] = layer
+        frontier_record["parent_frontier"] = parent_frontier
 
     updated.setdefault("frontiers", []).append(frontier_record)
     updated = validate_registry(updated)

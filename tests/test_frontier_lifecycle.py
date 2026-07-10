@@ -1,4 +1,5 @@
 import copy
+import inspect
 import json
 import tempfile
 import unittest
@@ -76,6 +77,30 @@ class TestFrontierLifecycle(unittest.TestCase):
             proposed_at_loop=1,
             source="initial",
             initial_status="Active",
+        )
+
+    def layer_labels(self):
+        return [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
+
+    def configured_v3_registry(self, frontier_count=3):
+        registry = self.module.make_registry("MXL", "ticker")
+        for index in range(frontier_count):
+            registry = self.module.create_frontier(
+                registry,
+                name=f"Frontier {index + 1}",
+                proposed_at_loop=index + 1,
+                source="initial",
+            )
+        return self.module.set_layer_labels(
+            registry,
+            list(enumerate(self.layer_labels())),
         )
 
     def test_validate_registry_rejects_unknown_mixed_and_malformed_v3(self):
@@ -1254,6 +1279,339 @@ class TestFrontierLifecycle(unittest.TestCase):
         created_v2 = self.module.get_frontier(updated_v2, "F3")
         self.assertNotIn("layer", created_v2)
         self.assertNotIn("parent_frontier", created_v2)
+
+    def test_bind_frontier_layer_requires_existing_bound_shallower_parent(self):
+        bind = getattr(self.module, "bind_frontier_layer", None)
+        self.assertIsNotNone(bind, "bind_frontier_layer must be available")
+
+        labels_instruction = "frontier layer labels are unavailable; run set-layers"
+        for case, registry in (
+            ("v2", self.registry()),
+            ("v3_without_labels", self.module.make_registry("MXL", "ticker")),
+        ):
+            original = copy.deepcopy(registry)
+            with self.subTest(case=case):
+                with self.assertRaises(self.module.LifecycleError) as context:
+                    bind(registry, "F1", layer=0)
+                self.assertEqual(labels_instruction, str(context.exception))
+                self.assertEqual(original, registry)
+
+        configured = self.configured_v3_registry()
+        original_configured = copy.deepcopy(configured)
+        with_parent = bind(configured, "F1", layer=0)
+        self.assertEqual(original_configured, configured)
+        self.assertEqual(0, self.module.get_frontier(with_parent, "F1")["layer"])
+
+        invalid_parent_cases = (
+            ("unknown", 4, "F999"),
+            ("unbound", 4, "F3"),
+            ("self", 4, "F2"),
+            ("not_shallower", 0, "F1"),
+        )
+        for case, layer, parent_frontier in invalid_parent_cases:
+            original = copy.deepcopy(with_parent)
+            with self.subTest(case=case):
+                with self.assertRaises(self.module.LifecycleError):
+                    bind(
+                        with_parent,
+                        "F2",
+                        layer=layer,
+                        parent_frontier=parent_frontier,
+                    )
+                self.assertEqual(original, with_parent)
+
+        original_with_parent = copy.deepcopy(with_parent)
+        bound = bind(with_parent, "F2", layer=4, parent_frontier="F1")
+        self.assertEqual(original_with_parent, with_parent)
+        self.assertEqual(
+            {"layer": 4, "parent_frontier": "F1"},
+            {
+                key: self.module.get_frontier(bound, "F2")[key]
+                for key in ("layer", "parent_frontier")
+            },
+        )
+        self.assertIs(bound, self.module.validate_registry(bound))
+
+    def test_parent_frontier_is_independent_from_source_frontier(self):
+        registry = self.configured_v3_registry()
+        source, parent, child = registry["frontiers"]
+        child["source"] = "discovery"
+        child["source_frontier"] = source["id"]
+        self.module.validate_registry(registry)
+
+        with_parent = self.module.bind_frontier_layer(registry, parent["id"], layer=0)
+        original = copy.deepcopy(with_parent)
+        bound = self.module.bind_frontier_layer(
+            with_parent,
+            child["id"],
+            layer=3,
+            parent_frontier=parent["id"],
+        )
+        self.assertEqual(original, with_parent)
+        bound_child = self.module.get_frontier(bound, child["id"])
+        self.assertEqual(source["id"], bound_child["source_frontier"])
+        self.assertEqual(parent["id"], bound_child["parent_frontier"])
+
+        same_relation = self.configured_v3_registry(2)
+        same_relation["frontiers"][1]["source"] = "discovery"
+        same_relation["frontiers"][1]["source_frontier"] = "F1"
+        with_bound_source = self.module.bind_frontier_layer(same_relation, "F1", layer=0)
+        original = copy.deepcopy(with_bound_source)
+        same_relation_bound = self.module.bind_frontier_layer(
+            with_bound_source,
+            "F2",
+            layer=5,
+            parent_frontier="F1",
+        )
+        self.assertEqual(original, with_bound_source)
+        same_child = self.module.get_frontier(same_relation_bound, "F2")
+        self.assertEqual("F1", same_child["source_frontier"])
+        self.assertEqual("F1", same_child["parent_frontier"])
+
+        null_source = self.configured_v3_registry(2)
+        with_parent = self.module.bind_frontier_layer(null_source, "F1", layer=1)
+        original = copy.deepcopy(with_parent)
+        null_source_bound = self.module.bind_frontier_layer(
+            with_parent,
+            "F2",
+            layer=4,
+            parent_frontier="F1",
+        )
+        self.assertEqual(original, with_parent)
+        null_source_child = self.module.get_frontier(null_source_bound, "F2")
+        self.assertIsNone(null_source_child["source_frontier"])
+        self.assertEqual("F1", null_source_child["parent_frontier"])
+
+    def test_binding_is_declarative_idempotent_and_clear_is_atomic(self):
+        registry = self.configured_v3_registry(2)
+        with_parent = self.module.bind_frontier_layer(registry, "F1", layer=0)
+        bound = self.module.bind_frontier_layer(
+            with_parent,
+            "F2",
+            layer=3,
+            parent_frontier="F1",
+        )
+
+        original_bound = copy.deepcopy(bound)
+        replaced = self.module.bind_frontier_layer(bound, "F2", layer=5)
+        self.assertEqual(original_bound, bound)
+        self.assertEqual(
+            {"layer": 5, "parent_frontier": None},
+            {
+                key: self.module.get_frontier(replaced, "F2")[key]
+                for key in ("layer", "parent_frontier")
+            },
+        )
+
+        original_replaced = copy.deepcopy(replaced)
+        repeated = self.module.bind_frontier_layer(replaced, "F2", layer=5)
+        self.assertEqual(original_replaced, replaced)
+        self.assertEqual(replaced, repeated)
+        self.assertIsNot(replaced, repeated)
+        self.assertIsNot(replaced["frontiers"], repeated["frontiers"])
+
+        original_repeated = copy.deepcopy(repeated)
+        cleared = self.module.bind_frontier_layer(repeated, "F2", layer=None)
+        self.assertEqual(original_repeated, repeated)
+        self.assertEqual(
+            {"layer": None, "parent_frontier": None},
+            {
+                key: self.module.get_frontier(cleared, "F2")[key]
+                for key in ("layer", "parent_frontier")
+            },
+        )
+
+        original_cleared = copy.deepcopy(cleared)
+        repeated_clear = self.module.bind_frontier_layer(cleared, "F2", layer=None)
+        self.assertEqual(original_cleared, cleared)
+        self.assertEqual(cleared, repeated_clear)
+        self.assertIsNot(cleared, repeated_clear)
+
+        invalid_requests = (
+            ("parent_without_layer", "F2", None, "F1"),
+            ("bool_layer", "F2", True, None),
+            ("string_layer", "F2", "3", None),
+            ("negative_layer", "F2", -1, None),
+            ("too_deep_layer", "F2", 6, None),
+            ("malformed_parent", "F2", 3, "frontier-1"),
+            ("unknown_target", "F999", 3, None),
+        )
+        for case, frontier_id, layer, parent_frontier in invalid_requests:
+            original = copy.deepcopy(cleared)
+            with self.subTest(case=case):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.bind_frontier_layer(
+                        cleared,
+                        frontier_id,
+                        layer=layer,
+                        parent_frontier=parent_frontier,
+                    )
+                self.assertEqual(original, cleared)
+
+    def test_rebind_or_clear_cannot_invalidate_existing_children(self):
+        registry = self.configured_v3_registry()
+        registry = self.module.bind_frontier_layer(registry, "F1", layer=0)
+        registry = self.module.bind_frontier_layer(
+            registry,
+            "F2",
+            layer=2,
+            parent_frontier="F1",
+        )
+        registry = self.module.bind_frontier_layer(
+            registry,
+            "F3",
+            layer=5,
+            parent_frontier="F2",
+        )
+
+        invalid_rebindings = (
+            ("clear_root", "F1", None, None),
+            ("root_below_child", "F1", 3, None),
+            ("clear_middle", "F2", None, None),
+            ("middle_same_as_child", "F2", 5, "F1"),
+        )
+        for case, frontier_id, layer, parent_frontier in invalid_rebindings:
+            original = copy.deepcopy(registry)
+            with self.subTest(case=case):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.bind_frontier_layer(
+                        registry,
+                        frontier_id,
+                        layer=layer,
+                        parent_frontier=parent_frontier,
+                    )
+                self.assertEqual(original, registry)
+
+        original = copy.deepcopy(registry)
+        valid_rebinding = self.module.bind_frontier_layer(registry, "F1", layer=1)
+        self.assertEqual(original, registry)
+        self.assertEqual(1, self.module.get_frontier(valid_rebinding, "F1")["layer"])
+        self.assertIs(valid_rebinding, self.module.validate_registry(valid_rebinding))
+
+    def test_retired_parent_remains_structurally_valid(self):
+        registry = self.configured_v3_registry(2)
+        registry["frontiers"][0]["status"] = "Retired"
+        registry["frontiers"][0]["retire_category"] = "blocked"
+        self.module.validate_registry(registry)
+
+        with_retired_parent = self.module.bind_frontier_layer(registry, "F1", layer=1)
+        original = copy.deepcopy(with_retired_parent)
+        bound = self.module.bind_frontier_layer(
+            with_retired_parent,
+            "F2",
+            layer=5,
+            parent_frontier="F1",
+        )
+
+        self.assertEqual(original, with_retired_parent)
+        self.assertEqual("Retired", self.module.get_frontier(bound, "F1")["status"])
+        self.assertEqual("blocked", self.module.get_frontier(bound, "F1")["retire_category"])
+        self.assertEqual("F1", self.module.get_frontier(bound, "F2")["parent_frontier"])
+        self.assertIs(bound, self.module.validate_registry(bound))
+
+    def test_create_frontier_accepts_explicit_layer_and_parent_without_changing_v2_shape(self):
+        self.assertEqual(
+            [
+                "registry",
+                "name",
+                "proposed_at_loop",
+                "source",
+                "source_frontier",
+                "layer",
+                "parent_frontier",
+                "initial_status",
+                "ts",
+            ],
+            list(inspect.signature(self.module.create_frontier).parameters),
+        )
+
+        legacy = self.registry()
+        original_legacy = copy.deepcopy(legacy)
+        legacy_updated = self.module.create_frontier(
+            legacy,
+            name="Legacy shape",
+            proposed_at_loop=2,
+            source="initial",
+            layer=None,
+            parent_frontier=None,
+        )
+        self.assertEqual(original_legacy, legacy)
+        legacy_created = self.module.get_frontier(legacy_updated, "F3")
+        self.assertEqual(set(legacy["frontiers"][0]), set(legacy_created))
+        self.assertNotIn("layer", legacy_created)
+        self.assertNotIn("parent_frontier", legacy_created)
+
+        for case, layer, parent_frontier in (
+            ("layer", 0, None),
+            ("parent", None, "F1"),
+        ):
+            original = copy.deepcopy(legacy)
+            with self.subTest(case=f"v2_{case}"):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.create_frontier(
+                        legacy,
+                        name="Reject v3 facts",
+                        proposed_at_loop=2,
+                        source="initial",
+                        layer=layer,
+                        parent_frontier=parent_frontier,
+                    )
+                self.assertEqual(original, legacy)
+
+        unconfigured = self.module.make_registry("MXL", "ticker")
+        original_unconfigured = copy.deepcopy(unconfigured)
+        unbound = self.module.create_frontier(
+            unconfigured,
+            name="Legal unbound v3 frontier",
+            proposed_at_loop=1,
+            source="initial",
+            layer=None,
+            parent_frontier=None,
+        )
+        self.assertEqual(original_unconfigured, unconfigured)
+        self.assertEqual(
+            {"layer": None, "parent_frontier": None},
+            {
+                key: self.module.get_frontier(unbound, "F1")[key]
+                for key in ("layer", "parent_frontier")
+            },
+        )
+
+        configured = self.configured_v3_registry(2)
+        configured = self.module.bind_frontier_layer(configured, "F2", layer=0)
+        original_configured = copy.deepcopy(configured)
+        created = self.module.create_frontier(
+            configured,
+            name="Explicitly bound discovery",
+            proposed_at_loop=3,
+            source="discovery",
+            source_frontier="F1",
+            layer=4,
+            parent_frontier="F2",
+        )
+        self.assertEqual(original_configured, configured)
+        created_frontier = self.module.get_frontier(created, "F3")
+        self.assertEqual("F1", created_frontier["source_frontier"])
+        self.assertEqual("F2", created_frontier["parent_frontier"])
+        self.assertEqual(4, created_frontier["layer"])
+
+        invalid_creation_requests = (
+            ("empty_labels", unconfigured, 0, None),
+            ("parent_without_layer", configured, None, "F2"),
+        )
+        for case, registry, layer, parent_frontier in invalid_creation_requests:
+            original = copy.deepcopy(registry)
+            with self.subTest(case=case):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.create_frontier(
+                        registry,
+                        name="Invalid explicit binding",
+                        proposed_at_loop=3,
+                        source="initial",
+                        layer=layer,
+                        parent_frontier=parent_frontier,
+                    )
+                self.assertEqual(original, registry)
 
     def test_make_registry_and_create_frontier_build_schema(self):
         registry = self.module.make_registry("MXL", "ticker")
