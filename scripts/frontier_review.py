@@ -20,6 +20,7 @@ from frontier_lifecycle import (
     create_frontier,
     derive_frontier_layer_coverage,
     derive_loop_counts,
+    format_frontier_layer_advisories,
     get_frontier,
     render_frontier_layer_coverage_md,
     render_discovery_log_md,
@@ -268,13 +269,21 @@ def command_check_review(args: argparse.Namespace) -> int:
     loop_counts = read_loop_counts(workspace, registry)
     due = check_review_due(registry, loop_counts)
 
-    if not due:
+    if due:
+        for frontier_id in due:
+            print(f"{frontier_id} reached loop {loop_counts.get(frontier_id, 0)}")
+        result = 1
+    else:
         print("No Frontier Review due")
-        return 0
+        result = 0
 
-    for frontier_id in due:
-        print(f"{frontier_id} reached loop {loop_counts.get(frontier_id, 0)}")
-    return 1
+    coverage = derive_frontier_layer_coverage(registry)
+    for line in format_frontier_layer_advisories(
+        coverage,
+        prefix="[ADVISORY] ",
+    ):
+        print(line)
+    return result
 
 
 def command_record(args: argparse.Namespace) -> int:

@@ -2496,6 +2496,71 @@ class TestFrontierReviewCli(unittest.TestCase):
         self.assertEqual(0, retire.returncode, retire.stderr)
         assert_v2_contract()
 
+    def test_check_review_no_due_prints_original_line_before_advisories_and_returns_zero(self):
+        workspace = self.make_v2_workspace()
+
+        result = self.run_cli(workspace, "check-review")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            [
+                "No Frontier Review due",
+                "[ADVISORY] LAYER_LABELS_UNCONFIGURED: Frontier layer labels are "
+                "unavailable; run set-layers.",
+            ],
+            result.stdout.splitlines(),
+        )
+
+    def test_check_review_due_prints_original_lines_before_advisories_and_returns_one(self):
+        workspace = self.make_workspace()
+        self.configure_layers(workspace)
+        additions = [
+            ("Bound review frontier", ["--layer", "0"]),
+            ("Unbound review frontier", []),
+        ]
+        for index, (name, layer_args) in enumerate(additions, start=1):
+            added = self.run_cli(
+                workspace,
+                "add",
+                "--name",
+                name,
+                "--source",
+                "initial",
+                "--at-loop",
+                "1",
+                *layer_args,
+            )
+            self.assertEqual(0, added.returncode, added.stderr)
+            started = self.run_cli(workspace, "start", f"F{index}")
+            self.assertEqual(0, started.returncode, started.stderr)
+        ledger_lines = ["# Evidence Ledger", ""]
+        for loop_index, frontier_id in enumerate(["F1"] * 3 + ["F2"] * 3, start=1):
+            ledger_lines.extend(
+                [
+                    f"## Loop {loop_index}: {frontier_id} - review evidence",
+                    "",
+                    "Evidence summary.",
+                    "",
+                ]
+            )
+        (workspace / "evidence_ledger.md").write_text(
+            "\n".join(ledger_lines),
+            encoding="utf-8",
+        )
+
+        result = self.run_cli(workspace, "check-review")
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertEqual(
+            [
+                "F1 reached loop 3",
+                "F2 reached loop 3",
+                "[ADVISORY] LAYER_UNREPRESENTED: Layers 1-5 have no bound frontier.",
+                "[ADVISORY] FRONTIER_LAYER_UNBOUND: Frontiers F2 are not bound to a layer.",
+            ],
+            result.stdout.splitlines(),
+        )
+
     def test_check_review_preserves_zero_one_two_exit_contract(self):
         no_due_workspace = self.make_workspace()
         no_due = self.run_cli(no_due_workspace, "check-review")
