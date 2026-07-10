@@ -206,6 +206,8 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
                 ledger_content = f.read()
         except FileNotFoundError:
             missing.append("evidence_ledger.md not found")
+        except (OSError, UnicodeError) as exc:
+            missing.append(f"evidence ledger invalid: {exc}")
 
         if registry is not None and ledger_content is not None:
             coverage = derive_frontier_layer_coverage(registry)
@@ -237,9 +239,10 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
             missing.extend(sc_violations)
 
         # 3. Timeliness Checker: recent events must be tracked
-        passed_time, time_violations = check_timeliness(workspace_path)
-        if not passed_time:
-            missing.extend(time_violations)
+        if ledger_content is not None:
+            passed_time, time_violations = check_timeliness(workspace_path)
+            if not passed_time:
+                missing.extend(time_violations)
 
         # Check for Serendipity Loop findings (required after 3 frontiers)
         wf_path = os.path.join(workspace_path, "research_workflow.md")

@@ -327,6 +327,44 @@ class TestFrontierGateIntegration(unittest.TestCase):
         self.assertNotIn("[WARN]", completed.stdout)
         self.assertNotIn("Traceback", completed.stdout + completed.stderr)
 
+    def test_stage2_malformed_ledger_is_failure_without_traceback(self):
+        workspace = self.make_stage_2_ticker_workspace()
+        registry = self.layered_v3_registry(first_status="Active")
+        registry["frontiers"][0]["layer"] = None
+        registry["frontiers"][5]["layer"] = 4
+        self.write_layered_v3_registry(workspace, registry)
+        (workspace / "evidence_ledger.md").write_bytes(b"\xff")
+        expected = (
+            "evidence ledger invalid: 'utf-8' codec can't decode byte 0xff "
+            "in position 0: invalid start byte"
+        )
+
+        in_process_error = None
+        result = None
+        stdout = None
+        try:
+            result, stdout = self.check_gate_with_stdout(workspace)
+        except UnicodeError as exc:
+            in_process_error = exc
+        completed = self.run_gate(workspace)
+
+        leaked = []
+        if in_process_error is not None:
+            leaked.append(f"in-process leaked {type(in_process_error).__name__}")
+        cli_output = completed.stdout + completed.stderr
+        if "Traceback" in cli_output or "UnicodeDecodeError" in cli_output:
+            leaked.append("CLI leaked UnicodeDecodeError traceback")
+        self.assertEqual([], leaked)
+        self.assertEqual((False, [expected]), result)
+        self.assertEqual("", stdout)
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("GATE FAILED: stage_2 -> stage_3", completed.stdout)
+        self.assertIn("Missing 1 prerequisite(s):", completed.stdout)
+        self.assertEqual(1, completed.stdout.count(expected))
+        self.assertNotIn("[WARN]", completed.stdout)
+        self.assertNotIn("Traceback", cli_output)
+        self.assertNotIn("UnicodeDecodeError", cli_output)
+
     def test_stage2_gate_reuses_one_registry_and_ledger_snapshot(self):
         from loop_enforcer import check_loop_depth_from_documents as real_document_helper
 
