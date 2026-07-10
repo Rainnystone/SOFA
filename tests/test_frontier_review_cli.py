@@ -429,6 +429,312 @@ class TestFrontierReviewCli(unittest.TestCase):
                     {path.name for path in workspace.iterdir()},
                 )
 
+    def test_bind_layer_cli_sets_rebinds_and_clears_the_complete_binding(self):
+        workspace = self.make_workspace()
+        configured = self.run_cli(
+            workspace,
+            "set-layers",
+            *self.layer_label_args(),
+        )
+        self.assertEqual(0, configured.returncode, configured.stderr)
+        self.add_and_start_frontier(workspace, name="Root branch", expected_id="F1")
+        self.add_and_start_frontier(workspace, name="Child branch", expected_id="F2")
+
+        bound_root = self.run_cli(workspace, "bind-layer", "F1", "--layer", "0")
+
+        self.assertEqual(0, bound_root.returncode, bound_root.stderr)
+        self.assertEqual(
+            "Bound F1 layer=0 parent_frontier=none\n",
+            bound_root.stdout,
+        )
+        registry = self.registry(workspace)
+        self.assertEqual(0, registry["frontiers"][0]["layer"])
+        self.assertIsNone(registry["frontiers"][0]["parent_frontier"])
+        workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+        self.assertIn("| F1 | 0 | none | none | Active | none |", workflow)
+
+        registry_path = workspace / "frontier_registry.json"
+        workflow_path = workspace / "research_workflow.md"
+        registry_after_root = registry_path.read_bytes()
+        workflow_after_root = workflow_path.read_bytes()
+        repeated_root = self.run_cli(workspace, "bind-layer", "F1", "--layer", "0")
+        self.assertEqual(0, repeated_root.returncode, repeated_root.stderr)
+        self.assertEqual(registry_after_root, registry_path.read_bytes())
+        self.assertEqual(workflow_after_root, workflow_path.read_bytes())
+
+        bound_child = self.run_cli(
+            workspace,
+            "bind-layer",
+            "F2",
+            "--layer",
+            "2",
+            "--parent",
+            "F1",
+        )
+        self.assertEqual(0, bound_child.returncode, bound_child.stderr)
+        self.assertEqual(
+            "Bound F2 layer=2 parent_frontier=F1\n",
+            bound_child.stdout,
+        )
+        child = self.registry(workspace)["frontiers"][1]
+        self.assertEqual(2, child["layer"])
+        self.assertEqual("F1", child["parent_frontier"])
+
+        rebound = self.run_cli(
+            workspace,
+            "bind-layer",
+            "F2",
+            "--layer",
+            "3",
+            "--parent",
+            "F1",
+        )
+        self.assertEqual(0, rebound.returncode, rebound.stderr)
+        child = self.registry(workspace)["frontiers"][1]
+        self.assertEqual(3, child["layer"])
+        self.assertEqual("F1", child["parent_frontier"])
+
+        whole_binding = self.run_cli(
+            workspace,
+            "bind-layer",
+            "F2",
+            "--layer",
+            "2",
+        )
+        self.assertEqual(0, whole_binding.returncode, whole_binding.stderr)
+        self.assertEqual(
+            "Bound F2 layer=2 parent_frontier=none\n",
+            whole_binding.stdout,
+        )
+        child = self.registry(workspace)["frontiers"][1]
+        self.assertEqual(2, child["layer"])
+        self.assertIsNone(child["parent_frontier"])
+
+        rebound_with_parent = self.run_cli(
+            workspace,
+            "bind-layer",
+            "F2",
+            "--layer",
+            "2",
+            "--parent",
+            "F1",
+        )
+        self.assertEqual(0, rebound_with_parent.returncode, rebound_with_parent.stderr)
+        cleared = self.run_cli(workspace, "bind-layer", "F2", "--clear")
+        self.assertEqual(0, cleared.returncode, cleared.stderr)
+        self.assertEqual("Cleared layer binding for F2\n", cleared.stdout)
+        child = self.registry(workspace)["frontiers"][1]
+        self.assertIsNone(child["layer"])
+        self.assertIsNone(child["parent_frontier"])
+        self.assertIn(
+            "| F2 | none | none | none | Active | none |",
+            workflow_path.read_text(encoding="utf-8"),
+        )
+
+        registry_after_clear = registry_path.read_bytes()
+        workflow_after_clear = workflow_path.read_bytes()
+        repeated_clear = self.run_cli(workspace, "bind-layer", "F2", "--clear")
+        self.assertEqual(0, repeated_clear.returncode, repeated_clear.stderr)
+        self.assertEqual("Cleared layer binding for F2\n", repeated_clear.stdout)
+        self.assertEqual(registry_after_clear, registry_path.read_bytes())
+        self.assertEqual(workflow_after_clear, workflow_path.read_bytes())
+
+        invalid_cases = {
+            "missing-binding-action": ("F2",),
+            "mutually-exclusive": ("F2", "--layer", "1", "--clear"),
+            "parent-with-clear": ("F2", "--clear", "--parent", "F1"),
+            "negative-layer": ("F2", "--layer", "-1"),
+            "too-deep-layer": ("F2", "--layer", "6"),
+            "non-integer-layer": ("F2", "--layer", "deep"),
+        }
+        for case, args in invalid_cases.items():
+            with self.subTest(case=case):
+                original_registry = registry_path.read_bytes()
+                original_workflow = workflow_path.read_bytes()
+                original_entries = {path.name for path in workspace.iterdir()}
+
+                invalid = self.run_cli(workspace, "bind-layer", *args)
+
+                self.assertEqual(2, invalid.returncode)
+                self.assertNotIn("Bound F2", invalid.stdout)
+                self.assertNotIn("Cleared layer binding for F2", invalid.stdout)
+                self.assertEqual(original_registry, registry_path.read_bytes())
+                self.assertEqual(original_workflow, workflow_path.read_bytes())
+                self.assertEqual(
+                    original_entries,
+                    {path.name for path in workspace.iterdir()},
+                )
+
+    def test_bind_layer_cli_rejects_v2_and_empty_label_v3_without_implicit_adoption(self):
+        for version, workspace in {
+            "v2": self.make_v2_workspace(),
+            "v3-empty": self.make_workspace(),
+        }.items():
+            with self.subTest(version=version):
+                self.add_and_start_frontier(workspace)
+                registry_path = workspace / "frontier_registry.json"
+                workflow_path = workspace / "research_workflow.md"
+                original_registry = registry_path.read_bytes()
+                original_workflow = workflow_path.read_bytes()
+                original_entries = {path.name for path in workspace.iterdir()}
+
+                result = self.run_cli(
+                    workspace,
+                    "bind-layer",
+                    "F1",
+                    "--layer",
+                    "0",
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertEqual("", result.stdout)
+                self.assertIn("run set-layers", result.stderr)
+                self.assertEqual(original_registry, registry_path.read_bytes())
+                self.assertEqual(original_workflow, workflow_path.read_bytes())
+                self.assertEqual(
+                    original_entries,
+                    {path.name for path in workspace.iterdir()},
+                )
+                registry = self.registry(workspace)
+                if version == "v2":
+                    self.assertEqual(2, registry["version"])
+                    self.assertNotIn("layer_labels", registry)
+                    self.assertNotIn("layer", registry["frontiers"][0])
+                    self.assertNotIn("parent_frontier", registry["frontiers"][0])
+                else:
+                    self.assertEqual(3, registry["version"])
+                    self.assertEqual([], registry["layer_labels"])
+                    self.assertIsNone(registry["frontiers"][0]["layer"])
+                    self.assertIsNone(registry["frontiers"][0]["parent_frontier"])
+
+    def test_bind_layer_cli_rejects_invalid_parent_or_descendant_breakage_without_writes(self):
+        workspace = self.make_workspace()
+        configured = self.run_cli(
+            workspace,
+            "set-layers",
+            *self.layer_label_args(),
+        )
+        self.assertEqual(0, configured.returncode, configured.stderr)
+        for expected_id, name in [
+            ("F1", "Root branch"),
+            ("F2", "Middle branch"),
+            ("F3", "Leaf branch"),
+            ("F4", "Independent branch"),
+        ]:
+            added = self.run_cli(
+                workspace,
+                "add",
+                "--name",
+                name,
+                "--source",
+                "initial",
+                "--at-loop",
+                "1",
+            )
+            self.assertEqual(0, added.returncode, added.stderr)
+            self.assertIn(f"Added {expected_id}", added.stdout)
+
+        setup_bindings = [
+            ("F1", "0", None),
+            ("F2", "2", "F1"),
+            ("F3", "4", "F2"),
+            ("F4", "3", None),
+        ]
+        for frontier_id, layer, parent in setup_bindings:
+            args = ["bind-layer", frontier_id, "--layer", layer]
+            if parent is not None:
+                args.extend(["--parent", parent])
+            bound = self.run_cli(workspace, *args)
+            self.assertEqual(0, bound.returncode, bound.stderr)
+
+        invalid_cases = {
+            "malformed-parent": ("F2", "--layer", "2", "--parent", "middle"),
+            "nonexistent-parent": ("F2", "--layer", "2", "--parent", "F99"),
+            "self-parent": ("F2", "--layer", "2", "--parent", "F2"),
+            "equal-layer-parent": ("F2", "--layer", "3", "--parent", "F4"),
+            "deeper-layer-parent": ("F2", "--layer", "2", "--parent", "F4"),
+            "ancestor-rebind-breaks-child": ("F1", "--layer", "3"),
+            "ancestor-clear-breaks-child": ("F1", "--clear"),
+            "middle-rebind-breaks-child": (
+                "F2",
+                "--layer",
+                "4",
+                "--parent",
+                "F1",
+            ),
+            "middle-clear-breaks-child": ("F2", "--clear"),
+        }
+        registry_path = workspace / "frontier_registry.json"
+        workflow_path = workspace / "research_workflow.md"
+        for case, args in invalid_cases.items():
+            with self.subTest(case=case):
+                original_registry = registry_path.read_bytes()
+                original_workflow = workflow_path.read_bytes()
+                original_entries = {path.name for path in workspace.iterdir()}
+
+                result = self.run_cli(workspace, "bind-layer", *args)
+
+                self.assertEqual(2, result.returncode)
+                self.assertEqual("", result.stdout)
+                self.assertTrue(result.stderr.startswith("ERROR:"), result.stderr)
+                self.assertEqual(original_registry, registry_path.read_bytes())
+                self.assertEqual(original_workflow, workflow_path.read_bytes())
+                self.assertEqual(
+                    original_entries,
+                    {path.name for path in workspace.iterdir()},
+                )
+
+        missing_block_workspace = self.make_workspace()
+        configured = self.run_cli(
+            missing_block_workspace,
+            "set-layers",
+            *self.layer_label_args(),
+        )
+        self.assertEqual(0, configured.returncode, configured.stderr)
+        added = self.run_cli(
+            missing_block_workspace,
+            "add",
+            "--name",
+            "Unbound branch",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+        )
+        self.assertEqual(0, added.returncode, added.stderr)
+        missing_registry_path = missing_block_workspace / "frontier_registry.json"
+        missing_workflow_path = missing_block_workspace / "research_workflow.md"
+        workflow = missing_workflow_path.read_text(encoding="utf-8")
+        heading = "## Frontier Layer Coverage\n"
+        end_marker = "<!-- SOFA:frontier-layer-coverage:end -->"
+        block_start = workflow.index(heading)
+        block_end = workflow.index(end_marker) + len(end_marker)
+        missing_workflow_path.write_text(
+            workflow[:block_start].rstrip() + "\n\n" + workflow[block_end:].lstrip(),
+            encoding="utf-8",
+        )
+        original_registry = missing_registry_path.read_bytes()
+        original_workflow = missing_workflow_path.read_bytes()
+        original_entries = {path.name for path in missing_block_workspace.iterdir()}
+
+        missing_block = self.run_cli(
+            missing_block_workspace,
+            "bind-layer",
+            "F1",
+            "--layer",
+            "0",
+        )
+
+        self.assertEqual(2, missing_block.returncode)
+        self.assertEqual("", missing_block.stdout)
+        self.assertIn("has no start marker", missing_block.stderr)
+        self.assertEqual(original_registry, missing_registry_path.read_bytes())
+        self.assertEqual(original_workflow, missing_workflow_path.read_bytes())
+        self.assertEqual(
+            original_entries,
+            {path.name for path in missing_block_workspace.iterdir()},
+        )
+
     def test_render_failure_occurs_before_any_write(self):
         workspace = self.make_workspace()
         registry_path = workspace / "frontier_registry.json"

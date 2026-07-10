@@ -15,6 +15,7 @@ from typing import Any
 from frontier_lifecycle import (
     CURRENT_REGISTRY_VERSION,
     LifecycleError,
+    bind_frontier_layer,
     check_review_due,
     create_frontier,
     derive_frontier_layer_coverage,
@@ -39,6 +40,7 @@ LAYER_BLOCK = "frontier-layer-coverage"
 COMMANDS = frozenset(
     {
         "add",
+        "bind-layer",
         "start",
         "check-review",
         "record",
@@ -100,6 +102,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     set_layers_parser.add_argument("--replace", action="store_true")
     set_layers_parser.set_defaults(handler=command_set_layers)
+
+    bind_parser = subparsers.add_parser(
+        "bind-layer",
+        help="Bind, rebind, or clear one frontier layer",
+    )
+    bind_parser.add_argument("frontier_id")
+    binding = bind_parser.add_mutually_exclusive_group(required=True)
+    binding.add_argument("--layer", type=_layer_index)
+    binding.add_argument("--clear", action="store_true")
+    bind_parser.add_argument("--parent", dest="parent_frontier")
+    bind_parser.set_defaults(handler=command_bind_layer)
 
     start_parser = subparsers.add_parser("start", help="Activate a New frontier")
     start_parser.add_argument("frontier_id")
@@ -188,6 +201,33 @@ def command_set_layers(args: argparse.Namespace) -> int:
                 "NOTICE: Review layer binding semantics for: "
                 + ", ".join(bound_ids)
             )
+    return 0
+
+
+def command_bind_layer(args: argparse.Namespace) -> int:
+    if args.parent_frontier is not None and args.layer is None:
+        raise LifecycleError("--parent requires --layer")
+    workspace = workspace_path(args)
+    registry, original_bytes = read_registry_snapshot(workspace)
+    updated = bind_frontier_layer(
+        registry,
+        args.frontier_id,
+        layer=None if args.clear else args.layer,
+        parent_frontier=None if args.clear else args.parent_frontier,
+    )
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_bytes,
+        updated_registry=updated,
+    )
+    if args.clear:
+        print(f"Cleared layer binding for {args.frontier_id}")
+    else:
+        parent = args.parent_frontier or "none"
+        print(
+            f"Bound {args.frontier_id} layer={args.layer} "
+            f"parent_frontier={parent}"
+        )
     return 0
 
 
