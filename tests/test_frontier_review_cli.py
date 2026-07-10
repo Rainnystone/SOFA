@@ -158,6 +158,52 @@ class TestFrontierReviewCli(unittest.TestCase):
         interior, _ = remainder.split(end_marker, 1)
         return interior.strip()
 
+    def replace_managed_block_interior(self, workspace, block, replacement):
+        workflow_path = workspace / "research_workflow.md"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        start_marker = f"<!-- SOFA:{block}:start -->"
+        end_marker = f"<!-- SOFA:{block}:end -->"
+        self.assertEqual(1, workflow.count(start_marker))
+        self.assertEqual(1, workflow.count(end_marker))
+        prefix, remainder = workflow.split(start_marker, 1)
+        _, suffix = remainder.split(end_marker, 1)
+        workflow_path.write_text(
+            f"{prefix}{start_marker}\n{replacement}\n{end_marker}{suffix}",
+            encoding="utf-8",
+        )
+
+    def remove_layer_block(self, workspace):
+        workflow_path = workspace / "research_workflow.md"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        heading = "## Frontier Layer Coverage\n"
+        end_marker = "<!-- SOFA:frontier-layer-coverage:end -->"
+        start_index = workflow.index(heading)
+        end_index = workflow.index(end_marker) + len(end_marker)
+        workflow_path.write_text(
+            workflow[:start_index].rstrip()
+            + "\n\n"
+            + workflow[end_index:].lstrip(),
+            encoding="utf-8",
+        )
+
+    def assert_registered_block_order(self, workspace):
+        workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+        blocks = [
+            "frontier-review-log",
+            "frontier-discovery-log",
+            "frontier-layer-coverage",
+        ]
+        positions = []
+        for block in blocks:
+            start_marker = f"<!-- SOFA:{block}:start -->"
+            end_marker = f"<!-- SOFA:{block}:end -->"
+            self.assertEqual(1, workflow.count(start_marker))
+            self.assertEqual(1, workflow.count(end_marker))
+            self.assertLess(workflow.index(start_marker), workflow.index(end_marker))
+            positions.append(workflow.index(start_marker))
+        self.assertEqual(sorted(positions), positions)
+        return workflow
+
     def test_add_matrix_covers_v2_v3_empty_and_v3_configured_layer_flags(self):
         v2_plain = self.make_v2_workspace()
         original_v2_workflow = (v2_plain / "research_workflow.md").read_bytes()
@@ -660,6 +706,338 @@ class TestFrontierReviewCli(unittest.TestCase):
         for frontier in registry["frontiers"][1:]:
             self.assertIsNone(frontier["layer"])
             self.assertIsNone(frontier["parent_frontier"])
+
+    def test_each_v3_set_bind_add_start_record_retire_and_reactivate_refreshes_layer_block(self):
+        def configured_workspace(mode="ticker"):
+            workspace = self.make_workspace(mode)
+            self.configure_layers(workspace)
+            return workspace
+
+        def add_root(workspace, *, layer=None):
+            args = [
+                "add",
+                "--name",
+                "Layer refresh root",
+                "--source",
+                "initial",
+                "--at-loop",
+                "1",
+            ]
+            if layer is not None:
+                args.extend(["--layer", str(layer)])
+            result = self.run_cli(workspace, *args)
+            self.assertEqual(0, result.returncode, result.stderr)
+
+        def start_root(workspace):
+            result = self.run_cli(workspace, "start", "F1")
+            self.assertEqual(0, result.returncode, result.stderr)
+
+        def make_continued(workspace):
+            add_root(workspace, layer=1)
+            start_root(workspace)
+            self.write_loops(workspace, name="Layer refresh root")
+            result = self.run_cli(
+                workspace,
+                "record",
+                "F1",
+                "--decision",
+                "Continued",
+                "--rationale",
+                "Evidence remains material",
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+
+        def exercise_refresh(
+            family,
+            workspace,
+            command,
+            expected_layer_fact,
+            *,
+            refresh_review_logs=False,
+        ):
+            sentinels = {}
+            for block in (
+                "frontier-review-log",
+                "frontier-discovery-log",
+                "frontier-layer-coverage",
+            ):
+                sentinel = f"STALE {family} {block}"
+                sentinels[block] = sentinel
+                self.replace_managed_block_interior(workspace, block, sentinel)
+            original_entries = tuple(
+                sorted(path.name for path in workspace.iterdir())
+            )
+
+            result = self.run_cli(workspace, *command)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            layer_interior = self.managed_block_interior(
+                workspace,
+                "frontier-layer-coverage",
+            )
+            self.assertNotIn(sentinels["frontier-layer-coverage"], layer_interior)
+            self.assertIn(expected_layer_fact, layer_interior)
+            for block in ("frontier-review-log", "frontier-discovery-log"):
+                interior = self.managed_block_interior(workspace, block)
+                if refresh_review_logs:
+                    self.assertNotIn(sentinels[block], interior)
+                else:
+                    self.assertEqual(sentinels[block], interior)
+            workflow = self.assert_registered_block_order(workspace)
+            self.assertEqual(1, workflow.count(expected_layer_fact))
+            self.assertEqual(
+                original_entries,
+                tuple(sorted(path.name for path in workspace.iterdir())),
+            )
+
+        set_workspace = self.make_workspace()
+        exercise_refresh(
+            "set-layers",
+            set_workspace,
+            ["set-layers", *self.layer_label_args()],
+            "| 0 | Layer 0 label |",
+        )
+
+        bind_workspace = configured_workspace()
+        add_root(bind_workspace)
+        exercise_refresh(
+            "bind-layer",
+            bind_workspace,
+            ["bind-layer", "F1", "--layer", "2"],
+            "| F1 | 2 | none | none | New | none |",
+        )
+
+        add_workspace = configured_workspace()
+        exercise_refresh(
+            "add",
+            add_workspace,
+            [
+                "add",
+                "--name",
+                "Layer refresh root",
+                "--source",
+                "initial",
+                "--at-loop",
+                "1",
+                "--layer",
+                "1",
+            ],
+            "| F1 | 1 | none | none | New | none |",
+        )
+
+        start_workspace = configured_workspace()
+        add_root(start_workspace, layer=1)
+        exercise_refresh(
+            "start",
+            start_workspace,
+            ["start", "F1"],
+            "| F1 | 1 | none | none | Active | none |",
+        )
+
+        record_workspace = configured_workspace()
+        add_root(record_workspace, layer=1)
+        start_root(record_workspace)
+        self.write_loops(record_workspace, name="Layer refresh root")
+        exercise_refresh(
+            "record",
+            record_workspace,
+            [
+                "record",
+                "F1",
+                "--decision",
+                "Continued",
+                "--rationale",
+                "Evidence remains material",
+            ],
+            "| F1 | 1 | none | none | Continued | none |",
+            refresh_review_logs=True,
+        )
+        self.assertIn(
+            "## Frontier Review: F1 @ loop 3",
+            self.managed_block_interior(record_workspace, "frontier-review-log"),
+        )
+        self.assertIn(
+            "_No discovery actions recorded._",
+            self.managed_block_interior(record_workspace, "frontier-discovery-log"),
+        )
+
+        retire_workspace = configured_workspace()
+        make_continued(retire_workspace)
+        reactivated = self.run_cli(retire_workspace, "reactivate", "F1")
+        self.assertEqual(0, reactivated.returncode, reactivated.stderr)
+        exercise_refresh(
+            "retire",
+            retire_workspace,
+            [
+                "retire",
+                "F1",
+                "--category",
+                "invalidated",
+                "--reason",
+                "Later evidence invalidated the frontier",
+            ],
+            "| F1 | 1 | none | none | Retired | invalidated |",
+        )
+
+        reactivate_workspace = configured_workspace()
+        make_continued(reactivate_workspace)
+        exercise_refresh(
+            "reactivate",
+            reactivate_workspace,
+            ["reactivate", "F1"],
+            "| F1 | 1 | none | none | Active | none |",
+        )
+
+        def assert_missing_block_rejected(workspace, *command):
+            self.remove_layer_block(workspace)
+            before = self.workspace_snapshot(workspace)
+
+            result = self.run_cli(workspace, *command)
+
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertEqual("", result.stdout)
+            self.assertIn("has no start marker", result.stderr)
+            self.assert_workspace_snapshot(workspace, before)
+
+        missing_add = configured_workspace()
+        assert_missing_block_rejected(
+            missing_add,
+            "add",
+            "--name",
+            "Rejected missing-block add",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+        )
+
+        missing_start = configured_workspace()
+        add_root(missing_start, layer=1)
+        assert_missing_block_rejected(missing_start, "start", "F1")
+
+        missing_record = configured_workspace()
+        add_root(missing_record, layer=1)
+        start_root(missing_record)
+        self.write_loops(missing_record, name="Layer refresh root")
+        assert_missing_block_rejected(
+            missing_record,
+            "record",
+            "F1",
+            "--decision",
+            "Continued",
+            "--rationale",
+            "Evidence remains material",
+        )
+
+        missing_retire = configured_workspace(mode="sector")
+        add_root(missing_retire, layer=1)
+        start_root(missing_retire)
+        self.write_loops(missing_retire, name="Layer refresh root", count=1)
+        assert_missing_block_rejected(
+            missing_retire,
+            "retire",
+            "F1",
+            "--category",
+            "barren",
+            "--reason",
+            "Mapping branch is exhausted",
+        )
+
+        missing_reactivate = configured_workspace()
+        make_continued(missing_reactivate)
+        assert_missing_block_rejected(
+            missing_reactivate,
+            "reactivate",
+            "F1",
+        )
+
+    def test_layer_commands_never_modify_an_existing_sector_dependency_ladder(self):
+        workspace = self.make_workspace(mode="sector")
+        maps_dir = workspace / "maps"
+        maps_dir.mkdir(parents=True, exist_ok=True)
+        ladder_path = maps_dir / "dependency_ladder.md"
+        ladder_bytes = (
+            "# HUMAN-OWNED DEPENDENCY LADDER\r\n"
+            "\r\n"
+            "依赖梯级：原始人工判断，不得改写。\r\n"
+            "<!-- distinctive-ladder-bytes: αβγ -->\r\n"
+        ).encode("utf-8")
+        ladder_path.write_bytes(ladder_bytes)
+        original_map_entries = tuple(sorted(path.name for path in maps_dir.iterdir()))
+
+        def run_without_ladder_change(*command):
+            result = self.run_cli(workspace, *command)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(ladder_bytes, ladder_path.read_bytes())
+            self.assertEqual(
+                original_map_entries,
+                tuple(sorted(path.name for path in maps_dir.iterdir())),
+            )
+            return result
+
+        run_without_ladder_change(
+            "set-layers",
+            *self.layer_label_args(),
+        )
+        run_without_ladder_change(
+            "add",
+            "--name",
+            "Sector root",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "0",
+        )
+        run_without_ladder_change(
+            "add",
+            "--name",
+            "Sector child",
+            "--source",
+            "discovery",
+            "--source-frontier",
+            "F1",
+            "--at-loop",
+            "1",
+            "--layer",
+            "2",
+            "--parent",
+            "F1",
+        )
+        run_without_ladder_change(
+            "bind-layer",
+            "F2",
+            "--layer",
+            "3",
+            "--parent",
+            "F1",
+        )
+        run_without_ladder_change("start", "F2")
+
+        self.write_loops(
+            workspace,
+            frontier_id="F2",
+            name="Sector child",
+        )
+        self.assertEqual(ladder_bytes, ladder_path.read_bytes())
+        run_without_ladder_change(
+            "record",
+            "F2",
+            "--decision",
+            "Continued",
+            "--rationale",
+            "Sector mapping remains material",
+        )
+        run_without_ladder_change("reactivate", "F2")
+        run_without_ladder_change(
+            "retire",
+            "F2",
+            "--category",
+            "invalidated",
+            "--reason",
+            "Later mapping evidence invalidated the branch",
+        )
 
     def test_set_layers_cli_requires_indexes_zero_through_five_exactly_once(self):
         workspace = self.make_workspace()

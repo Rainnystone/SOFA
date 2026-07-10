@@ -257,6 +257,57 @@ class TestCliStdoutBehaviorUnderLegacyEncoding(unittest.TestCase):
         self.assertIn("错误", stderr)
         self.assertNotIn("UnicodeEncodeError", stderr)
 
+    def test_layer_cli_supports_workspace_paths_with_spaces_and_cjk(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        workspace = Path(temp_dir.name) / "含 空格 的工作区"
+        initialized = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "init_workspace.py"),
+                "中文分层路径测试",
+                str(workspace),
+                "--mode",
+                "ticker",
+            ],
+            cwd=str(ROOT),
+            capture_output=True,
+        )
+        self.assertEqual(
+            0,
+            initialized.returncode,
+            initialized.stderr.decode("utf-8", errors="replace"),
+        )
+        labels = [
+            "终端需求",
+            "系统平台",
+            "组件模块",
+            "材料工艺",
+            "受限投入设备",
+            "地域监管",
+        ]
+        label_args = []
+        for index, label in enumerate(labels):
+            label_args.extend(["--label", str(index), label])
+
+        result = _run_script(
+            SCRIPTS / "frontier_review.py",
+            str(workspace),
+            "set-layers",
+            *label_args,
+            cwd=ROOT,
+        )
+
+        stdout = result.stdout.decode("utf-8")
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        self.assertEqual(0, result.returncode, stderr)
+        self.assertEqual(["Layer labels configured"], stdout.splitlines())
+        self.assertNotIn("UnicodeEncodeError", stderr)
+        registry = json.loads(
+            (workspace / "frontier_registry.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(labels, registry["layer_labels"])
+
 
 if __name__ == "__main__":
     unittest.main()
