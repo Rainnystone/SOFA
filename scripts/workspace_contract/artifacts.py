@@ -154,6 +154,12 @@ MANAGED_BLOCKS = (
         start_marker="<!-- SOFA:frontier-discovery-log:start -->",
         end_marker="<!-- SOFA:frontier-discovery-log:end -->",
     ),
+    ManagedBlock(
+        name="frontier-layer-coverage",
+        heading="Frontier Layer Coverage",
+        start_marker="<!-- SOFA:frontier-layer-coverage:start -->",
+        end_marker="<!-- SOFA:frontier-layer-coverage:end -->",
+    ),
 )
 
 TICKER_WORKFLOW_STAGE_MARKERS = (
@@ -296,6 +302,81 @@ def replace_managed_block(text: str, block_name: str, replacement: str) -> str:
 
     block_text = f"{begin}\n{replacement.rstrip()}\n{end}"
     return f"{text[:start]}{block_text}{text[stop + len(end):]}"
+
+
+def _render_registered_managed_block(
+    block: ManagedBlock,
+    replacement: str,
+) -> str:
+    body = replacement.rstrip("\n")
+    if body:
+        body += "\n"
+    return (
+        f"## {block.heading}\n"
+        f"{block.start_marker}\n"
+        f"{body}"
+        f"{block.end_marker}"
+    )
+
+
+def upsert_managed_block_after(
+    text: str,
+    block_name: str,
+    replacement: str,
+    *,
+    after_block_name: str,
+) -> str:
+    """Replace or insert one registered block after a registered anchor."""
+    block = managed_block_for_name(block_name)
+    anchor = managed_block_for_name(after_block_name)
+
+    anchor_start_count = text.count(anchor.start_marker)
+    anchor_end_count = text.count(anchor.end_marker)
+    if anchor_start_count != 1:
+        raise ValueError(
+            f"managed block {after_block_name!r} must have exactly one start marker"
+        )
+    if anchor_end_count != 1:
+        raise ValueError(
+            f"managed block {after_block_name!r} must have exactly one end marker"
+        )
+
+    anchor_start = text.find(anchor.start_marker)
+    anchor_end = text.find(anchor.end_marker)
+    if anchor_start > anchor_end:
+        raise ValueError(
+            f"managed block {after_block_name!r} end marker appears before start marker"
+        )
+
+    target_start_count = text.count(block.start_marker)
+    target_end_count = text.count(block.end_marker)
+    if target_start_count == 0 and target_end_count == 0:
+        insertion_point = anchor_end + len(anchor.end_marker)
+        suffix = text[insertion_point:].lstrip("\r\n")
+        rendered = _render_registered_managed_block(block, replacement)
+        return f"{text[:insertion_point]}\n\n{rendered}\n\n{suffix}"
+
+    if target_start_count != 1:
+        raise ValueError(
+            f"managed block {block_name!r} must have exactly one start marker"
+        )
+    if target_end_count != 1:
+        raise ValueError(
+            f"managed block {block_name!r} must have exactly one end marker"
+        )
+
+    target_start = text.find(block.start_marker)
+    target_end = text.find(block.end_marker)
+    if target_start > target_end:
+        raise ValueError(
+            f"managed block {block_name!r} end marker appears before start marker"
+        )
+    if target_start <= anchor_end:
+        raise ValueError(
+            f"managed block {block_name!r} must appear after {after_block_name!r}"
+        )
+
+    return replace_managed_block(text, block_name, replacement)
 
 
 def _normalize_relative_path(relative_path: str | Path) -> str:
