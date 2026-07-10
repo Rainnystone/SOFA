@@ -17,11 +17,13 @@ from frontier_lifecycle import (
     LifecycleError,
     check_review_due,
     create_frontier,
+    derive_frontier_layer_coverage,
     derive_loop_counts,
     get_frontier,
     render_frontier_layer_coverage_md,
     render_discovery_log_md,
     render_review_log_md,
+    set_layer_labels,
     transition,
     validate_registry,
 )
@@ -42,6 +44,7 @@ COMMANDS = frozenset(
         "record",
         "retire",
         "reactivate",
+        "set-layers",
         "status",
     }
 )
@@ -82,6 +85,21 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--source-frontier")
     add_parser.add_argument("--at-loop", required=True, type=_positive_int)
     add_parser.set_defaults(handler=command_add)
+
+    set_layers_parser = subparsers.add_parser(
+        "set-layers",
+        help="Register or replace workspace layer labels",
+    )
+    set_layers_parser.add_argument(
+        "--label",
+        dest="labels",
+        action="append",
+        nargs=2,
+        required=True,
+        metavar=("INDEX", "TEXT"),
+    )
+    set_layers_parser.add_argument("--replace", action="store_true")
+    set_layers_parser.set_defaults(handler=command_set_layers)
 
     start_parser = subparsers.add_parser("start", help="Activate a New frontier")
     start_parser.add_argument("frontier_id")
@@ -139,6 +157,37 @@ def command_add(args: argparse.Namespace) -> int:
         updated_registry=updated,
     )
     print(f"Added {added['id']} ({added['status']}): {added['name']}")
+    return 0
+
+
+def command_set_layers(args: argparse.Namespace) -> int:
+    workspace = workspace_path(args)
+    registry, original_bytes = read_registry_snapshot(workspace)
+    previous = registry.get("layer_labels", [])
+    updated = set_layer_labels(
+        registry,
+        parse_indexed_labels(args.labels),
+        replace=args.replace,
+    )
+    changed = previous != updated["layer_labels"]
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_bytes,
+        updated_registry=updated,
+        allow_layer_insert=True,
+    )
+    print("Layer labels configured")
+    if args.replace and changed:
+        bound_ids = [
+            row["frontier_id"]
+            for row in derive_frontier_layer_coverage(updated)["lineage"]
+            if row["layer"] is not None
+        ]
+        if bound_ids:
+            print(
+                "NOTICE: Review layer binding semantics for: "
+                + ", ".join(bound_ids)
+            )
     return 0
 
 
@@ -663,6 +712,31 @@ def _positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def _layer_index(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "layer index must be an integer from 0 through 5"
+        ) from exc
+    if parsed < 0 or parsed > 5:
+        raise argparse.ArgumentTypeError(
+            "layer index must be an integer from 0 through 5"
+        )
+    return parsed
+
+
+def parse_indexed_labels(raw_labels: list[list[str]]) -> list[tuple[int, str]]:
+    indexed: list[tuple[int, str]] = []
+    for raw_index, label in raw_labels:
+        try:
+            index = _layer_index(raw_index)
+        except argparse.ArgumentTypeError as exc:
+            raise LifecycleError(str(exc)) from exc
+        indexed.append((index, label))
+    return indexed
 
 
 def utc_now() -> str:

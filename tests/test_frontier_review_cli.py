@@ -111,6 +111,324 @@ class TestFrontierReviewCli(unittest.TestCase):
         self.assertEqual(0, start_result.returncode, start_result.stderr)
         self.assertIn(f"{expected_id} -> Active", start_result.stdout)
 
+    def layer_label_args(self, *, indexes=range(6), labels=None):
+        canonical = labels or [f"Layer {index} label" for index in range(6)]
+        args = []
+        for position, index in enumerate(indexes):
+            args.extend(["--label", str(index), canonical[position]])
+        return args
+
+    def test_set_layers_cli_requires_indexes_zero_through_five_exactly_once(self):
+        workspace = self.make_workspace()
+        result = self.run_cli(
+            workspace,
+            "set-layers",
+            *self.layer_label_args(indexes=[5, 3, 1, 4, 2, 0]),
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Layer labels configured\n", result.stdout)
+        self.assertEqual(
+            [
+                "Layer 5 label",
+                "Layer 2 label",
+                "Layer 4 label",
+                "Layer 1 label",
+                "Layer 3 label",
+                "Layer 0 label",
+            ],
+            self.registry(workspace)["layer_labels"],
+        )
+
+        invalid_cases = {
+            "missing": self.layer_label_args(indexes=range(5)),
+            "duplicate": self.layer_label_args(indexes=[0, 1, 2, 3, 4, 4]),
+            "out-of-range": self.layer_label_args(indexes=[0, 1, 2, 3, 4, 6]),
+            "non-integer": self.layer_label_args(indexes=[0, 1, 2, 3, 4, "five"]),
+        }
+        for case, args in invalid_cases.items():
+            with self.subTest(case=case):
+                invalid_workspace = self.make_workspace()
+                registry_path = invalid_workspace / "frontier_registry.json"
+                workflow_path = invalid_workspace / "research_workflow.md"
+                original_registry = registry_path.read_bytes()
+                original_workflow = workflow_path.read_bytes()
+                original_entries = {path.name for path in invalid_workspace.iterdir()}
+
+                invalid = self.run_cli(invalid_workspace, "set-layers", *args)
+
+                self.assertEqual(2, invalid.returncode)
+                self.assertNotIn("Layer labels configured", invalid.stdout)
+                self.assertEqual(original_registry, registry_path.read_bytes())
+                self.assertEqual(original_workflow, workflow_path.read_bytes())
+                self.assertEqual(
+                    original_entries,
+                    {path.name for path in invalid_workspace.iterdir()},
+                )
+
+    def test_set_layers_cli_rejects_blank_duplicate_multiline_and_control_labels(self):
+        invalid_labels = {}
+
+        blank = [f"Layer {index} label" for index in range(6)]
+        blank[2] = "   "
+        invalid_labels["blank"] = blank
+
+        duplicate = [f"Layer {index} label" for index in range(6)]
+        duplicate[4] = "  lAyEr 0 LaBeL  "
+        invalid_labels["trimmed-casefold-duplicate"] = duplicate
+
+        for name, separator in {
+            "line-feed": "\n",
+            "carriage-return": "\r",
+            "line-separator": "\u2028",
+            "paragraph-separator": "\u2029",
+        }.items():
+            multiline = [f"Layer {index} label" for index in range(6)]
+            multiline[3] = f"Layer 3{separator}label"
+            invalid_labels[name] = multiline
+
+        control = [f"Layer {index} label" for index in range(6)]
+        control[1] = "Layer\t1 label"
+        invalid_labels["unicode-cc-control"] = control
+
+        for case, labels in invalid_labels.items():
+            with self.subTest(case=case):
+                workspace = self.make_workspace()
+                registry_path = workspace / "frontier_registry.json"
+                workflow_path = workspace / "research_workflow.md"
+                original_registry = registry_path.read_bytes()
+                original_workflow = workflow_path.read_bytes()
+                original_entries = {path.name for path in workspace.iterdir()}
+
+                result = self.run_cli(
+                    workspace,
+                    "set-layers",
+                    *self.layer_label_args(labels=labels),
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertEqual("", result.stdout)
+                self.assertTrue(result.stderr.startswith("ERROR:"), result.stderr)
+                self.assertEqual(original_registry, registry_path.read_bytes())
+                self.assertEqual(original_workflow, workflow_path.read_bytes())
+                self.assertEqual(
+                    original_entries,
+                    {path.name for path in workspace.iterdir()},
+                )
+
+    def test_set_layers_cli_is_idempotent_and_repairs_an_absent_layer_block(self):
+        workspace = self.make_v2_workspace()
+        self.add_and_start_frontier(workspace)
+        labels = [f"Canonical layer {index}" for index in range(6)]
+        args = self.layer_label_args(labels=labels)
+
+        adopted = self.run_cli(workspace, "set-layers", *args)
+
+        self.assertEqual(0, adopted.returncode, adopted.stderr)
+        self.assertEqual("Layer labels configured\n", adopted.stdout)
+        registry = self.registry(workspace)
+        self.assertEqual(3, registry["version"])
+        self.assertEqual(labels, registry["layer_labels"])
+        self.assertIsNone(registry["frontiers"][0]["layer"])
+        self.assertIsNone(registry["frontiers"][0]["parent_frontier"])
+
+        workflow_path = workspace / "research_workflow.md"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        layer_heading = "## Frontier Layer Coverage\n"
+        layer_start = "<!-- SOFA:frontier-layer-coverage:start -->"
+        layer_end = "<!-- SOFA:frontier-layer-coverage:end -->"
+        self.assertEqual(1, workflow.count(layer_start))
+        self.assertEqual(1, workflow.count(layer_end))
+        self.assertLess(
+            workflow.index("<!-- SOFA:frontier-discovery-log:end -->"),
+            workflow.index(layer_start),
+        )
+
+        heading_index = workflow.index(layer_heading)
+        end_index = workflow.index(layer_end) + len(layer_end)
+        without_layer_block = (
+            workflow[:heading_index].rstrip() + "\n\n" + workflow[end_index:].lstrip()
+        )
+        workflow_path.write_text(without_layer_block, encoding="utf-8")
+        registry_before_repair = (workspace / "frontier_registry.json").read_bytes()
+
+        repaired = self.run_cli(workspace, "set-layers", *args)
+
+        self.assertEqual(0, repaired.returncode, repaired.stderr)
+        self.assertEqual("Layer labels configured\n", repaired.stdout)
+        self.assertEqual(
+            registry_before_repair,
+            (workspace / "frontier_registry.json").read_bytes(),
+        )
+        repaired_workflow = workflow_path.read_text(encoding="utf-8")
+        self.assertEqual(1, repaired_workflow.count(layer_start))
+        self.assertEqual(1, repaired_workflow.count(layer_end))
+        self.assertIn("| F1 | none | none | none | Active | none |", repaired_workflow)
+        self.assertLess(
+            repaired_workflow.index("<!-- SOFA:frontier-discovery-log:end -->"),
+            repaired_workflow.index(layer_start),
+        )
+
+        original_registry = (workspace / "frontier_registry.json").read_bytes()
+        original_workflow = workflow_path.read_bytes()
+        original_entries = {path.name for path in workspace.iterdir()}
+        different = [f"Replacement layer {index}" for index in range(6)]
+        rejected = self.run_cli(
+            workspace,
+            "set-layers",
+            *self.layer_label_args(labels=different),
+        )
+
+        self.assertEqual(2, rejected.returncode)
+        self.assertEqual("", rejected.stdout)
+        self.assertIn("already configured", rejected.stderr)
+        self.assertEqual(original_registry, (workspace / "frontier_registry.json").read_bytes())
+        self.assertEqual(original_workflow, workflow_path.read_bytes())
+        self.assertEqual(original_entries, {path.name for path in workspace.iterdir()})
+
+    def test_set_layers_replace_preserves_bindings_and_prints_review_notice(self):
+        workspace = self.make_workspace()
+        original_labels = [f"Original layer {index}" for index in range(6)]
+        configured = self.run_cli(
+            workspace,
+            "set-layers",
+            *self.layer_label_args(labels=original_labels),
+        )
+        self.assertEqual(0, configured.returncode, configured.stderr)
+        self.add_and_start_frontier(workspace, name="Bound branch", expected_id="F1")
+        self.add_and_start_frontier(workspace, name="Unbound branch", expected_id="F2")
+
+        registry = self.registry(workspace)
+        registry["frontiers"][0]["layer"] = 1
+        self.write_registry_document(workspace, registry)
+        replacement = [f"Replacement layer {index}" for index in range(6)]
+
+        replaced = self.run_cli(
+            workspace,
+            "set-layers",
+            *self.layer_label_args(labels=replacement),
+            "--replace",
+        )
+
+        self.assertEqual(0, replaced.returncode, replaced.stderr)
+        self.assertEqual(
+            [
+                "Layer labels configured",
+                "NOTICE: Review layer binding semantics for: F1",
+            ],
+            replaced.stdout.splitlines(),
+        )
+        updated = self.registry(workspace)
+        self.assertEqual(replacement, updated["layer_labels"])
+        self.assertEqual(1, updated["frontiers"][0]["layer"])
+        self.assertIsNone(updated["frontiers"][0]["parent_frontier"])
+        self.assertIsNone(updated["frontiers"][1]["layer"])
+        self.assertIsNone(updated["frontiers"][1]["parent_frontier"])
+        workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+        self.assertIn("| 1 | Replacement layer 1 |", workflow)
+        self.assertIn("| F1 | 1 | none | none | Active | none |", workflow)
+        self.assertIn("| F2 | none | none | none | Active | none |", workflow)
+
+        repeated = self.run_cli(
+            workspace,
+            "set-layers",
+            *self.layer_label_args(labels=replacement),
+            "--replace",
+        )
+
+        self.assertEqual(0, repeated.returncode, repeated.stderr)
+        self.assertEqual("Layer labels configured\n", repeated.stdout)
+
+    def test_set_layers_rejects_one_sided_duplicate_misordered_or_missing_anchor_markers_without_writes(self):
+        layer_start = "<!-- SOFA:frontier-layer-coverage:start -->"
+        layer_end = "<!-- SOFA:frontier-layer-coverage:end -->"
+        discovery_start = "<!-- SOFA:frontier-discovery-log:start -->"
+        discovery_end = "<!-- SOFA:frontier-discovery-log:end -->"
+
+        def swap_markers(text, start, end):
+            placeholder = "<!-- temporary marker swap -->"
+            return text.replace(start, placeholder, 1).replace(end, start, 1).replace(
+                placeholder,
+                end,
+                1,
+            )
+
+        def move_layer_before_anchor(text):
+            layer_heading = "## Frontier Layer Coverage\n"
+            discovery_heading = "## Frontier Discovery Log\n"
+            block_start = text.index(layer_heading)
+            block_end = text.index(layer_end) + len(layer_end)
+            block = text[block_start:block_end]
+            without_block = text[:block_start] + text[block_end:]
+            insertion = without_block.index(discovery_heading)
+            return without_block[:insertion] + block + "\n\n" + without_block[insertion:]
+
+        mutations = {
+            "target-missing-start": lambda text: text.replace(layer_start, "", 1),
+            "target-missing-end": lambda text: text.replace(layer_end, "", 1),
+            "target-duplicate-start": lambda text: text.replace(
+                layer_start,
+                f"{layer_start}\n{layer_start}",
+                1,
+            ),
+            "target-duplicate-end": lambda text: text.replace(
+                layer_end,
+                f"{layer_end}\n{layer_end}",
+                1,
+            ),
+            "target-misordered": lambda text: swap_markers(text, layer_start, layer_end),
+            "target-before-anchor": move_layer_before_anchor,
+            "anchor-missing-start": lambda text: text.replace(discovery_start, "", 1),
+            "anchor-missing-end": lambda text: text.replace(discovery_end, "", 1),
+            "anchor-missing-both": lambda text: text.replace(discovery_start, "", 1).replace(
+                discovery_end,
+                "",
+                1,
+            ),
+            "anchor-duplicate-start": lambda text: text.replace(
+                discovery_start,
+                f"{discovery_start}\n{discovery_start}",
+                1,
+            ),
+            "anchor-duplicate-end": lambda text: text.replace(
+                discovery_end,
+                f"{discovery_end}\n{discovery_end}",
+                1,
+            ),
+            "anchor-misordered": lambda text: swap_markers(
+                text,
+                discovery_start,
+                discovery_end,
+            ),
+        }
+
+        for case, mutate in mutations.items():
+            with self.subTest(case=case):
+                workspace = self.make_workspace()
+                registry_path = workspace / "frontier_registry.json"
+                workflow_path = workspace / "research_workflow.md"
+                malformed = mutate(workflow_path.read_text(encoding="utf-8"))
+                workflow_path.write_text(malformed, encoding="utf-8")
+                original_registry = registry_path.read_bytes()
+                original_workflow = workflow_path.read_bytes()
+                original_entries = {path.name for path in workspace.iterdir()}
+
+                result = self.run_cli(
+                    workspace,
+                    "set-layers",
+                    *self.layer_label_args(),
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertEqual("", result.stdout)
+                self.assertTrue(result.stderr.startswith("ERROR:"), result.stderr)
+                self.assertEqual(original_registry, registry_path.read_bytes())
+                self.assertEqual(original_workflow, workflow_path.read_bytes())
+                self.assertEqual(
+                    original_entries,
+                    {path.name for path in workspace.iterdir()},
+                )
+
     def test_render_failure_occurs_before_any_write(self):
         workspace = self.make_workspace()
         registry_path = workspace / "frontier_registry.json"
