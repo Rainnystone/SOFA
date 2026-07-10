@@ -25,7 +25,12 @@ from capability_policy import (
     render_finance_summary,
     render_setup_recommendation_lines,
 )
-from frontier_lifecycle import make_registry
+from frontier_lifecycle import (
+    CURRENT_REGISTRY_VERSION,
+    make_registry,
+    render_frontier_layer_coverage_md,
+    validate_registry,
+)
 from workspace_contract import ArtifactSpec, artifact_contract_for_mode
 
 try:
@@ -70,18 +75,42 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
     contract = artifact_contract_for_mode(mode)
     mode = contract.mode
 
+    registry_path = os.path.join(workspace_path, "frontier_registry.json")
+    workflow_path = os.path.join(workspace_path, "research_workflow.md")
+    registry_exists = os.path.exists(registry_path)
+    workflow_exists = os.path.exists(workflow_path)
+
+    registry_document = None
+    if not registry_exists:
+        registry_document = make_registry(ticker_or_theme, mode)
+    elif not workflow_exists:
+        with open(registry_path, "r", encoding="utf-8") as handle:
+            registry_document = json.load(handle)
+        validate_registry(registry_document)
+
     # Compute the empty framing contract and its Markdown mirror once; both
     # the workflow scaffold and the machine-ledger write consume this.
     framing_contract_doc = empty_contract()
     framing_mirror = render_contract_markdown(framing_contract_doc)
     framing_block_md = _managed_block_markdown(contract, "framing-contract", framing_mirror)
 
+    layer_block_md = ""
+    if (
+        not workflow_exists
+        and registry_document["version"] == CURRENT_REGISTRY_VERSION
+    ):
+        layer_block_md = _managed_block_markdown(
+            contract,
+            "frontier-layer-coverage",
+            render_frontier_layer_coverage_md(registry_document),
+        )
+    layer_block_section = f"{layer_block_md}\n\n" if layer_block_md else ""
+
     # Create directory structure (common)
     _create_directories(workspace_path, contract.directory_specs, created, skipped_existing)
 
     # Create research_workflow.md
-    workflow_path = os.path.join(workspace_path, "research_workflow.md")
-    if not os.path.exists(workflow_path):
+    if not workflow_exists:
         with open(workflow_path, "w", encoding="utf-8") as f:
             f.write(f"""# Research Workflow: {ticker_or_theme}
 
@@ -120,7 +149,7 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
 
 {_managed_block_markdown(contract, "frontier-discovery-log")}
 
-## Current Claim Ledger (summary)
+{layer_block_section}## Current Claim Ledger (summary)
 (See evidence_ledger.md for full content)
 
 ## Synthesis Notes
@@ -233,18 +262,18 @@ python SOFA/scripts/capability_check.py --json
 
 ---
 
-## Layer 0: Terminal Demand
+## Layer 0: [Workspace label from Stage 0]
 (待 Stage 0 Demand Decomposition + Stage 2 Mapping Loop 填充)
 
-## Layer 1: System / Platform
+## Layer 1: [Workspace label from Stage 0]
 
-## Layer 2: Component / Module
+## Layer 2: [Workspace label from Stage 0]
 
-## Layer 3: Material / Process
+## Layer 3: [Workspace label from Stage 0]
 
-## Layer 4: Raw Material / Equipment
+## Layer 4: [Workspace label from Stage 0]
 
-## Layer 5: Geography / Regulation
+## Layer 5: [Workspace label from Stage 0]
 
 ---
 
@@ -283,12 +312,10 @@ python SOFA/scripts/capability_check.py --json
     else:
         skipped_existing.append("state.json")
 
-    # Create frontier_registry.json for v4 frontier lifecycle state.
-    registry_path = os.path.join(workspace_path, "frontier_registry.json")
-    if not os.path.exists(registry_path):
-        registry = make_registry(ticker_or_theme, mode)
+    # Create frontier_registry.json for registry schema v3 state.
+    if not registry_exists:
         with open(registry_path, "w", encoding="utf-8") as f:
-            json.dump(registry, f, indent=2, ensure_ascii=False)
+            json.dump(registry_document, f, indent=2, ensure_ascii=False)
         created.append("frontier_registry.json")
     else:
         skipped_existing.append("frontier_registry.json")
