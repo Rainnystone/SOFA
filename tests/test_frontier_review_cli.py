@@ -114,6 +114,27 @@ class TestFrontierReviewCli(unittest.TestCase):
     def test_v2_ordinary_mutations_preserve_version_shape_and_missing_layer_block(self):
         workspace = self.make_v2_workspace()
 
+        def managed_block_interior(workflow, block):
+            start_marker = f"<!-- SOFA:{block}:start -->"
+            end_marker = f"<!-- SOFA:{block}:end -->"
+            self.assertEqual(1, workflow.count(start_marker))
+            self.assertEqual(1, workflow.count(end_marker))
+            _, remainder = workflow.split(start_marker, 1)
+            interior, _ = remainder.split(end_marker, 1)
+            return interior.strip()
+
+        def replace_managed_block_interior(workflow, block, replacement):
+            start_marker = f"<!-- SOFA:{block}:start -->"
+            end_marker = f"<!-- SOFA:{block}:end -->"
+            self.assertEqual(1, workflow.count(start_marker))
+            self.assertEqual(1, workflow.count(end_marker))
+            prefix, remainder = workflow.split(start_marker, 1)
+            _, suffix = remainder.split(end_marker, 1)
+            return (
+                f"{prefix}{start_marker}\n{replacement}\n"
+                f"{end_marker}{suffix}"
+            )
+
         def assert_v2_contract():
             registry = self.registry(workspace)
             self.assertEqual(2, registry["version"])
@@ -142,6 +163,32 @@ class TestFrontierReviewCli(unittest.TestCase):
         self.assertEqual(0, start.returncode, start.stderr)
         assert_v2_contract()
 
+        workflow_path = workspace / "research_workflow.md"
+        review_sentinel = "STALE REVIEW BLOCK CONTENT"
+        discovery_sentinel = "STALE DISCOVERY BLOCK CONTENT"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        workflow = replace_managed_block_interior(
+            workflow,
+            "frontier-review-log",
+            review_sentinel,
+        )
+        workflow = replace_managed_block_interior(
+            workflow,
+            "frontier-discovery-log",
+            discovery_sentinel,
+        )
+        workflow_path.write_text(workflow, encoding="utf-8")
+
+        seeded_workflow = workflow_path.read_text(encoding="utf-8")
+        self.assertEqual(
+            review_sentinel,
+            managed_block_interior(seeded_workflow, "frontier-review-log"),
+        )
+        self.assertEqual(
+            discovery_sentinel,
+            managed_block_interior(seeded_workflow, "frontier-discovery-log"),
+        )
+
         self.write_loops(workspace)
         record = self.run_cli(
             workspace,
@@ -154,10 +201,19 @@ class TestFrontierReviewCli(unittest.TestCase):
         )
         self.assertEqual(0, record.returncode, record.stderr)
         workflow = assert_v2_contract()
-        self.assertIn("<!-- SOFA:frontier-review-log:start -->", workflow)
-        self.assertIn("## Frontier Review: F1 @ loop 3", workflow)
-        self.assertIn("<!-- SOFA:frontier-discovery-log:start -->", workflow)
-        self.assertIn("_No discovery actions recorded._", workflow)
+        review_interior = managed_block_interior(workflow, "frontier-review-log")
+        discovery_interior = managed_block_interior(workflow, "frontier-discovery-log")
+        expected_review = "## Frontier Review: F1 @ loop 3"
+        expected_discovery = "_No discovery actions recorded._"
+
+        self.assertNotIn(review_sentinel, workflow)
+        self.assertNotIn(discovery_sentinel, workflow)
+        self.assertEqual(1, workflow.count(expected_review))
+        self.assertEqual(1, review_interior.count(expected_review))
+        self.assertNotIn(expected_review, discovery_interior)
+        self.assertEqual(1, workflow.count(expected_discovery))
+        self.assertEqual(1, discovery_interior.count(expected_discovery))
+        self.assertNotIn(expected_discovery, review_interior)
 
         reactivate = self.run_cli(workspace, "reactivate", "F1")
         self.assertEqual(0, reactivate.returncode, reactivate.stderr)
