@@ -118,6 +118,549 @@ class TestFrontierReviewCli(unittest.TestCase):
             args.extend(["--label", str(index), canonical[position]])
         return args
 
+    def workspace_snapshot(self, workspace):
+        return {
+            "registry": (workspace / "frontier_registry.json").read_bytes(),
+            "workflow": (workspace / "research_workflow.md").read_bytes(),
+            "entries": tuple(sorted(path.name for path in workspace.iterdir())),
+        }
+
+    def assert_workspace_snapshot(self, workspace, expected):
+        self.assertEqual(
+            expected["registry"],
+            (workspace / "frontier_registry.json").read_bytes(),
+        )
+        self.assertEqual(
+            expected["workflow"],
+            (workspace / "research_workflow.md").read_bytes(),
+        )
+        self.assertEqual(
+            expected["entries"],
+            tuple(sorted(path.name for path in workspace.iterdir())),
+        )
+
+    def configure_layers(self, workspace, labels=None):
+        result = self.run_cli(
+            workspace,
+            "set-layers",
+            *self.layer_label_args(labels=labels),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return result
+
+    def managed_block_interior(self, workspace, block):
+        workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+        start_marker = f"<!-- SOFA:{block}:start -->"
+        end_marker = f"<!-- SOFA:{block}:end -->"
+        self.assertEqual(1, workflow.count(start_marker))
+        self.assertEqual(1, workflow.count(end_marker))
+        _, remainder = workflow.split(start_marker, 1)
+        interior, _ = remainder.split(end_marker, 1)
+        return interior.strip()
+
+    def test_add_matrix_covers_v2_v3_empty_and_v3_configured_layer_flags(self):
+        v2_plain = self.make_v2_workspace()
+        original_v2_workflow = (v2_plain / "research_workflow.md").read_bytes()
+        added_v2 = self.run_cli(
+            v2_plain,
+            "add",
+            "--name",
+            "Legacy unbound branch",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+        )
+        self.assertEqual(0, added_v2.returncode, added_v2.stderr)
+        self.assertEqual("Added F1 (New): Legacy unbound branch\n", added_v2.stdout)
+        legacy_registry = self.registry(v2_plain)
+        self.assertEqual(2, legacy_registry["version"])
+        self.assertNotIn("layer_labels", legacy_registry)
+        self.assertNotIn("layer", legacy_registry["frontiers"][0])
+        self.assertNotIn("parent_frontier", legacy_registry["frontiers"][0])
+        self.assertEqual(
+            original_v2_workflow,
+            (v2_plain / "research_workflow.md").read_bytes(),
+        )
+
+        for case, flags in {
+            "layer": ("--layer", "2"),
+            "layer-and-parent": ("--layer", "2", "--parent", "F1"),
+            "parent-without-layer": ("--parent", "F1"),
+        }.items():
+            with self.subTest(registry="v2", case=case):
+                workspace = self.make_v2_workspace()
+                before = self.workspace_snapshot(workspace)
+                result = self.run_cli(
+                    workspace,
+                    "add",
+                    "--name",
+                    "Rejected legacy binding",
+                    "--source",
+                    "initial",
+                    "--at-loop",
+                    "1",
+                    *flags,
+                )
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertEqual("", result.stdout)
+                self.assertNotIn("Added ", result.stdout)
+                self.assert_workspace_snapshot(workspace, before)
+
+        v3_empty_plain = self.make_workspace()
+        added_empty = self.run_cli(
+            v3_empty_plain,
+            "add",
+            "--name",
+            "Empty-label unbound branch",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+        )
+        self.assertEqual(0, added_empty.returncode, added_empty.stderr)
+        empty_frontier = self.registry(v3_empty_plain)["frontiers"][0]
+        self.assertIsNone(empty_frontier["layer"])
+        self.assertIsNone(empty_frontier["parent_frontier"])
+
+        for case, flags in {
+            "layer": ("--layer", "0"),
+            "layer-and-parent": ("--layer", "2", "--parent", "F1"),
+            "parent-without-layer": ("--parent", "F1"),
+        }.items():
+            with self.subTest(registry="v3-empty", case=case):
+                workspace = self.make_workspace()
+                before = self.workspace_snapshot(workspace)
+                result = self.run_cli(
+                    workspace,
+                    "add",
+                    "--name",
+                    "Rejected empty-label binding",
+                    "--source",
+                    "initial",
+                    "--at-loop",
+                    "1",
+                    *flags,
+                )
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertEqual("", result.stdout)
+                self.assertNotIn("Added ", result.stdout)
+                self.assert_workspace_snapshot(workspace, before)
+
+        configured_plain = self.make_workspace()
+        self.configure_layers(configured_plain)
+        added_configured_unbound = self.run_cli(
+            configured_plain,
+            "add",
+            "--name",
+            "Configured unbound branch",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+        )
+        self.assertEqual(
+            0,
+            added_configured_unbound.returncode,
+            added_configured_unbound.stderr,
+        )
+        configured_frontier = self.registry(configured_plain)["frontiers"][0]
+        self.assertIsNone(configured_frontier["layer"])
+        self.assertIsNone(configured_frontier["parent_frontier"])
+
+        configured_bound = self.make_workspace()
+        self.configure_layers(configured_bound)
+        root = self.run_cli(
+            configured_bound,
+            "add",
+            "--name",
+            "Layer root",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "0",
+        )
+        self.assertEqual(0, root.returncode, root.stderr)
+        child = self.run_cli(
+            configured_bound,
+            "add",
+            "--name",
+            "Layer child",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "3",
+            "--parent",
+            "F1",
+        )
+        self.assertEqual(0, child.returncode, child.stderr)
+        by_id = {
+            frontier["id"]: frontier
+            for frontier in self.registry(configured_bound)["frontiers"]
+        }
+        self.assertEqual((0, None), (by_id["F1"]["layer"], by_id["F1"]["parent_frontier"]))
+        self.assertEqual((3, "F1"), (by_id["F2"]["layer"], by_id["F2"]["parent_frontier"]))
+
+        before_invalid_relation = self.workspace_snapshot(configured_bound)
+        invalid_relation = self.run_cli(
+            configured_bound,
+            "add",
+            "--name",
+            "Invalid structural child",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "0",
+            "--parent",
+            "F2",
+        )
+        self.assertEqual(2, invalid_relation.returncode, invalid_relation.stderr)
+        self.assertEqual("", invalid_relation.stdout)
+        self.assertNotIn("Added ", invalid_relation.stdout)
+        self.assert_workspace_snapshot(configured_bound, before_invalid_relation)
+
+    def test_add_parent_and_source_frontier_are_validated_independently(self):
+        workspace = self.make_workspace()
+        self.configure_layers(workspace)
+
+        setup_cases = [
+            (
+                "Structural root",
+                "initial",
+                None,
+                "0",
+                None,
+                "F1",
+            ),
+            (
+                "Discovery provenance",
+                "initial",
+                None,
+                "1",
+                "F1",
+                "F2",
+            ),
+            (
+                "Different structural and discovery links",
+                "discovery",
+                "F2",
+                "4",
+                "F1",
+                "F3",
+            ),
+            (
+                "Equal structural and discovery links",
+                "discovery",
+                "F1",
+                "2",
+                "F1",
+                "F4",
+            ),
+            (
+                "Discovery link without structural parent",
+                "discovery",
+                "F1",
+                "5",
+                None,
+                "F5",
+            ),
+        ]
+        for name, source, source_frontier, layer, parent, expected_id in setup_cases:
+            args = [
+                "add",
+                "--name",
+                name,
+                "--source",
+                source,
+                "--at-loop",
+                "1",
+                "--layer",
+                layer,
+            ]
+            if source_frontier is not None:
+                args.extend(["--source-frontier", source_frontier])
+            if parent is not None:
+                args.extend(["--parent", parent])
+            result = self.run_cli(workspace, *args)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(f"Added {expected_id}", result.stdout)
+
+        by_id = {
+            frontier["id"]: frontier
+            for frontier in self.registry(workspace)["frontiers"]
+        }
+        self.assertEqual("F2", by_id["F3"]["source_frontier"])
+        self.assertEqual("F1", by_id["F3"]["parent_frontier"])
+        self.assertEqual("F1", by_id["F4"]["source_frontier"])
+        self.assertEqual("F1", by_id["F4"]["parent_frontier"])
+        self.assertEqual("F1", by_id["F5"]["source_frontier"])
+        self.assertIsNone(by_id["F5"]["parent_frontier"])
+
+        invalid_cases = {
+            "invalid-source-valid-parent": (
+                "--source",
+                "discovery",
+                "--source-frontier",
+                "F99",
+                "--layer",
+                "3",
+                "--parent",
+                "F1",
+            ),
+            "valid-source-invalid-parent": (
+                "--source",
+                "discovery",
+                "--source-frontier",
+                "F1",
+                "--layer",
+                "3",
+                "--parent",
+                "F99",
+            ),
+            "user-source-rejects-provenance": (
+                "--source",
+                "user",
+                "--source-frontier",
+                "F1",
+                "--layer",
+                "3",
+                "--parent",
+                "F1",
+            ),
+        }
+        for case, flags in invalid_cases.items():
+            with self.subTest(case=case):
+                before = self.workspace_snapshot(workspace)
+                result = self.run_cli(
+                    workspace,
+                    "add",
+                    "--name",
+                    "Rejected independent relation",
+                    "--at-loop",
+                    "1",
+                    *flags,
+                )
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertEqual("", result.stdout)
+                self.assert_workspace_snapshot(workspace, before)
+
+        user_workspace = self.make_workspace()
+        self.configure_layers(user_workspace)
+        user_root = self.run_cli(
+            user_workspace,
+            "add",
+            "--name",
+            "User structural root",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "0",
+        )
+        self.assertEqual(0, user_root.returncode, user_root.stderr)
+        module = load_review_module()
+        original_validate = module.validate_registry
+        with mock.patch.object(
+            module,
+            "validate_registry",
+            wraps=original_validate,
+        ) as validate_registry:
+            updated = module.create_frontier_for_cli(
+                self.registry(user_workspace),
+                name="Validated user child",
+                proposed_at_loop=1,
+                source="user",
+                source_frontier=None,
+                layer=3,
+                parent_frontier="F1",
+            )
+
+        self.assertEqual(1, validate_registry.call_count)
+        validated_registry = validate_registry.call_args.args[0]
+        self.assertIs(updated, validated_registry)
+        user_child = updated["frontiers"][-1]
+        self.assertEqual("user", user_child["source"])
+        self.assertIsNone(user_child["source_frontier"])
+        self.assertEqual(3, user_child["layer"])
+        self.assertEqual("F1", user_child["parent_frontier"])
+
+    def test_record_add_keeps_four_part_grammar_and_v2_shape_and_stdout(self):
+        workspace = self.make_v2_workspace()
+        self.add_and_start_frontier(workspace)
+        self.write_loops(workspace)
+
+        recorded = self.run_cli(
+            workspace,
+            "record",
+            "F1",
+            "--decision",
+            "Continued",
+            "--rationale",
+            "Evidence remains material",
+            "--add",
+            "Legacy discovery::discovery::F1::review branch",
+        )
+
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        self.assertEqual("Recorded F1 -> Continued\n", recorded.stdout)
+        registry = self.registry(workspace)
+        self.assertEqual(2, registry["version"])
+        self.assertNotIn("layer_labels", registry)
+        self.assertEqual(["F1", "F2"], [row["id"] for row in registry["frontiers"]])
+        self.assertEqual("discovery", registry["frontiers"][1]["source"])
+        self.assertEqual("F1", registry["frontiers"][1]["source_frontier"])
+        for frontier in registry["frontiers"]:
+            self.assertNotIn("layer", frontier)
+            self.assertNotIn("parent_frontier", frontier)
+        self.assertNotIn(
+            "SOFA:frontier-layer-coverage",
+            (workspace / "research_workflow.md").read_text(encoding="utf-8"),
+        )
+
+        invalid_adds = {
+            "five-parts": "Candidate::discovery::F1::reason::layer-3",
+            "six-parts": "Candidate::discovery::F1::reason::3::F1",
+        }
+        for case, raw_add in invalid_adds.items():
+            with self.subTest(case=case):
+                invalid_workspace = self.make_v2_workspace()
+                self.add_and_start_frontier(invalid_workspace)
+                self.write_loops(invalid_workspace)
+                before = self.workspace_snapshot(invalid_workspace)
+
+                rejected = self.run_cli(
+                    invalid_workspace,
+                    "record",
+                    "F1",
+                    "--decision",
+                    "Continued",
+                    "--rationale",
+                    "Evidence remains material",
+                    "--add",
+                    raw_add,
+                )
+
+                self.assertEqual(2, rejected.returncode, rejected.stderr)
+                self.assertEqual("", rejected.stdout)
+                self.assertIn("--add requires NAME::source::source_frontier::reason", rejected.stderr)
+                self.assert_workspace_snapshot(invalid_workspace, before)
+
+    def test_record_add_v3_creates_null_layer_facts_and_renders_unbound_snapshot(self):
+        workspace = self.make_workspace()
+        self.configure_layers(workspace)
+        root = self.run_cli(
+            workspace,
+            "add",
+            "--name",
+            "Reviewed root",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "0",
+        )
+        self.assertEqual(0, root.returncode, root.stderr)
+        started = self.run_cli(workspace, "start", "F1")
+        self.assertEqual(0, started.returncode, started.stderr)
+        self.write_loops(workspace, name="Reviewed root")
+
+        recorded = self.run_cli(
+            workspace,
+            "record",
+            "F1",
+            "--decision",
+            "Continued",
+            "--rationale",
+            "Evidence remains material",
+            "--add",
+            "Unbound review branch::discovery::F1::new evidence branch",
+        )
+
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        self.assertEqual("Recorded F1 -> Continued", recorded.stdout.splitlines()[0])
+        registry = self.registry(workspace)
+        self.assertEqual(3, registry["version"])
+        added = registry["frontiers"][1]
+        self.assertEqual("F2", added["id"])
+        self.assertEqual("discovery", added["source"])
+        self.assertEqual("F1", added["source_frontier"])
+        self.assertIsNone(added["layer"])
+        self.assertIsNone(added["parent_frontier"])
+
+        layer_snapshot = self.managed_block_interior(
+            workspace,
+            "frontier-layer-coverage",
+        )
+        self.assertIn("| F1 | 0 | none | none | Continued | none |", layer_snapshot)
+        self.assertIn("| F2 | none | none | F1 | New | none |", layer_snapshot)
+        self.assertIn(
+            "FRONTIER_LAYER_UNBOUND: Frontiers F2 are not bound to a layer.",
+            layer_snapshot,
+        )
+
+    def test_record_add_v3_prints_new_unbound_ids_in_portfolio_action_order(self):
+        workspace = self.make_workspace()
+        self.configure_layers(workspace)
+        root = self.run_cli(
+            workspace,
+            "add",
+            "--name",
+            "Reviewed root",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "0",
+        )
+        self.assertEqual(0, root.returncode, root.stderr)
+        started = self.run_cli(workspace, "start", "F1")
+        self.assertEqual(0, started.returncode, started.stderr)
+        self.write_loops(workspace, name="Reviewed root")
+
+        recorded = self.run_cli(
+            workspace,
+            "record",
+            "F1",
+            "--decision",
+            "Continued",
+            "--rationale",
+            "Evidence remains material",
+            "--add",
+            "First branch::discovery::F1::first in portfolio order",
+            "--add",
+            "Second branch::serendipity::F1::second in portfolio order",
+        )
+
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        self.assertEqual(
+            [
+                "Recorded F1 -> Continued",
+                "Added F2 (unbound)",
+                "Added F3 (unbound)",
+            ],
+            recorded.stdout.splitlines(),
+        )
+        registry = self.registry(workspace)
+        actions = registry["frontiers"][0]["review_decisions"][0][
+            "portfolio_actions"
+        ]
+        self.assertEqual(
+            ["F2", "F3"],
+            [action["frontier"] for action in actions if action["action"] == "add"],
+        )
+        for frontier in registry["frontiers"][1:]:
+            self.assertIsNone(frontier["layer"])
+            self.assertIsNone(frontier["parent_frontier"])
+
     def test_set_layers_cli_requires_indexes_zero_through_five_exactly_once(self):
         workspace = self.make_workspace()
         result = self.run_cli(

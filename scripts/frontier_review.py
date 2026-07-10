@@ -85,6 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["initial", "discovery", "serendipity", "user"],
     )
     add_parser.add_argument("--source-frontier")
+    add_parser.add_argument("--layer", type=_layer_index)
+    add_parser.add_argument("--parent", dest="parent_frontier")
     add_parser.add_argument("--at-loop", required=True, type=_positive_int)
     add_parser.set_defaults(handler=command_add)
 
@@ -154,6 +156,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def command_add(args: argparse.Namespace) -> int:
+    if args.parent_frontier is not None and args.layer is None:
+        raise LifecycleError("--parent requires --layer")
     workspace = workspace_path(args)
     registry, original_registry_bytes = read_registry_snapshot(workspace)
     updated = create_frontier_for_cli(
@@ -162,6 +166,8 @@ def command_add(args: argparse.Namespace) -> int:
         proposed_at_loop=args.at_loop,
         source=args.source,
         source_frontier=args.source_frontier,
+        layer=args.layer,
+        parent_frontier=args.parent_frontier,
     )
     added = updated["frontiers"][-1]
     persist_mutation(
@@ -305,6 +311,10 @@ def command_record(args: argparse.Namespace) -> int:
         refresh_review_logs=True,
     )
     print(f"Recorded {args.frontier_id} -> {args.decision}")
+    if updated["version"] == CURRENT_REGISTRY_VERSION:
+        for action in portfolio_actions:
+            if action["action"] == "add":
+                print(f"Added {action['frontier']} (unbound)")
     return 0
 
 
@@ -379,6 +389,8 @@ def create_frontier_for_cli(
     proposed_at_loop: int,
     source: str,
     source_frontier: str | None,
+    layer: int | None = None,
+    parent_frontier: str | None = None,
 ) -> dict[str, Any]:
     if source == "user":
         if source_frontier is not None:
@@ -388,10 +400,13 @@ def create_frontier_for_cli(
             name=name,
             proposed_at_loop=proposed_at_loop,
             source="initial",
+            layer=layer,
+            parent_frontier=parent_frontier,
             initial_status="New",
             ts=utc_now(),
         )
         updated["frontiers"][-1]["source"] = "user"
+        validate_registry(updated)
         return updated
 
     return create_frontier(
@@ -400,6 +415,8 @@ def create_frontier_for_cli(
         proposed_at_loop=proposed_at_loop,
         source=source,
         source_frontier=source_frontier,
+        layer=layer,
+        parent_frontier=parent_frontier,
         initial_status="New",
         ts=utc_now(),
     )
