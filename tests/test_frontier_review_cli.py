@@ -2561,6 +2561,123 @@ class TestFrontierReviewCli(unittest.TestCase):
             result.stdout.splitlines(),
         )
 
+    def test_status_preserves_original_frontier_line_then_prints_layer_facts_and_snapshot(self):
+        workspace = self.make_workspace()
+        labels = [
+            "Demand layer",
+            "System layer",
+            "Component layer",
+            "Materials layer",
+            "Equipment layer",
+            "Regulatory layer",
+        ]
+        self.configure_layers(workspace, labels=labels)
+        additions = [
+            (
+                "Root frontier",
+                ["--source", "initial", "--layer", "0"],
+            ),
+            (
+                "Discovery child",
+                [
+                    "--source",
+                    "discovery",
+                    "--source-frontier",
+                    "F1",
+                    "--layer",
+                    "2",
+                    "--parent",
+                    "F1",
+                ],
+            ),
+            (
+                "Unbound frontier",
+                ["--source", "initial"],
+            ),
+        ]
+        for name, extra_args in additions:
+            result = self.run_cli(
+                workspace,
+                "add",
+                "--name",
+                name,
+                "--at-loop",
+                "1",
+                *extra_args,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+
+        status = self.run_cli(workspace, "status")
+
+        self.assertEqual(0, status.returncode, status.stderr)
+        registry = self.registry(workspace)
+        expected_snapshot = load_review_module().render_frontier_layer_coverage_md(
+            registry
+        ).rstrip("\n")
+        self.assertEqual(
+            [
+                "F1 status=New derived_loops=0 review_count=0 name=Root frontier",
+                "  layer=0 label=Demand layer parent_frontier=none "
+                "source_frontier=none",
+                "F2 status=New derived_loops=0 review_count=0 name=Discovery child",
+                "  layer=2 label=Component layer parent_frontier=F1 "
+                "source_frontier=F1",
+                "F3 status=New derived_loops=0 review_count=0 name=Unbound frontier",
+                "  layer=unbound label=none parent_frontier=none "
+                "source_frontier=none",
+                *expected_snapshot.splitlines(),
+            ],
+            status.stdout.splitlines(),
+        )
+
+        empty_workspace = self.make_workspace()
+        empty_status = self.run_cli(empty_workspace, "status")
+
+        self.assertEqual(0, empty_status.returncode, empty_status.stderr)
+        empty_snapshot = load_review_module().render_frontier_layer_coverage_md(
+            self.registry(empty_workspace)
+        ).rstrip("\n")
+        self.assertEqual(empty_snapshot.splitlines(), empty_status.stdout.splitlines())
+
+    def test_status_v2_prints_original_lines_then_shared_advisory_without_details_or_snapshot(self):
+        workspace = self.make_v2_workspace()
+        for name in ["Legacy root", "Legacy branch"]:
+            added = self.run_cli(
+                workspace,
+                "add",
+                "--name",
+                name,
+                "--source",
+                "initial",
+                "--at-loop",
+                "1",
+            )
+            self.assertEqual(0, added.returncode, added.stderr)
+
+        status = self.run_cli(workspace, "status")
+
+        self.assertEqual(0, status.returncode, status.stderr)
+        expected_advisory = (
+            "[ADVISORY] LAYER_LABELS_UNCONFIGURED: Frontier layer labels are "
+            "unavailable; run set-layers."
+        )
+        self.assertEqual(
+            [
+                "F1 status=New derived_loops=0 review_count=0 name=Legacy root",
+                "F2 status=New derived_loops=0 review_count=0 name=Legacy branch",
+                expected_advisory,
+            ],
+            status.stdout.splitlines(),
+        )
+        self.assertNotIn("  layer=", status.stdout)
+        self.assertNotIn("| Layer | Label |", status.stdout)
+
+        empty_workspace = self.make_v2_workspace()
+        empty_status = self.run_cli(empty_workspace, "status")
+
+        self.assertEqual(0, empty_status.returncode, empty_status.stderr)
+        self.assertEqual([expected_advisory], empty_status.stdout.splitlines())
+
     def test_check_review_preserves_zero_one_two_exit_contract(self):
         no_due_workspace = self.make_workspace()
         no_due = self.run_cli(no_due_workspace, "check-review")

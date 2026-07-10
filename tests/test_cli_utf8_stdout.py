@@ -257,7 +257,7 @@ class TestCliStdoutBehaviorUnderLegacyEncoding(unittest.TestCase):
         self.assertIn("错误", stderr)
         self.assertNotIn("UnicodeEncodeError", stderr)
 
-    def test_layer_cli_supports_workspace_paths_with_spaces_and_cjk(self):
+    def test_set_layers_and_status_emit_utf8_bytes_for_cjk_labels_under_legacy_encoding(self):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         workspace = Path(temp_dir.name) / "含 空格 的工作区"
@@ -307,6 +307,55 @@ class TestCliStdoutBehaviorUnderLegacyEncoding(unittest.TestCase):
             (workspace / "frontier_registry.json").read_text(encoding="utf-8")
         )
         self.assertEqual(labels, registry["layer_labels"])
+
+        added = _run_script(
+            SCRIPTS / "frontier_review.py",
+            str(workspace),
+            "add",
+            "--name",
+            "CJK label frontier",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "0",
+            cwd=ROOT,
+        )
+        self.assertEqual(
+            0,
+            added.returncode,
+            added.stderr.decode("utf-8", errors="replace"),
+        )
+
+        status = _run_script(
+            SCRIPTS / "frontier_review.py",
+            str(workspace),
+            "status",
+            cwd=ROOT,
+        )
+
+        status_stdout = status.stdout.decode("utf-8")
+        status_stderr = status.stderr.decode("utf-8", errors="replace")
+        self.assertEqual(0, status.returncode, status_stderr)
+        self.assertIn(labels[0], status_stdout)
+        self.assertNotIn("\ufffd", status_stdout)
+        self.assertNotIn("UnicodeEncodeError", status_stderr)
+        lead_line = (
+            "F1 status=New derived_loops=0 review_count=0 "
+            "name=CJK label frontier"
+        )
+        detail_line = (
+            f"  layer=0 label={labels[0]} parent_frontier=none "
+            "source_frontier=none"
+        )
+        status_lines = status_stdout.splitlines()
+        self.assertIn(lead_line, status_lines)
+        self.assertIn(detail_line, status_lines)
+        self.assertEqual(
+            status_lines.index(lead_line) + 1,
+            status_lines.index(detail_line),
+        )
 
 
 if __name__ == "__main__":

@@ -388,6 +388,28 @@ def command_status(args: argparse.Namespace) -> int:
             f"review_count={frontier.get('review_count', 0)} "
             f"name={frontier.get('name')}"
         )
+        if registry["version"] == CURRENT_REGISTRY_VERSION:
+            layer = frontier["layer"]
+            layer_text = "unbound" if layer is None else str(layer)
+            label = "none" if layer is None else registry["layer_labels"][layer]
+            parent = frontier["parent_frontier"]
+            parent_frontier = "none" if parent is None else parent
+            source = frontier.get("source_frontier")
+            source_frontier = "none" if source is None else source
+            print(
+                f"  layer={layer_text} label={label} "
+                f"parent_frontier={parent_frontier} "
+                f"source_frontier={source_frontier}"
+            )
+    if registry["version"] == CURRENT_REGISTRY_VERSION:
+        print(render_frontier_layer_coverage_md(registry).rstrip("\n"))
+    else:
+        coverage = derive_frontier_layer_coverage(registry)
+        for line in format_frontier_layer_advisories(
+            coverage,
+            prefix="[ADVISORY] ",
+        ):
+            print(line)
     return 0
 
 
