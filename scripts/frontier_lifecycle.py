@@ -138,7 +138,7 @@ def _validate_v3_registry(registry: dict[str, Any]) -> None:
     if not isinstance(frontiers, list):
         raise LifecycleError("frontiers must be a list")
 
-    seen_ids: set[str] = set()
+    frontier_by_id: dict[str, dict[str, Any]] = {}
     for index, frontier in enumerate(frontiers):
         if not isinstance(frontier, dict):
             raise LifecycleError(f"frontier {index} must be an object")
@@ -146,9 +146,9 @@ def _validate_v3_registry(registry: dict[str, Any]) -> None:
         frontier_id = frontier.get("id")
         if not isinstance(frontier_id, str) or FRONTIER_ID_RE.fullmatch(frontier_id) is None:
             raise LifecycleError(f"frontier {index}.id must be a stable frontier ID")
-        if frontier_id in seen_ids:
+        if frontier_id in frontier_by_id:
             raise LifecycleError(f"duplicate frontier id: {frontier_id}")
-        seen_ids.add(frontier_id)
+        frontier_by_id[frontier_id] = frontier
 
         if not isinstance(frontier.get("name"), str):
             raise LifecycleError(f"frontier {frontier_id}.name must be a string")
@@ -195,6 +195,10 @@ def _validate_v3_registry(registry: dict[str, Any]) -> None:
                 f"frontier {frontier_id} must remain unbound while layer_labels is empty"
             )
 
+    for frontier_id, frontier in frontier_by_id.items():
+        _validate_source_provenance(frontier, frontier_id, frontier_by_id)
+        _validate_parent_relationship(frontier, frontier_id, frontier_by_id)
+
 
 def _validate_persisted_layer_labels(layer_labels: list[Any]) -> None:
     if not layer_labels:
@@ -226,6 +230,60 @@ def _validate_optional_frontier_id(value: Any, field: str) -> None:
         raise LifecycleError(f"{field} must be null or a stable frontier ID")
 
 
+def _validate_source_provenance(
+    frontier: dict[str, Any],
+    frontier_id: str,
+    frontier_by_id: dict[str, dict[str, Any]],
+) -> None:
+    source = frontier["source"]
+    source_frontier = frontier.get("source_frontier")
+    if source in {"initial", "user"}:
+        if source_frontier is not None:
+            raise LifecycleError(
+                f"frontier {frontier_id} source={source} requires source_frontier=null"
+            )
+        return
+    if source_frontier is None:
+        raise LifecycleError(
+            f"frontier {frontier_id} source={source} requires source_frontier"
+        )
+    if source_frontier == frontier_id or source_frontier not in frontier_by_id:
+        raise LifecycleError(
+            f"frontier {frontier_id} has invalid source_frontier: {source_frontier}"
+        )
+
+
+def _validate_parent_relationship(
+    frontier: dict[str, Any],
+    frontier_id: str,
+    frontier_by_id: dict[str, dict[str, Any]],
+) -> None:
+    parent_frontier = frontier["parent_frontier"]
+    if parent_frontier is None:
+        return
+
+    parent = frontier_by_id.get(parent_frontier)
+    if parent is None:
+        raise LifecycleError(
+            f"frontier {frontier_id} has invalid parent_frontier: {parent_frontier}"
+        )
+
+    child_layer = frontier["layer"]
+    if child_layer is None:
+        raise LifecycleError(
+            f"frontier {frontier_id} with parent_frontier requires layer"
+        )
+    parent_layer = parent["layer"]
+    if parent_layer is None:
+        raise LifecycleError(
+            f"frontier {frontier_id} parent {parent_frontier} requires layer"
+        )
+    if parent_layer >= child_layer:
+        raise LifecycleError(
+            f"frontier {frontier_id} parent {parent_frontier} must have a shallower layer"
+        )
+
+
 def _validate_status_category(frontier: dict[str, Any], frontier_id: str) -> None:
     status = frontier["status"]
     retire_category = frontier.get("retire_category")
@@ -251,6 +309,8 @@ def create_frontier(
     ts: str | None = None,
 ) -> dict[str, Any]:
     """Return a registry copy with one new frontier record appended."""
+    validate_registry(registry)
+
     if source not in FRONTIER_SOURCES:
         raise InvalidTransition(f"unsupported frontier source: {source}")
     if initial_status not in {"New", "Active"}:
@@ -293,6 +353,7 @@ def create_frontier(
         frontier_record["parent_frontier"] = None
 
     updated.setdefault("frontiers", []).append(frontier_record)
+    updated = validate_registry(updated)
 
     violations = enforce_portfolio_limits(updated)
     if violations:

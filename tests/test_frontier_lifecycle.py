@@ -413,26 +413,187 @@ class TestFrontierLifecycle(unittest.TestCase):
                 self.assertIs(retired, self.module.validate_registry(retired))
                 self.assertEqual(original, retired)
 
-        deferred_relations = self.v3_registry()
-        deferred_relations["layer_labels"] = canonical_labels
-        frontier = deferred_relations["frontiers"][0]
-        frontier["source"] = "discovery"
-        frontier["source_frontier"] = "F999"
-        frontier["layer"] = 0
-        frontier["parent_frontier"] = "F999"
-        original = copy.deepcopy(deferred_relations)
-        self.assertIs(deferred_relations, self.module.validate_registry(deferred_relations))
-        self.assertEqual(original, deferred_relations)
+    def test_validate_v3_enforces_source_frontier_provenance_independently(self):
+        canonical_labels = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
 
-        deferred_self_relations = self.v3_registry()
-        deferred_self_relations["layer_labels"] = canonical_labels
-        frontier = deferred_self_relations["frontiers"][0]
-        frontier["source_frontier"] = "F1"
-        frontier["layer"] = 0
-        frontier["parent_frontier"] = "F1"
-        original = copy.deepcopy(deferred_self_relations)
-        self.assertIs(deferred_self_relations, self.module.validate_registry(deferred_self_relations))
-        self.assertEqual(original, deferred_self_relations)
+        def registry_with_frontiers(count):
+            registry = self.module.make_registry("MXL", "ticker")
+            for index in range(count):
+                registry = self.module.create_frontier(
+                    registry,
+                    name=f"Frontier {index + 1}",
+                    proposed_at_loop=index + 1,
+                    source="initial",
+                )
+            return registry
+
+        def validate_success(case, registry):
+            original = copy.deepcopy(registry)
+            with self.subTest(case=case):
+                self.assertIs(registry, self.module.validate_registry(registry))
+                self.assertEqual(original, registry)
+
+        def reject(case, registry):
+            original = copy.deepcopy(registry)
+            with self.subTest(case=case):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(registry)
+                self.assertEqual(original, registry)
+
+        for source in ("initial", "user"):
+            for source_frontier_state in ("missing", "null"):
+                registry = registry_with_frontiers(1)
+                frontier = registry["frontiers"][0]
+                frontier["source"] = source
+                if source_frontier_state == "missing":
+                    frontier.pop("source_frontier")
+                else:
+                    frontier["source_frontier"] = None
+                validate_success(f"{source}.{source_frontier_state}", registry)
+
+            registry = registry_with_frontiers(2)
+            registry["frontiers"][0]["source"] = source
+            registry["frontiers"][0]["source_frontier"] = "F2"
+            reject(f"{source}.non_null", registry)
+
+        for source in ("discovery", "serendipity"):
+            for source_frontier_state, source_frontier in (
+                ("missing", None),
+                ("null", None),
+                ("self", "F2"),
+                ("unknown", "F999"),
+            ):
+                registry = registry_with_frontiers(2)
+                frontier = registry["frontiers"][1]
+                frontier["source"] = source
+                if source_frontier_state == "missing":
+                    frontier.pop("source_frontier")
+                else:
+                    frontier["source_frontier"] = source_frontier
+                reject(f"{source}.{source_frontier_state}", registry)
+
+        forward_source = registry_with_frontiers(2)
+        forward_source["layer_labels"] = canonical_labels
+        child, later_source = forward_source["frontiers"]
+        child["source"] = "discovery"
+        child["source_frontier"] = "F2"
+        child["layer"] = 1
+        later_source["status"] = "Retired"
+        later_source["retire_category"] = "blocked"
+        later_source["layer"] = 5
+        validate_success("forward_retired_unrelated_source", forward_source)
+
+        unbound = registry_with_frontiers(2)
+        unbound["frontiers"][1]["source"] = "serendipity"
+        unbound["frontiers"][1]["source_frontier"] = "F1"
+        validate_success("valid_provenance_with_empty_layer_labels", unbound)
+
+        independent_relations = registry_with_frontiers(3)
+        independent_relations["layer_labels"] = canonical_labels
+        source, parent, child = independent_relations["frontiers"]
+        source["layer"] = 5
+        parent["layer"] = 0
+        child["source"] = "discovery"
+        child["source_frontier"] = "F1"
+        child["layer"] = 3
+        child["parent_frontier"] = "F2"
+        validate_success("different_valid_source_and_parent", independent_relations)
+
+    def test_validate_v3_enforces_parent_relationships_whole_registry(self):
+        canonical_labels = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
+
+        def registry_with_frontiers(count):
+            registry = self.module.make_registry("MXL", "ticker")
+            for index in range(count):
+                registry = self.module.create_frontier(
+                    registry,
+                    name=f"Frontier {index + 1}",
+                    proposed_at_loop=index + 1,
+                    source="initial",
+                )
+            registry["layer_labels"] = canonical_labels
+            return registry
+
+        def validate_success(case, registry):
+            original = copy.deepcopy(registry)
+            with self.subTest(case=case):
+                self.assertIs(registry, self.module.validate_registry(registry))
+                self.assertEqual(original, registry)
+
+        def reject(case, registry):
+            original = copy.deepcopy(registry)
+            with self.subTest(case=case):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(registry)
+                self.assertEqual(original, registry)
+
+        forward_retired_parent = registry_with_frontiers(2)
+        child, later_parent = forward_retired_parent["frontiers"]
+        child["layer"] = 5
+        child["parent_frontier"] = "F2"
+        later_parent["layer"] = 1
+        later_parent["status"] = "Retired"
+        later_parent["retire_category"] = "blocked"
+        validate_success(
+            "forward_retired_parent_with_layer_skip",
+            forward_retired_parent,
+        )
+
+        null_parents = registry_with_frontiers(2)
+        unbound, bound = null_parents["frontiers"]
+        unbound["layer"] = None
+        bound["source"] = "user"
+        bound["layer"] = 4
+        validate_success("null_parent_bound_and_unbound", null_parents)
+
+        invalid_relationships = {
+            "unknown_parent": (0, 2, "F999"),
+            "self_parent": (None, 2, "F2"),
+            "unbound_parent": (None, 2, "F1"),
+            "unbound_child": (0, None, "F1"),
+            "same_layer": (2, 2, "F1"),
+            "deeper_parent": (4, 2, "F1"),
+        }
+        for case, (parent_layer, child_layer, parent_frontier) in invalid_relationships.items():
+            registry = registry_with_frontiers(2)
+            parent, child = registry["frontiers"]
+            parent["layer"] = parent_layer
+            child["layer"] = child_layer
+            child["parent_frontier"] = parent_frontier
+            reject(case, registry)
+
+        invalid_pre_existing_child = registry_with_frontiers(3)
+        first_child, parent, valid_later_child = invalid_pre_existing_child["frontiers"]
+        first_child["layer"] = 2
+        first_child["parent_frontier"] = "F2"
+        parent["layer"] = 2
+        valid_later_child["layer"] = 5
+        valid_later_child["parent_frontier"] = "F2"
+        reject("invalid_pre_existing_child_relationship", invalid_pre_existing_child)
+
+        independent_relations = registry_with_frontiers(3)
+        source, parent, child = independent_relations["frontiers"]
+        source["layer"] = 5
+        parent["layer"] = 0
+        child["source"] = "serendipity"
+        child["source_frontier"] = "F1"
+        child["layer"] = 3
+        child["parent_frontier"] = "F2"
+        validate_success("different_valid_source_and_parent", independent_relations)
 
     def test_validate_v3_accepts_persisted_user_source(self):
         registry = self.v3_registry()
@@ -517,6 +678,79 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertEqual(required_keys, required_keys.intersection(frontier))
         self.assertIsNone(frontier["layer"])
         self.assertIsNone(frontier["parent_frontier"])
+
+    def test_create_frontier_validates_v3_input_and_complete_post_state(self):
+        canonical_labels = [
+            "End demand",
+            "System or platform",
+            "Component or module",
+            "Material or process",
+            "Constrained input or equipment",
+            "Geography or regulation",
+        ]
+
+        invalid_provenance = self.v3_registry()
+        invalid_provenance["frontiers"][0]["source"] = "discovery"
+        invalid_provenance["frontiers"][0]["source_frontier"] = "F999"
+
+        invalid_parent = self.v3_registry()
+        invalid_parent["layer_labels"] = canonical_labels
+        invalid_parent["frontiers"][0]["layer"] = 1
+        invalid_parent["frontiers"][0]["parent_frontier"] = "F999"
+
+        for case, registry in (
+            ("invalid_pre_existing_provenance", invalid_provenance),
+            ("invalid_pre_existing_parent", invalid_parent),
+        ):
+            original = copy.deepcopy(registry)
+            with self.subTest(case=case):
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.create_frontier(
+                        registry,
+                        name="Must not be appended",
+                        proposed_at_loop=2,
+                        source="initial",
+                    )
+                self.assertEqual(original, registry)
+
+        canonical_input = self.module.make_registry("MXL", "ticker")
+        original = copy.deepcopy(canonical_input)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.create_frontier(
+                canonical_input,
+                name="Non-canonical persisted loop",
+                proposed_at_loop="1",
+                source="initial",
+            )
+        self.assertEqual(original, canonical_input)
+
+        valid_v3 = self.module.make_registry("MXL", "ticker")
+        original = copy.deepcopy(valid_v3)
+        updated_v3 = self.module.create_frontier(
+            valid_v3,
+            name="Canonical v3 frontier",
+            proposed_at_loop=1,
+            source="initial",
+        )
+        self.assertEqual(original, valid_v3)
+        self.assertIs(updated_v3, self.module.validate_registry(updated_v3))
+        created_v3 = self.module.get_frontier(updated_v3, "F1")
+        self.assertIsNone(created_v3["layer"])
+        self.assertIsNone(created_v3["parent_frontier"])
+
+        valid_v2 = self.registry()
+        original = copy.deepcopy(valid_v2)
+        updated_v2 = self.module.create_frontier(
+            valid_v2,
+            name="Ordinary v2 frontier",
+            proposed_at_loop=2,
+            source="initial",
+        )
+        self.assertEqual(original, valid_v2)
+        self.assertIs(updated_v2, self.module.validate_registry(updated_v2))
+        created_v2 = self.module.get_frontier(updated_v2, "F3")
+        self.assertNotIn("layer", created_v2)
+        self.assertNotIn("parent_frontier", created_v2)
 
     def test_make_registry_and_create_frontier_build_schema(self):
         registry = self.module.make_registry("MXL", "ticker")
