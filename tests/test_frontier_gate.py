@@ -3,7 +3,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +15,7 @@ GATE_SCRIPT = ROOT / "scripts/gate_check.py"
 FRAMING_INTAKE_SCRIPT = ROOT / "scripts/framing_intake.py"
 
 from init_workspace import create_workspace  # noqa: E402
+import gate_check  # noqa: E402
 
 
 class TestFrontierGateIntegration(unittest.TestCase):
@@ -121,6 +125,72 @@ class TestFrontierGateIntegration(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def layered_v3_registry(self, *, first_status: str = "Continued") -> dict:
+        frontiers = []
+        for index in range(6):
+            status = first_status if index == 0 else "Continued"
+            frontiers.append(
+                {
+                    "id": f"F{index + 1}",
+                    "name": f"Frontier {index + 1}",
+                    "proposed_at_loop": 1,
+                    "source": "initial",
+                    "source_frontier": None,
+                    "status": status,
+                    "review_count": 0 if status == "Active" else 1,
+                    "max_reviews": 3,
+                    "retire_category": None,
+                    "lifecycle": [{"to": status, "at_loop": 3, "ts": None}],
+                    "review_decisions": [],
+                    "evidence_pointers": [],
+                    "layer": index,
+                    "parent_frontier": None,
+                }
+            )
+        return {
+            "version": 3,
+            "subject": "TEST",
+            "mode": "ticker",
+            "layer_labels": [f"Layer {index}" for index in range(6)],
+            "frontiers": frontiers,
+            "portfolio_limits": {"max_active": 3, "max_active_plus_new": 5},
+            "review_trigger": {"every_loops": 3, "max_reviews": 3},
+        }
+
+    def write_layered_v3_registry(self, workspace: Path, registry: dict) -> None:
+        (workspace / "frontier_registry.json").write_text(
+            json.dumps(registry, indent=2),
+            encoding="utf-8",
+        )
+
+    def write_layered_v3_ledger(self, workspace: Path) -> None:
+        lines = [
+            "# Evidence Ledger",
+            "",
+            "Recent event and product launch context recorded for timeliness.",
+            "",
+        ]
+        for loop in range(1, 4):
+            for frontier in range(1, 7):
+                lines.extend(
+                    [
+                        f"## Loop {loop}: F{frontier} - Frontier {frontier}",
+                        "",
+                        "Evidence summary.",
+                        "",
+                    ]
+                )
+        (workspace / "evidence_ledger.md").write_text(
+            "\n".join(lines),
+            encoding="utf-8",
+        )
+
+    def check_gate_with_stdout(self, workspace: Path):
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            result = gate_check.check_gate(str(workspace), "stage_2", "stage_3")
+        return result, stdout.getvalue()
+
     def run_gate(self, workspace: Path):
         return subprocess.run(
             [sys.executable, str(GATE_SCRIPT), str(workspace), "stage_2", "stage_3"],
@@ -180,6 +250,202 @@ class TestFrontierGateIntegration(unittest.TestCase):
 
         self.assertNotEqual(0, blocked.returncode, blocked.stdout)
         self.assertEqual(1, blocked.stdout.count("unknown frontier id in loop header: F9"))
+
+    def test_stage2_layer_warnings_do_not_change_pass_or_missing_when_gate_passes(self):
+        workspace = self.make_stage_2_ticker_workspace()
+        registry = self.layered_v3_registry()
+        self.write_layered_v3_registry(workspace, registry)
+        self.write_layered_v3_ledger(workspace)
+
+        baseline_result, baseline_stdout = self.check_gate_with_stdout(workspace)
+
+        registry["frontiers"][0]["layer"] = None
+        registry["frontiers"][5]["layer"] = 4
+        self.write_layered_v3_registry(workspace, registry)
+        warned_result, warned_stdout = self.check_gate_with_stdout(workspace)
+
+        expected_warnings = "\n".join(
+            [
+                "[WARN] LAYER_UNREPRESENTED: Layers 0 have no bound frontier.",
+                "[WARN] LAYER_UNREPRESENTED: Layers 5 have no bound frontier.",
+                "[WARN] FRONTIER_LAYER_UNBOUND: Frontiers F1 are not bound to a layer.",
+                "",
+            ]
+        )
+        self.assertEqual((True, []), baseline_result)
+        self.assertEqual(baseline_result, warned_result)
+        self.assertEqual("", baseline_stdout)
+        self.assertEqual(expected_warnings, warned_stdout)
+        self.assertFalse(any("[WARN]" in item for item in warned_result[1]))
+
+    def test_stage2_layer_warnings_do_not_change_pass_or_missing_when_gate_fails(self):
+        workspace = self.make_stage_2_ticker_workspace()
+        registry = self.layered_v3_registry(first_status="Active")
+        self.write_layered_v3_registry(workspace, registry)
+        self.write_layered_v3_ledger(workspace)
+
+        baseline_result, baseline_stdout = self.check_gate_with_stdout(workspace)
+
+        registry["frontiers"][0]["layer"] = None
+        registry["frontiers"][5]["layer"] = 4
+        self.write_layered_v3_registry(workspace, registry)
+        warned_result, warned_stdout = self.check_gate_with_stdout(workspace)
+
+        expected_warnings = "\n".join(
+            [
+                "[WARN] LAYER_UNREPRESENTED: Layers 0 have no bound frontier.",
+                "[WARN] LAYER_UNREPRESENTED: Layers 5 have no bound frontier.",
+                "[WARN] FRONTIER_LAYER_UNBOUND: Frontiers F1 are not bound to a layer.",
+                "",
+            ]
+        )
+        self.assertEqual(
+            (False, ["frontier F1 is Active; resolve it before stage_3"]),
+            baseline_result,
+        )
+        self.assertEqual(baseline_result, warned_result)
+        self.assertEqual("", baseline_stdout)
+        self.assertEqual(expected_warnings, warned_stdout)
+        self.assertFalse(any("[WARN]" in item for item in warned_result[1]))
+
+    def test_stage2_malformed_v3_is_a_failure_not_an_advisory(self):
+        workspace = self.make_stage_2_ticker_workspace()
+        registry = self.layered_v3_registry()
+        registry["frontiers"][0].pop("layer")
+        self.write_layered_v3_registry(workspace, registry)
+        self.write_layered_v3_ledger(workspace)
+        expected = "frontier registry invalid: frontier F1.layer is required"
+
+        result, stdout = self.check_gate_with_stdout(workspace)
+        completed = self.run_gate(workspace)
+
+        self.assertEqual((False, [expected]), result)
+        self.assertEqual("", stdout)
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("Missing 1 prerequisite(s):", completed.stdout)
+        self.assertEqual(1, completed.stdout.count(expected))
+        self.assertNotIn("[WARN]", completed.stdout)
+        self.assertNotIn("Traceback", completed.stdout + completed.stderr)
+
+    def test_stage2_gate_reuses_one_registry_and_ledger_snapshot(self):
+        from loop_enforcer import check_loop_depth_from_documents as real_document_helper
+
+        workspace = self.make_stage_2_ticker_workspace()
+        registry = self.layered_v3_registry()
+        self.write_layered_v3_registry(workspace, registry)
+        self.write_layered_v3_ledger(workspace)
+
+        real_open = open
+        real_loader = gate_check.load_frontier_registry
+        real_coverage = gate_check.derive_frontier_layer_coverage
+        real_lifecycle = gate_check.validate_for_stage_transition
+        opened = []
+        read_values = {"frontier_registry.json": [], "evidence_ledger.md": []}
+        loaded_registries = []
+        coverage_inputs = []
+        helper_calls = []
+        lifecycle_calls = []
+
+        class RecordingHandle:
+            def __init__(self, handle, name):
+                self.handle = handle
+                self.name = name
+
+            def __enter__(self):
+                self.handle.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.handle.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+            def read(self, *args, **kwargs):
+                value = self.handle.read(*args, **kwargs)
+                read_values[self.name].append(value)
+                return value
+
+        def recording_open(path, *args, **kwargs):
+            handle = real_open(path, *args, **kwargs)
+            name = Path(path).name
+            if name not in read_values:
+                return handle
+            opened.append(name)
+            return RecordingHandle(handle, name)
+
+        def recording_loader(workspace_path):
+            loaded = real_loader(workspace_path)
+            loaded_registries.append(loaded)
+            return loaded
+
+        def recording_coverage(loaded):
+            coverage_inputs.append(loaded)
+            return real_coverage(loaded)
+
+        def recording_helper(ledger_text, loaded):
+            result = real_document_helper(ledger_text, loaded)
+            helper_calls.append((ledger_text, loaded, result))
+            return result
+
+        def recording_lifecycle(loaded, loop_counts, mode, target_stage):
+            lifecycle_calls.append((loaded, loop_counts, mode, target_stage))
+            return real_lifecycle(loaded, loop_counts, mode, target_stage)
+
+        stdout = StringIO()
+        with (
+            mock.patch.object(gate_check, "open", side_effect=recording_open, create=True),
+            mock.patch.object(
+                gate_check,
+                "load_frontier_registry",
+                side_effect=recording_loader,
+            ),
+            mock.patch.object(
+                gate_check,
+                "derive_frontier_layer_coverage",
+                side_effect=recording_coverage,
+            ),
+            mock.patch.object(
+                gate_check,
+                "check_loop_depth_from_documents",
+                side_effect=recording_helper,
+                create=True,
+            ),
+            mock.patch.object(
+                gate_check,
+                "validate_for_stage_transition",
+                side_effect=recording_lifecycle,
+            ),
+            redirect_stdout(stdout),
+        ):
+            result = gate_check.check_gate(str(workspace), "stage_2", "stage_3")
+
+        self.assertEqual((True, []), result)
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual(
+            ["frontier_registry.json", "evidence_ledger.md"],
+            opened,
+        )
+        self.assertEqual(1, len(read_values["frontier_registry.json"]))
+        self.assertEqual(1, len(read_values["evidence_ledger.md"]))
+        self.assertEqual(1, len(loaded_registries))
+        self.assertEqual(1, len(coverage_inputs))
+        self.assertEqual(1, len(helper_calls))
+        self.assertEqual(1, len(lifecycle_calls))
+
+        loaded = loaded_registries[0]
+        helper_ledger, helper_registry, helper_result = helper_calls[0]
+        lifecycle_registry, lifecycle_counts, mode, target_stage = lifecycle_calls[0]
+        self.assertIs(loaded, coverage_inputs[0])
+        self.assertIs(loaded, helper_registry)
+        self.assertIs(loaded, lifecycle_registry)
+        self.assertIs(read_values["evidence_ledger.md"][0], helper_ledger)
+        self.assertEqual(
+            (True, {f"F{index}": 3 for index in range(1, 7)}, []),
+            helper_result,
+        )
+        self.assertIs(helper_result[1], lifecycle_counts)
+        self.assertEqual(("ticker", "stage_3"), (mode, target_stage))
 
     def test_stage_5_gate_uses_contract_for_missing_final_report(self):
         with tempfile.TemporaryDirectory() as temp_dir:
