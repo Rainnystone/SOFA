@@ -2578,12 +2578,16 @@ class TestFrontierReviewCli(unittest.TestCase):
                 ["--source", "initial", "--layer", "0"],
             ),
             (
+                "Discovery source",
+                ["--source", "initial", "--layer", "1"],
+            ),
+            (
                 "Discovery child",
                 [
                     "--source",
                     "discovery",
                     "--source-frontier",
-                    "F1",
+                    "F2",
                     "--layer",
                     "2",
                     "--parent",
@@ -2619,10 +2623,13 @@ class TestFrontierReviewCli(unittest.TestCase):
                 "F1 status=New derived_loops=0 review_count=0 name=Root frontier",
                 "  layer=0 label=Demand layer parent_frontier=none "
                 "source_frontier=none",
-                "F2 status=New derived_loops=0 review_count=0 name=Discovery child",
+                "F2 status=New derived_loops=0 review_count=0 name=Discovery source",
+                "  layer=1 label=System layer parent_frontier=none "
+                "source_frontier=none",
+                "F3 status=New derived_loops=0 review_count=0 name=Discovery child",
                 "  layer=2 label=Component layer parent_frontier=F1 "
-                "source_frontier=F1",
-                "F3 status=New derived_loops=0 review_count=0 name=Unbound frontier",
+                "source_frontier=F2",
+                "F4 status=New derived_loops=0 review_count=0 name=Unbound frontier",
                 "  layer=unbound label=none parent_frontier=none "
                 "source_frontier=none",
                 *expected_snapshot.splitlines(),
