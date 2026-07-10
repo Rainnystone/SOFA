@@ -262,8 +262,8 @@ def is_main_thread_artifact(relative_path: str | Path) -> bool:
 def managed_block_for_name(name: str) -> ManagedBlock:
     """Return the registered ManagedBlock for a block name.
 
-    O(n) lookup over the tuple; n is small (3 blocks today). Raises ValueError
-    for an unknown name so callers fail loudly rather than silently no-op.
+    O(n) lookup over the tuple. Raises ValueError for an unknown name so
+    callers fail loudly rather than silently no-op.
     """
     for block in MANAGED_BLOCKS:
         if block.name == name:
