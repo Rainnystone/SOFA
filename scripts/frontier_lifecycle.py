@@ -130,6 +130,204 @@ def bind_frontier_layer(
     return validate_registry(updated)
 
 
+def derive_frontier_layer_coverage(registry: dict[str, Any]) -> dict[str, Any]:
+    """Derive validated layer presence and lifecycle-status facts."""
+    validate_registry(registry)
+    registry_version = registry["version"]
+    if registry_version == LEGACY_REGISTRY_VERSION:
+        return {
+            "registry_version": LEGACY_REGISTRY_VERSION,
+            "labels_configured": False,
+            "layers": [],
+            "lineage": [],
+            "unbound_frontier_ids": [],
+            "advisories": [
+                {
+                    "code": "LAYER_LABELS_UNCONFIGURED",
+                    "layer_indexes": [],
+                    "frontier_ids": [],
+                }
+            ],
+        }
+
+    frontiers = sorted(registry["frontiers"], key=lambda row: _frontier_numeric_key(row["id"]))
+    lineage = [
+        {
+            "frontier_id": frontier["id"],
+            "layer": frontier["layer"],
+            "parent_frontier": frontier["parent_frontier"],
+            "source_frontier": frontier.get("source_frontier"),
+            "status": frontier["status"],
+            "retire_category": frontier.get("retire_category"),
+        }
+        for frontier in frontiers
+    ]
+    unbound_frontier_ids = [
+        frontier["id"] for frontier in frontiers if frontier["layer"] is None
+    ]
+    labels_configured = bool(registry["layer_labels"])
+    layers = []
+    if labels_configured:
+        for index, label in enumerate(registry["layer_labels"]):
+            layer_frontiers = [frontier for frontier in frontiers if frontier["layer"] == index]
+            layers.append(
+                {
+                    "index": index,
+                    "label": label,
+                    "frontier_ids": [frontier["id"] for frontier in layer_frontiers],
+                    "status_counts": {
+                        status: sum(frontier["status"] == status for frontier in layer_frontiers)
+                        for status in STATUSES
+                    },
+                    "frontiers": [
+                        {
+                            "frontier_id": frontier["id"],
+                            "status": frontier["status"],
+                            "retire_category": frontier.get("retire_category"),
+                        }
+                        for frontier in layer_frontiers
+                    ],
+                }
+            )
+
+    advisories = []
+    if not labels_configured:
+        advisories.append(
+            {
+                "code": "LAYER_LABELS_UNCONFIGURED",
+                "layer_indexes": [],
+                "frontier_ids": [],
+            }
+        )
+    else:
+        for layer_row in layers:
+            layer_frontiers = layer_row["frontiers"]
+            if not layer_frontiers:
+                code = "LAYER_UNREPRESENTED"
+            elif all(frontier["status"] == "Retired" for frontier in layer_frontiers):
+                if all(
+                    frontier["retire_category"] == "blocked"
+                    for frontier in layer_frontiers
+                ):
+                    code = "LAYER_BLOCKED_ONLY"
+                else:
+                    code = "LAYER_RETIRED_ONLY"
+            else:
+                continue
+            advisories.append(
+                {
+                    "code": code,
+                    "layer_indexes": [layer_row["index"]],
+                    "frontier_ids": list(layer_row["frontier_ids"]),
+                }
+            )
+    if unbound_frontier_ids:
+        advisories.append(
+            {
+                "code": "FRONTIER_LAYER_UNBOUND",
+                "layer_indexes": [],
+                "frontier_ids": list(unbound_frontier_ids),
+            }
+        )
+
+    return {
+        "registry_version": CURRENT_REGISTRY_VERSION,
+        "labels_configured": labels_configured,
+        "layers": layers,
+        "lineage": lineage,
+        "unbound_frontier_ids": unbound_frontier_ids,
+        "advisories": advisories,
+    }
+
+
+def format_frontier_layer_advisories(
+    coverage: dict[str, Any],
+    *,
+    prefix: str = "",
+) -> list[str]:
+    """Format structured layer advisories in their deterministic scan order."""
+    layer_by_index = {layer["index"]: layer for layer in coverage["layers"]}
+    lines: list[str] = []
+    unrepresented_indexes: list[int] = []
+
+    def flush_unrepresented() -> None:
+        if not unrepresented_indexes:
+            return
+        lines.append(
+            prefix
+            + "LAYER_UNREPRESENTED: Layers "
+            + _compress_layer_indexes(unrepresented_indexes)
+            + " have no bound frontier."
+        )
+        unrepresented_indexes.clear()
+
+    for advisory in coverage["advisories"]:
+        code = advisory["code"]
+        if code == "LAYER_UNREPRESENTED":
+            for index in advisory["layer_indexes"]:
+                if unrepresented_indexes and index != unrepresented_indexes[-1] + 1:
+                    flush_unrepresented()
+                unrepresented_indexes.append(index)
+            continue
+
+        flush_unrepresented()
+        frontier_ids = sorted(advisory["frontier_ids"], key=_frontier_numeric_key)
+        if code == "LAYER_LABELS_UNCONFIGURED":
+            message = (
+                "LAYER_LABELS_UNCONFIGURED: Frontier layer labels are unavailable; "
+                "run set-layers."
+            )
+        elif code == "LAYER_BLOCKED_ONLY":
+            index = advisory["layer_indexes"][0]
+            label = layer_by_index[index]["label"]
+            message = (
+                f"LAYER_BLOCKED_ONLY: Layer {index} ({label}) has only blocked retired "
+                f"frontiers: {', '.join(frontier_ids)}."
+            )
+        elif code == "LAYER_RETIRED_ONLY":
+            index = advisory["layer_indexes"][0]
+            layer = layer_by_index[index]
+            frontier_by_id = {
+                frontier["frontier_id"]: frontier for frontier in layer["frontiers"]
+            }
+            facts = [
+                f"{frontier_id}={frontier_by_id[frontier_id]['status']}"
+                f"({frontier_by_id[frontier_id]['retire_category']})"
+                for frontier_id in frontier_ids
+            ]
+            message = (
+                f"LAYER_RETIRED_ONLY: Layer {index} ({layer['label']}) has only retired "
+                f"frontiers: {', '.join(facts)}."
+            )
+        elif code == "FRONTIER_LAYER_UNBOUND":
+            message = (
+                f"FRONTIER_LAYER_UNBOUND: Frontiers {', '.join(frontier_ids)} are not "
+                "bound to a layer."
+            )
+        else:
+            raise LifecycleError(f"unsupported frontier layer advisory code: {code}")
+        lines.append(prefix + message)
+
+    flush_unrepresented()
+    return lines
+
+
+def _compress_layer_indexes(indexes: list[int]) -> str:
+    if not indexes:
+        return ""
+
+    parts: list[str] = []
+    start = previous = indexes[0]
+    for index in indexes[1:]:
+        if index == previous + 1:
+            previous = index
+            continue
+        parts.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = index
+    parts.append(str(start) if start == previous else f"{start}-{previous}")
+    return ", ".join(parts)
+
+
 def _canonical_layer_labels(indexed_labels: list[tuple[int, str]]) -> list[str]:
     if not isinstance(indexed_labels, list) or len(indexed_labels) != LAYER_COUNT:
         raise LifecycleError(f"indexed_labels must contain exactly {LAYER_COUNT} entries")
@@ -330,6 +528,13 @@ def _validate_optional_frontier_id(value: Any, field: str) -> None:
         return
     if not isinstance(value, str) or FRONTIER_ID_RE.fullmatch(value) is None:
         raise LifecycleError(f"{field} must be null or a stable frontier ID")
+
+
+def _frontier_numeric_key(frontier_id: str) -> int:
+    match = FRONTIER_ID_RE.fullmatch(frontier_id)
+    if match is None:
+        raise LifecycleError(f"malformed frontier id: {frontier_id}")
+    return int(match.group("number"))
 
 
 def _validate_source_provenance(

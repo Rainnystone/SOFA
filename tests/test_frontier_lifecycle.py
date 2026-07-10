@@ -103,6 +103,52 @@ class TestFrontierLifecycle(unittest.TestCase):
             list(enumerate(self.layer_labels())),
         )
 
+    def layer_coverage_registry(self):
+        registry = self.module.make_registry("MXL", "ticker")
+        registry["portfolio_limits"] = {
+            "max_active": 20,
+            "max_active_plus_new": 20,
+        }
+        for index in range(10):
+            registry = self.module.create_frontier(
+                registry,
+                name=f"Frontier {index + 1}",
+                proposed_at_loop=index + 1,
+                source="initial",
+            )
+        registry = self.module.set_layer_labels(
+            registry,
+            list(enumerate(self.layer_labels())),
+        )
+
+        facts = {
+            "F1": (5, "F4", "New", None),
+            "F2": (0, None, "Active", None),
+            "F3": (1, "F2", "Retired", "blocked"),
+            "F4": (2, "F3", "Retired", "blocked"),
+            "F5": (None, None, "Continued", None),
+            "F6": (5, "F4", "Continued", None),
+            "F7": (1, "F2", "Retired", "blocked"),
+            "F8": (2, "F3", "Retired", "barren"),
+            "F9": (None, None, "Retired", "superseded"),
+            "F10": (0, None, "Retired", "blocked"),
+        }
+        frontier_by_id = {frontier["id"]: frontier for frontier in registry["frontiers"]}
+        for frontier_id, (layer, parent, status, retire_category) in facts.items():
+            frontier = frontier_by_id[frontier_id]
+            frontier["layer"] = layer
+            frontier["parent_frontier"] = parent
+            frontier["status"] = status
+            frontier["retire_category"] = retire_category
+        frontier_by_id["F6"]["source"] = "discovery"
+        frontier_by_id["F6"]["source_frontier"] = "F10"
+        registry["frontiers"] = [
+            frontier_by_id[frontier_id]
+            for frontier_id in ("F10", "F2", "F7", "F3", "F8", "F4", "F6", "F1", "F9", "F5")
+        ]
+        self.module.validate_registry(registry)
+        return registry
+
     def test_validate_registry_rejects_unknown_mixed_and_malformed_v3(self):
         valid = self.v3_registry()
         valid["extension"] = {"preserve": ["as-is"]}
@@ -1612,6 +1658,356 @@ class TestFrontierLifecycle(unittest.TestCase):
                         parent_frontier=parent_frontier,
                     )
                 self.assertEqual(original, registry)
+
+    def test_layer_coverage_reports_presence_status_and_retire_facts(self):
+        derive = getattr(self.module, "derive_frontier_layer_coverage", None)
+        self.assertIsNotNone(derive, "derive_frontier_layer_coverage must be available")
+
+        registry = self.layer_coverage_registry()
+        original = copy.deepcopy(registry)
+        coverage = derive(registry)
+
+        self.assertEqual(original, registry)
+        self.assertEqual(coverage, derive(registry))
+        self.assertEqual(
+            {
+                "registry_version",
+                "labels_configured",
+                "layers",
+                "lineage",
+                "unbound_frontier_ids",
+                "advisories",
+            },
+            set(coverage),
+        )
+        self.assertEqual(3, coverage["registry_version"])
+        self.assertIs(coverage["labels_configured"], True)
+        self.assertIsInstance(coverage["advisories"], list)
+        self.assertEqual(
+            [
+                {
+                    "index": 0,
+                    "label": "End demand",
+                    "frontier_ids": ["F2", "F10"],
+                    "status_counts": {
+                        "New": 0,
+                        "Active": 1,
+                        "Continued": 0,
+                        "Retired": 1,
+                    },
+                    "frontiers": [
+                        {"frontier_id": "F2", "status": "Active", "retire_category": None},
+                        {
+                            "frontier_id": "F10",
+                            "status": "Retired",
+                            "retire_category": "blocked",
+                        },
+                    ],
+                },
+                {
+                    "index": 1,
+                    "label": "System or platform",
+                    "frontier_ids": ["F3", "F7"],
+                    "status_counts": {
+                        "New": 0,
+                        "Active": 0,
+                        "Continued": 0,
+                        "Retired": 2,
+                    },
+                    "frontiers": [
+                        {
+                            "frontier_id": "F3",
+                            "status": "Retired",
+                            "retire_category": "blocked",
+                        },
+                        {
+                            "frontier_id": "F7",
+                            "status": "Retired",
+                            "retire_category": "blocked",
+                        },
+                    ],
+                },
+                {
+                    "index": 2,
+                    "label": "Component or module",
+                    "frontier_ids": ["F4", "F8"],
+                    "status_counts": {
+                        "New": 0,
+                        "Active": 0,
+                        "Continued": 0,
+                        "Retired": 2,
+                    },
+                    "frontiers": [
+                        {
+                            "frontier_id": "F4",
+                            "status": "Retired",
+                            "retire_category": "blocked",
+                        },
+                        {
+                            "frontier_id": "F8",
+                            "status": "Retired",
+                            "retire_category": "barren",
+                        },
+                    ],
+                },
+                {
+                    "index": 3,
+                    "label": "Material or process",
+                    "frontier_ids": [],
+                    "status_counts": {status: 0 for status in self.module.STATUSES},
+                    "frontiers": [],
+                },
+                {
+                    "index": 4,
+                    "label": "Constrained input or equipment",
+                    "frontier_ids": [],
+                    "status_counts": {status: 0 for status in self.module.STATUSES},
+                    "frontiers": [],
+                },
+                {
+                    "index": 5,
+                    "label": "Geography or regulation",
+                    "frontier_ids": ["F1", "F6"],
+                    "status_counts": {
+                        "New": 1,
+                        "Active": 0,
+                        "Continued": 1,
+                        "Retired": 0,
+                    },
+                    "frontiers": [
+                        {"frontier_id": "F1", "status": "New", "retire_category": None},
+                        {
+                            "frontier_id": "F6",
+                            "status": "Continued",
+                            "retire_category": None,
+                        },
+                    ],
+                },
+            ],
+            coverage["layers"],
+        )
+        self.assertEqual(
+            ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10"],
+            [row["frontier_id"] for row in coverage["lineage"]],
+        )
+        self.assertEqual(
+            {
+                "frontier_id": "F6",
+                "layer": 5,
+                "parent_frontier": "F4",
+                "source_frontier": "F10",
+                "status": "Continued",
+                "retire_category": None,
+            },
+            coverage["lineage"][5],
+        )
+        self.assertEqual(["F5", "F9"], coverage["unbound_frontier_ids"])
+
+    def test_layer_advisories_distinguish_unrepresented_blocked_retired_and_unbound(self):
+        registry = self.layer_coverage_registry()
+        original = copy.deepcopy(registry)
+        coverage = self.module.derive_frontier_layer_coverage(registry)
+
+        self.assertEqual(original, registry)
+        self.assertEqual(
+            [
+                {
+                    "code": "LAYER_BLOCKED_ONLY",
+                    "layer_indexes": [1],
+                    "frontier_ids": ["F3", "F7"],
+                },
+                {
+                    "code": "LAYER_RETIRED_ONLY",
+                    "layer_indexes": [2],
+                    "frontier_ids": ["F4", "F8"],
+                },
+                {
+                    "code": "LAYER_UNREPRESENTED",
+                    "layer_indexes": [3],
+                    "frontier_ids": [],
+                },
+                {
+                    "code": "LAYER_UNREPRESENTED",
+                    "layer_indexes": [4],
+                    "frontier_ids": [],
+                },
+                {
+                    "code": "FRONTIER_LAYER_UNBOUND",
+                    "layer_indexes": [],
+                    "frontier_ids": ["F5", "F9"],
+                },
+            ],
+            coverage["advisories"],
+        )
+        for advisory in coverage["advisories"]:
+            self.assertEqual(
+                {"code", "layer_indexes", "frontier_ids"},
+                set(advisory),
+            )
+
+        formatter = getattr(self.module, "format_frontier_layer_advisories", None)
+        self.assertIsNotNone(formatter, "format_frontier_layer_advisories must be available")
+        formatted = formatter(coverage)
+        self.assertEqual(
+            [
+                "LAYER_BLOCKED_ONLY",
+                "LAYER_RETIRED_ONLY",
+                "LAYER_UNREPRESENTED",
+                "FRONTIER_LAYER_UNBOUND",
+            ],
+            [line.split(":", 1)[0] for line in formatted],
+        )
+        self.assertIn("F3, F7", formatted[0])
+        self.assertIn("F4=Retired(blocked), F8=Retired(barren)", formatted[1])
+        self.assertIn("Layers 3-4", formatted[2])
+        self.assertIn("F5, F9", formatted[3])
+
+        legacy = self.registry()
+        original_legacy = copy.deepcopy(legacy)
+        legacy_coverage = self.module.derive_frontier_layer_coverage(legacy)
+        self.assertEqual(original_legacy, legacy)
+        self.assertEqual(
+            {
+                "registry_version": 2,
+                "labels_configured": False,
+                "layers": [],
+                "lineage": [],
+                "unbound_frontier_ids": [],
+                "advisories": [
+                    {
+                        "code": "LAYER_LABELS_UNCONFIGURED",
+                        "layer_indexes": [],
+                        "frontier_ids": [],
+                    }
+                ],
+            },
+            legacy_coverage,
+        )
+
+        unconfigured = self.layer_coverage_registry()
+        unconfigured["layer_labels"] = []
+        for frontier in unconfigured["frontiers"]:
+            frontier["layer"] = None
+            frontier["parent_frontier"] = None
+        self.module.validate_registry(unconfigured)
+        original_unconfigured = copy.deepcopy(unconfigured)
+        unconfigured_coverage = self.module.derive_frontier_layer_coverage(unconfigured)
+        self.assertEqual(original_unconfigured, unconfigured)
+        numeric_ids = ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10"]
+        self.assertEqual([], unconfigured_coverage["layers"])
+        self.assertEqual(
+            numeric_ids,
+            [row["frontier_id"] for row in unconfigured_coverage["lineage"]],
+        )
+        self.assertEqual(numeric_ids, unconfigured_coverage["unbound_frontier_ids"])
+        self.assertEqual(
+            [
+                {
+                    "code": "LAYER_LABELS_UNCONFIGURED",
+                    "layer_indexes": [],
+                    "frontier_ids": [],
+                },
+                {
+                    "code": "FRONTIER_LAYER_UNBOUND",
+                    "layer_indexes": [],
+                    "frontier_ids": numeric_ids,
+                },
+            ],
+            unconfigured_coverage["advisories"],
+        )
+
+    def test_layer_advisory_order_range_compression_and_messages_are_stable(self):
+        numeric_registry = self.layer_coverage_registry()
+        numeric_registry_by_id = {
+            frontier["id"]: frontier for frontier in numeric_registry["frontiers"]
+        }
+        numeric_registry_by_id["F2"]["status"] = "Retired"
+        numeric_registry_by_id["F2"]["retire_category"] = "blocked"
+        self.module.validate_registry(numeric_registry)
+        coverage = self.module.derive_frontier_layer_coverage(numeric_registry)
+        original_coverage = copy.deepcopy(coverage)
+
+        expected = [
+            "LAYER_BLOCKED_ONLY: Layer 0 (End demand) has only blocked retired frontiers: F2, F10.",
+            "LAYER_BLOCKED_ONLY: Layer 1 (System or platform) has only blocked retired frontiers: F3, F7.",
+            "LAYER_RETIRED_ONLY: Layer 2 (Component or module) has only retired frontiers: F4=Retired(blocked), F8=Retired(barren).",
+            "LAYER_UNREPRESENTED: Layers 3-4 have no bound frontier.",
+            "FRONTIER_LAYER_UNBOUND: Frontiers F5, F9 are not bound to a layer.",
+        ]
+        self.assertEqual(
+            expected,
+            self.module.format_frontier_layer_advisories(coverage),
+        )
+        self.assertEqual(
+            [f"- {line}" for line in expected],
+            self.module.format_frontier_layer_advisories(coverage, prefix="- "),
+        )
+        self.assertEqual(original_coverage, coverage)
+
+        interrupted = self.configured_v3_registry(4)
+        interrupted_by_id = {frontier["id"]: frontier for frontier in interrupted["frontiers"]}
+        interrupted_by_id["F1"]["layer"] = 1
+        interrupted_by_id["F1"]["status"] = "Retired"
+        interrupted_by_id["F1"]["retire_category"] = "blocked"
+        interrupted_by_id["F2"]["layer"] = 4
+        interrupted_by_id["F2"]["status"] = "Retired"
+        interrupted_by_id["F2"]["retire_category"] = "blocked"
+        interrupted_by_id["F3"]["layer"] = 4
+        interrupted_by_id["F3"]["status"] = "Retired"
+        interrupted_by_id["F3"]["retire_category"] = "barren"
+        self.module.validate_registry(interrupted)
+        interrupted_coverage = self.module.derive_frontier_layer_coverage(interrupted)
+        original_interrupted = copy.deepcopy(interrupted_coverage)
+        self.assertEqual(
+            [
+                "LAYER_UNREPRESENTED: Layers 0 have no bound frontier.",
+                "LAYER_BLOCKED_ONLY: Layer 1 (System or platform) has only blocked retired frontiers: F1.",
+                "LAYER_UNREPRESENTED: Layers 2-3 have no bound frontier.",
+                "LAYER_RETIRED_ONLY: Layer 4 (Constrained input or equipment) has only retired frontiers: F2=Retired(blocked), F3=Retired(barren).",
+                "LAYER_UNREPRESENTED: Layers 5 have no bound frontier.",
+                "FRONTIER_LAYER_UNBOUND: Frontiers F4 are not bound to a layer.",
+            ],
+            self.module.format_frontier_layer_advisories(interrupted_coverage),
+        )
+        self.assertEqual(original_interrupted, interrupted_coverage)
+
+    def test_layer_coverage_does_not_infer_research_completion(self):
+        registry = self.layer_coverage_registry()
+        original = copy.deepcopy(registry)
+        coverage = self.module.derive_frontier_layer_coverage(registry)
+        advisory_lines = self.module.format_frontier_layer_advisories(coverage)
+
+        self.assertEqual(original, registry)
+        self.assertEqual(["registry"], list(inspect.signature(self.module.derive_frontier_layer_coverage).parameters))
+        self.assertIn("status_counts", coverage["layers"][0])
+        self.assertIn("status", coverage["layers"][0]["frontiers"][0])
+        self.assertIn("retire_category", coverage["layers"][0]["frontiers"][0])
+
+        serialized = json.dumps(
+            {"coverage": coverage, "advisory_lines": advisory_lines},
+            sort_keys=True,
+        ).casefold()
+        forbidden_vocabulary = (
+            "peeled",
+            "complete",
+            "completion",
+            "sufficient",
+            "adequate",
+            "adequacy",
+            "confidence",
+            "ready",
+            "readiness",
+            "action class",
+            "action_class",
+            "evidence grade",
+            "evidence_grade",
+            "loop count",
+            "loop_count",
+            "challenge completion",
+        )
+        for forbidden in forbidden_vocabulary:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, serialized)
 
     def test_make_registry_and_create_frontier_build_schema(self):
         registry = self.module.make_registry("MXL", "ticker")
