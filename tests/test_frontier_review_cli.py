@@ -55,6 +55,35 @@ class TestFrontierReviewCli(unittest.TestCase):
     def registry(self, workspace):
         return json.loads((workspace / "frontier_registry.json").read_text(encoding="utf-8"))
 
+    def write_registry_document(self, workspace, registry, *, newline="\n"):
+        payload = json.dumps(registry, indent=2, ensure_ascii=False) + "\n"
+        (workspace / "frontier_registry.json").write_bytes(
+            payload.replace("\n", newline).encode("utf-8")
+        )
+
+    def make_v2_workspace(self, mode="ticker"):
+        workspace = self.make_workspace(mode)
+        registry = self.registry(workspace)
+        registry["version"] = 2
+        registry.pop("layer_labels", None)
+        for frontier in registry.get("frontiers", []):
+            frontier.pop("layer", None)
+            frontier.pop("parent_frontier", None)
+        self.write_registry_document(workspace, registry)
+
+        workflow_path = workspace / "research_workflow.md"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        start = "## Frontier Layer Coverage\n<!-- SOFA:frontier-layer-coverage:start -->"
+        end = "<!-- SOFA:frontier-layer-coverage:end -->"
+        if start in workflow and end in workflow:
+            prefix, remainder = workflow.split(start, 1)
+            _, suffix = remainder.split(end, 1)
+            workflow_path.write_text(
+                prefix.rstrip() + "\n\n" + suffix.lstrip(),
+                encoding="utf-8",
+            )
+        return workspace
+
     def write_loops(self, workspace, frontier_id="F1", name="InP supply risk", count=3):
         lines = ["# Evidence Ledger: MXL", ""]
         for index in range(1, count + 1):
@@ -81,6 +110,92 @@ class TestFrontierReviewCli(unittest.TestCase):
         start_result = self.run_cli(workspace, "start", expected_id)
         self.assertEqual(0, start_result.returncode, start_result.stderr)
         self.assertIn(f"{expected_id} -> Active", start_result.stdout)
+
+    def test_v2_ordinary_mutations_preserve_version_shape_and_missing_layer_block(self):
+        workspace = self.make_v2_workspace()
+
+        def assert_v2_contract():
+            registry = self.registry(workspace)
+            self.assertEqual(2, registry["version"])
+            self.assertNotIn("layer_labels", registry)
+            for frontier in registry.get("frontiers", []):
+                self.assertNotIn("layer", frontier)
+                self.assertNotIn("parent_frontier", frontier)
+            workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+            self.assertNotIn("SOFA:frontier-layer-coverage", workflow)
+            return workflow
+
+        add = self.run_cli(
+            workspace,
+            "add",
+            "--name",
+            "InP supply risk",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+        )
+        self.assertEqual(0, add.returncode, add.stderr)
+        assert_v2_contract()
+
+        start = self.run_cli(workspace, "start", "F1")
+        self.assertEqual(0, start.returncode, start.stderr)
+        assert_v2_contract()
+
+        self.write_loops(workspace)
+        record = self.run_cli(
+            workspace,
+            "record",
+            "F1",
+            "--decision",
+            "Continued",
+            "--rationale",
+            "Evidence remains material",
+        )
+        self.assertEqual(0, record.returncode, record.stderr)
+        workflow = assert_v2_contract()
+        self.assertIn("<!-- SOFA:frontier-review-log:start -->", workflow)
+        self.assertIn("## Frontier Review: F1 @ loop 3", workflow)
+        self.assertIn("<!-- SOFA:frontier-discovery-log:start -->", workflow)
+        self.assertIn("_No discovery actions recorded._", workflow)
+
+        reactivate = self.run_cli(workspace, "reactivate", "F1")
+        self.assertEqual(0, reactivate.returncode, reactivate.stderr)
+        assert_v2_contract()
+
+        retire = self.run_cli(
+            workspace,
+            "retire",
+            "F1",
+            "--category",
+            "invalidated",
+            "--reason",
+            "Later evidence invalidated the frontier",
+        )
+        self.assertEqual(0, retire.returncode, retire.stderr)
+        assert_v2_contract()
+
+    def test_check_review_preserves_zero_one_two_exit_contract(self):
+        no_due_workspace = self.make_workspace()
+        no_due = self.run_cli(no_due_workspace, "check-review")
+        self.assertEqual(0, no_due.returncode, no_due.stderr)
+        self.assertEqual("No Frontier Review due", no_due.stdout.splitlines()[0])
+
+        due_workspace = self.make_workspace()
+        self.add_and_start_frontier(due_workspace)
+        self.write_loops(due_workspace)
+        due = self.run_cli(due_workspace, "check-review")
+        self.assertEqual(1, due.returncode, due.stderr)
+        self.assertEqual("F1 reached loop 3", due.stdout.splitlines()[0])
+
+        malformed_workspace = self.make_workspace()
+        (malformed_workspace / "frontier_registry.json").write_text(
+            "{malformed",
+            encoding="utf-8",
+        )
+        malformed = self.run_cli(malformed_workspace, "check-review")
+        self.assertEqual(2, malformed.returncode)
+        self.assertTrue(malformed.stderr.startswith("ERROR:"), malformed.stderr)
 
     def test_full_review_flow_records_logs_without_duplicate_rendering(self):
         workspace = self.make_workspace("ticker")
