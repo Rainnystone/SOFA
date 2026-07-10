@@ -26,6 +26,10 @@ EARLY_RETIRE_CATEGORIES_BY_MODE = {
 KNOWN_STAGES = frozenset(f"stage_{index}" for index in range(7))
 LOOP_HEADER_RE = re.compile(r"^## Loop (?P<loop>[1-9][0-9]*): (?P<frontier_id>F[1-9][0-9]*) - (?P<name>.+)$")
 FRONTIER_ID_RE = re.compile(r"^F(?P<number>[1-9][0-9]*)$")
+FRONTIER_LAYER_SEMANTIC_LIMIT = (
+    "Presence/status snapshot only. This does not establish research "
+    "completeness, evidence adequacy, or action-class readiness."
+)
 
 
 class LifecycleError(ValueError):
@@ -310,6 +314,78 @@ def format_frontier_layer_advisories(
 
     flush_unrepresented()
     return lines
+
+
+def render_frontier_layer_coverage_md(registry: dict[str, Any]) -> str:
+    """Render only the deterministic managed-block interior for layer coverage."""
+    coverage = derive_frontier_layer_coverage(registry)
+    lines = [f"> {FRONTIER_LAYER_SEMANTIC_LIMIT}", ""]
+
+    if coverage["labels_configured"]:
+        lines.extend(
+            [
+                "| Layer | Label | New | Active | Continued | Retired | Frontier facts |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for layer in coverage["layers"]:
+            frontier_facts = []
+            for frontier in sorted(
+                layer["frontiers"],
+                key=lambda row: _frontier_numeric_key(row["frontier_id"]),
+            ):
+                fact = f"{frontier['frontier_id']}={frontier['status']}"
+                if frontier["status"] == "Retired":
+                    fact += f"({frontier['retire_category']})"
+                frontier_facts.append(fact)
+            values = [
+                layer["index"],
+                layer["label"],
+                layer["status_counts"]["New"],
+                layer["status_counts"]["Active"],
+                layer["status_counts"]["Continued"],
+                layer["status_counts"]["Retired"],
+                ", ".join(frontier_facts) if frontier_facts else None,
+            ]
+            lines.append("| " + " | ".join(_escape_markdown_cell(value) for value in values) + " |")
+
+        lines.extend(
+            [
+                "",
+                "### Structural Lineage",
+                "",
+                "| Frontier | Layer | Structural parent | Discovery source | Status | Retire category |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        lineage = sorted(
+            coverage["lineage"],
+            key=lambda row: _frontier_numeric_key(row["frontier_id"]),
+        )
+        for frontier in lineage:
+            values = [
+                frontier["frontier_id"],
+                frontier["layer"],
+                frontier["parent_frontier"],
+                frontier["source_frontier"],
+                frontier["status"],
+                frontier["retire_category"],
+            ]
+            lines.append("| " + " | ".join(_escape_markdown_cell(value) for value in values) + " |")
+        if not lineage:
+            lines.append("_No frontiers are registered._")
+        lines.append("")
+
+    lines.extend(["### Advisory Gaps", ""])
+    advisory_lines = format_frontier_layer_advisories(coverage, prefix="- ")
+    lines.extend(advisory_lines or ["- None at this snapshot."])
+    return "\n".join(lines) + "\n"
+
+
+def _escape_markdown_cell(value: Any) -> str:
+    if value is None:
+        return "none"
+    return str(value).replace("\\", "\\\\").replace("|", "\\|")
 
 
 def _compress_layer_indexes(indexes: list[int]) -> str:

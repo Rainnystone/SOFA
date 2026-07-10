@@ -1,6 +1,7 @@
 import copy
 import inspect
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -2008,6 +2009,152 @@ class TestFrontierLifecycle(unittest.TestCase):
         for forbidden in forbidden_vocabulary:
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, serialized)
+
+    def test_render_layer_coverage_markdown_is_deterministic_and_escapes_cells(self):
+        render = getattr(self.module, "render_frontier_layer_coverage_md", None)
+        self.assertIsNotNone(render, "render_frontier_layer_coverage_md must be available")
+
+        registry = self.layer_coverage_registry()
+        registry["layer_labels"][0] = "End | demand \\ path"
+        self.module.validate_registry(registry)
+        original = copy.deepcopy(registry)
+        rendered = render(registry)
+
+        expected = "\n".join(
+            [
+                "> Presence/status snapshot only. This does not establish research completeness, evidence adequacy, or action-class readiness.",
+                "",
+                "| Layer | Label | New | Active | Continued | Retired | Frontier facts |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
+                "| 0 | End \\| demand \\\\ path | 0 | 1 | 0 | 1 | F2=Active, F10=Retired(blocked) |",
+                "| 1 | System or platform | 0 | 0 | 0 | 2 | F3=Retired(blocked), F7=Retired(blocked) |",
+                "| 2 | Component or module | 0 | 0 | 0 | 2 | F4=Retired(blocked), F8=Retired(barren) |",
+                "| 3 | Material or process | 0 | 0 | 0 | 0 | none |",
+                "| 4 | Constrained input or equipment | 0 | 0 | 0 | 0 | none |",
+                "| 5 | Geography or regulation | 1 | 0 | 1 | 0 | F1=New, F6=Continued |",
+                "",
+                "### Structural Lineage",
+                "",
+                "| Frontier | Layer | Structural parent | Discovery source | Status | Retire category |",
+                "| --- | --- | --- | --- | --- | --- |",
+                "| F1 | 5 | F4 | none | New | none |",
+                "| F2 | 0 | none | none | Active | none |",
+                "| F3 | 1 | F2 | none | Retired | blocked |",
+                "| F4 | 2 | F3 | none | Retired | blocked |",
+                "| F5 | none | none | none | Continued | none |",
+                "| F6 | 5 | F4 | F10 | Continued | none |",
+                "| F7 | 1 | F2 | none | Retired | blocked |",
+                "| F8 | 2 | F3 | none | Retired | barren |",
+                "| F9 | none | none | none | Retired | superseded |",
+                "| F10 | 0 | none | none | Retired | blocked |",
+                "",
+                "### Advisory Gaps",
+                "",
+                "- LAYER_BLOCKED_ONLY: Layer 1 (System or platform) has only blocked retired frontiers: F3, F7.",
+                "- LAYER_RETIRED_ONLY: Layer 2 (Component or module) has only retired frontiers: F4=Retired(blocked), F8=Retired(barren).",
+                "- LAYER_UNREPRESENTED: Layers 3-4 have no bound frontier.",
+                "- FRONTIER_LAYER_UNBOUND: Frontiers F5, F9 are not bound to a layer.",
+                "",
+            ]
+        )
+        self.assertEqual(expected, rendered)
+        self.assertEqual(rendered, render(registry))
+        self.assertEqual(original, registry)
+        self.assertTrue(rendered.endswith("\n"))
+        self.assertFalse(rendered.endswith("\n\n"))
+        self.assertNotIn("<!--", rendered)
+        self.assertNotIn("Frontier Layer Coverage", rendered)
+        self.assertIsNone(re.search(r"\b20\d{2}-\d{2}-\d{2}\b", rendered))
+
+        unconfigured = copy.deepcopy(registry)
+        unconfigured["layer_labels"] = []
+        for frontier in unconfigured["frontiers"]:
+            frontier["layer"] = None
+            frontier["parent_frontier"] = None
+        self.module.validate_registry(unconfigured)
+        original_unconfigured = copy.deepcopy(unconfigured)
+        self.assertEqual(
+            "\n".join(
+                [
+                    "> Presence/status snapshot only. This does not establish research completeness, evidence adequacy, or action-class readiness.",
+                    "",
+                    "### Advisory Gaps",
+                    "",
+                    "- LAYER_LABELS_UNCONFIGURED: Frontier layer labels are unavailable; run set-layers.",
+                    "- FRONTIER_LAYER_UNBOUND: Frontiers F1, F2, F3, F4, F5, F6, F7, F8, F9, F10 are not bound to a layer.",
+                    "",
+                ]
+            ),
+            render(unconfigured),
+        )
+        self.assertEqual(original_unconfigured, unconfigured)
+
+        empty = self.module.set_layer_labels(
+            self.module.make_registry("MXL", "ticker"),
+            list(enumerate(self.layer_labels())),
+        )
+        empty_rendered = render(empty)
+        self.assertIn(
+            "| Frontier | Layer | Structural parent | Discovery source | Status | Retire category |\n"
+            "| --- | --- | --- | --- | --- | --- |\n"
+            "_No frontiers are registered._",
+            empty_rendered,
+        )
+        self.assertIn(
+            "- LAYER_UNREPRESENTED: Layers 0-5 have no bound frontier.",
+            empty_rendered,
+        )
+
+        represented = self.module.make_registry("MXL", "ticker")
+        represented["portfolio_limits"] = {
+            "max_active": 10,
+            "max_active_plus_new": 10,
+        }
+        for index in range(6):
+            represented = self.module.create_frontier(
+                represented,
+                name=f"Layer {index} frontier",
+                proposed_at_loop=index + 1,
+                source="initial",
+            )
+        represented = self.module.set_layer_labels(
+            represented,
+            list(enumerate(self.layer_labels())),
+        )
+        for index in range(6):
+            represented = self.module.bind_frontier_layer(
+                represented,
+                f"F{index + 1}",
+                layer=index,
+            )
+        original_represented = copy.deepcopy(represented)
+        represented_rendered = render(represented)
+        self.assertIn("### Advisory Gaps\n\n- None at this snapshot.\n", represented_rendered)
+        self.assertEqual(original_represented, represented)
+
+    def test_layer_renderer_sorts_frontier_lineage_and_unbound_ids_numerically(self):
+        registry = self.layer_coverage_registry()
+        original = copy.deepcopy(registry)
+        rendered = self.module.render_frontier_layer_coverage_md(registry)
+
+        self.assertEqual(original, registry)
+        self.assertIn(
+            "| 0 | End demand | 0 | 1 | 0 | 1 | F2=Active, F10=Retired(blocked) |",
+            rendered,
+        )
+        lineage_rows = [
+            line
+            for line in rendered.splitlines()
+            if re.fullmatch(r"\| F[1-9][0-9]* \|.*\|", line)
+        ]
+        self.assertEqual(
+            ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10"],
+            [line.split("|")[1].strip() for line in lineage_rows],
+        )
+        self.assertIn(
+            "- FRONTIER_LAYER_UNBOUND: Frontiers F5, F9 are not bound to a layer.",
+            rendered,
+        )
 
     def test_make_registry_and_create_frontier_build_schema(self):
         registry = self.module.make_registry("MXL", "ticker")
