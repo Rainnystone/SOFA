@@ -8,9 +8,10 @@ Called by gate_check.py during stage_2 -> stage_3 transition.
 import json
 import os
 import sys
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from frontier_lifecycle import BindingError, derive_loop_counts
+from frontier_lifecycle import LifecycleError, derive_loop_counts, validate_registry
 
 
 def check_ledger_binding(
@@ -19,13 +20,28 @@ def check_ledger_binding(
 ) -> tuple[bool, dict[str, int], list[str]]:
     """Check that ledger loop headers bind to known stable frontier IDs."""
     try:
+        validate_registry(registry)
         counts = derive_loop_counts(ledger_text, registry)
-    except BindingError as exc:
+    except LifecycleError as exc:
         return False, {}, [str(exc)]
 
     for frontier in registry.get("frontiers", []):
         counts.setdefault(frontier["id"], 0)
 
+    return True, counts, []
+
+
+def check_loop_depth_from_documents(
+    ledger_text: str,
+    registry: dict[str, Any],
+) -> tuple[bool, dict[str, int], list[str]]:
+    passed, counts, violations = check_ledger_binding(ledger_text, registry)
+    if not passed:
+        return False, counts, violations
+    if registry.get("frontiers") and not any(counts.values()):
+        return False, counts, [
+            "No ledger loop entries found for registered frontiers"
+        ]
     return True, counts, []
 
 
@@ -42,15 +58,16 @@ def check_loop_depth(workspace_path: str) -> tuple[bool, list[str]]:
     with open(ledger_path, "r", encoding="utf-8") as f:
         ledger_text = f.read()
 
-    with open(registry_path, "r", encoding="utf-8") as f:
-        registry = json.load(f)
+    try:
+        with open(registry_path, "r", encoding="utf-8") as f:
+            registry = json.load(f)
+        validate_registry(registry)
+    except (OSError, UnicodeError, json.JSONDecodeError, LifecycleError) as exc:
+        return False, [f"frontier registry invalid: {exc}"]
 
-    passed, counts, violations = check_ledger_binding(ledger_text, registry)
+    passed, _, violations = check_loop_depth_from_documents(ledger_text, registry)
     if not passed:
         return False, violations
-
-    if registry.get("frontiers") and not any(counts.values()):
-        return False, ["No ledger loop entries found for registered frontiers"]
 
     return True, []
 

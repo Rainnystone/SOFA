@@ -1,7 +1,11 @@
 import copy
 import inspect
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -2338,6 +2342,91 @@ class TestFrontierLifecycle(unittest.TestCase):
             passed, violations = loop_enforcer.check_loop_depth(str(workspace))
             self.assertFalse(passed)
             self.assertTrue(any("F9" in violation for violation in violations))
+
+    def test_loop_enforcer_reports_unknown_or_malformed_v3_without_traceback(self):
+        loop_enforcer = load_loop_enforcer()
+        malformed_v3 = self.v3_registry()
+        malformed_v3["frontiers"][0].pop("layer")
+        cases = [
+            (
+                "unsupported-version",
+                {**self.registry(), "version": 99},
+                "frontier registry invalid: unsupported registry version: 99",
+            ),
+            (
+                "malformed-v3",
+                malformed_v3,
+                "frontier registry invalid: frontier F1.layer is required",
+            ),
+        ]
+
+        for label, registry, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_dir:
+                workspace = Path(temp_dir)
+                (workspace / "frontier_registry.json").write_text(
+                    json.dumps(registry, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                (workspace / "evidence_ledger.md").write_text(
+                    "## Loop 1: F1 - InP substrate supply concentration\n",
+                    encoding="utf-8",
+                )
+
+                passed, violations = loop_enforcer.check_loop_depth(str(workspace))
+                self.assertFalse(passed)
+                self.assertEqual([expected], violations)
+
+                completed = subprocess.run(
+                    [sys.executable, str(LOOP_ENFORCER_SCRIPT), str(workspace)],
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(0, completed.returncode)
+                self.assertIn("LOOP ENFORCER FAILED", completed.stdout)
+                self.assertIn(f"[FAIL] {expected}", completed.stdout)
+                self.assertNotIn("Traceback", completed.stdout + completed.stderr)
+
+    def test_loop_enforcer_preserves_existing_v2_binding_and_count_semantics(self):
+        loop_enforcer = load_loop_enforcer()
+        registry = self.registry()
+        original = copy.deepcopy(registry)
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            passed, counts, violations = loop_enforcer.check_loop_depth_from_documents(
+                "\n".join(
+                    [
+                        "## Loop 1: F1 - original display text",
+                        "## Loop 2: F1 - renamed display text",
+                    ]
+                ),
+                registry,
+            )
+            no_loops = loop_enforcer.check_loop_depth_from_documents(
+                "# Evidence Ledger\n",
+                registry,
+            )
+            unknown = loop_enforcer.check_loop_depth_from_documents(
+                "## Loop 1: F9 - Unknown frontier\n",
+                registry,
+            )
+
+        self.assertTrue(passed, violations)
+        self.assertEqual({"F1": 2, "F2": 0}, counts)
+        self.assertEqual([], violations)
+        self.assertEqual(
+            (False, {}, ["missing loop frontier binding headers"]),
+            no_loops,
+        )
+        self.assertEqual(
+            (False, {}, ["unknown frontier id in loop header: F9"]),
+            unknown,
+        )
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual(original, registry)
+        self.assertEqual(2, registry["version"])
+        self.assertNotIn("layer_labels", registry)
+        self.assertTrue(all("layer" not in frontier for frontier in registry["frontiers"]))
 
     def test_get_frontier_rejects_malformed_requested_ids_even_if_registered(self):
         for malformed_id in ["F0", "F01"]:
