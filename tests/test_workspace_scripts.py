@@ -254,22 +254,28 @@ class TestWorkspaceScripts(unittest.TestCase):
             self.assertEqual(both_workflow_original, both_workflow_path.read_bytes())
             self.assertEqual(both_registry_original, both_registry_path.read_bytes())
 
+    def _make_workflow_only_recovery_workspace(self, temp_dir):
+        workspace = Path(temp_dir) / "workflow-only"
+        init_workspace.create_workspace("Coherent Corp", str(workspace), "ticker")
+
+        workflow_path = workspace / "research_workflow.md"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        layer_heading = "## Frontier Layer Coverage\n"
+        layer_end = "<!-- SOFA:frontier-layer-coverage:end -->"
+        prefix, remainder = workflow.split(layer_heading, 1)
+        _, suffix = remainder.split(layer_end, 1)
+        workflow_path.write_text(
+            prefix.rstrip() + "\n\n" + suffix.lstrip("\r\n"),
+            encoding="utf-8",
+        )
+        (workspace / "frontier_registry.json").unlink()
+        return workspace
+
     def test_init_workspace_repairs_existing_workflow_before_creating_missing_v3_registry(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            workspace = Path(temp_dir) / "workflow-only"
-            init_workspace.create_workspace("Coherent Corp", str(workspace), "ticker")
-
+            workspace = self._make_workflow_only_recovery_workspace(temp_dir)
             workflow_path = workspace / "research_workflow.md"
-            workflow = workflow_path.read_text(encoding="utf-8")
-            layer_heading = "## Frontier Layer Coverage\n"
             layer_end = "<!-- SOFA:frontier-layer-coverage:end -->"
-            prefix, remainder = workflow.split(layer_heading, 1)
-            _, suffix = remainder.split(layer_end, 1)
-            workflow_path.write_text(
-                prefix.rstrip() + "\n\n" + suffix.lstrip("\r\n"),
-                encoding="utf-8",
-            )
-            (workspace / "frontier_registry.json").unlink()
 
             with contextlib.redirect_stdout(io.StringIO()):
                 init_workspace.create_workspace("Coherent Corp", str(workspace), "ticker")
@@ -310,6 +316,79 @@ class TestWorkspaceScripts(unittest.TestCase):
             )
             self.assertEqual(0, add.returncode, add.stderr)
             self.assertIn("Added F1", add.stdout)
+
+    def test_init_workspace_preserves_existing_workflow_when_atomic_repair_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self._make_workflow_only_recovery_workspace(temp_dir)
+            workflow_path = workspace / "research_workflow.md"
+            original_workflow = workflow_path.read_bytes()
+
+            with mock.patch.object(
+                init_workspace,
+                "write_atomic",
+                side_effect=OSError("simulated workflow replace failure"),
+                create=True,
+            ) as write_atomic:
+                with self.assertRaisesRegex(OSError, "workflow replace failure"):
+                    init_workspace.create_workspace(
+                        "Coherent Corp",
+                        str(workspace),
+                        "ticker",
+                    )
+
+            write_atomic.assert_called_once()
+            self.assertEqual(workflow_path, Path(write_atomic.call_args.args[0]))
+            self.assertEqual(original_workflow, workflow_path.read_bytes())
+            self.assertFalse((workspace / "frontier_registry.json").exists())
+
+    def test_init_workspace_registry_write_failure_leaves_retryable_repaired_workflow(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self._make_workflow_only_recovery_workspace(temp_dir)
+            workflow_path = workspace / "research_workflow.md"
+            registry_path = workspace / "frontier_registry.json"
+            destinations = []
+
+            def fail_registry_write(path, payload):
+                target = Path(path)
+                destinations.append(target)
+                if len(destinations) == 2:
+                    raise OSError("simulated registry replace failure")
+                target.write_text(payload, encoding="utf-8")
+
+            with mock.patch.object(
+                init_workspace,
+                "write_atomic",
+                side_effect=fail_registry_write,
+                create=True,
+            ):
+                with self.assertRaisesRegex(OSError, "registry replace failure"):
+                    init_workspace.create_workspace(
+                        "Coherent Corp",
+                        str(workspace),
+                        "ticker",
+                    )
+
+            self.assertEqual([workflow_path, registry_path], destinations)
+            repaired = workflow_path.read_text(encoding="utf-8")
+            self.assertEqual(
+                1,
+                repaired.count("<!-- SOFA:frontier-layer-coverage:start -->"),
+            )
+            self.assertFalse(registry_path.exists())
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                init_workspace.create_workspace("Coherent Corp", str(workspace), "ticker")
+
+            self.assertEqual(
+                3,
+                json.loads(registry_path.read_text(encoding="utf-8"))["version"],
+            )
+            self.assertEqual(
+                1,
+                workflow_path.read_text(encoding="utf-8").count(
+                    "<!-- SOFA:frontier-layer-coverage:start -->"
+                ),
+            )
 
     def test_init_workspace_rejects_unanchored_workflow_before_creating_v3_registry(self):
         with tempfile.TemporaryDirectory() as temp_dir:

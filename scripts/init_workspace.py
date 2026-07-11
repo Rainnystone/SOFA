@@ -31,6 +31,7 @@ from frontier_lifecycle import (
     render_frontier_layer_coverage_md,
     validate_registry,
 )
+from frontier_review import write_atomic
 from workspace_contract import (
     ArtifactSpec,
     artifact_contract_for_mode,
@@ -332,11 +333,15 @@ python scripts/capability_check.py --json
     # Create frontier_registry.json for registry schema v3 state.
     if not registry_exists:
         if repaired_workflow is not None:
-            with open(workflow_path, "w", encoding="utf-8") as f:
-                f.write(repaired_workflow)
+            write_atomic(workflow_path, repaired_workflow)
             updated.append("research_workflow.md")
-        with open(registry_path, "w", encoding="utf-8") as f:
-            json.dump(registry_document, f, indent=2, ensure_ascii=False)
+            write_atomic(
+                registry_path,
+                json.dumps(registry_document, indent=2, ensure_ascii=False),
+            )
+        else:
+            with open(registry_path, "w", encoding="utf-8") as f:
+                json.dump(registry_document, f, indent=2, ensure_ascii=False)
         created.append("frontier_registry.json")
     else:
         skipped_existing.append("frontier_registry.json")
