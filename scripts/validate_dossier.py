@@ -7,10 +7,10 @@ Mode-aware: applies correct checks for Ticker Dive vs Sector Hunt workflows.
 Must be called before Stage 5 (Final Verdict).
 
 Usage:
-    python validate_dossier.py <WORKSPACE_PATH>
+    python scripts/validate_dossier.py <WORKSPACE_PATH>
 
 Example:
-    python validate_dossier.py /path/to/sofa_workspace
+    python scripts/validate_dossier.py ./workspace/sofa_workspace
 """
 
 import json

@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 # Resolve the repo root from this file's location so the script works from any
-# working directory on any OS (no hard-coded /tmp or absolute paths).
+# working directory on any OS (no hard-coded temporary-directory or absolute paths).
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FAIL_UNDER = 90
 # Coverage target mirrors the original shell script: the pure lifecycle model

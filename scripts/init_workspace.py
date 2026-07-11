@@ -6,11 +6,11 @@ Creates a SOFA workspace directory structure and initializes all required
 state files. Must be called as the FIRST action in any SOFA research session.
 
 Usage:
-    python init_workspace.py <TICKER_OR_THEME> <WORKSPACE_PATH> [--mode ticker|sector]
+    python scripts/init_workspace.py <TICKER_OR_THEME> <WORKSPACE_PATH> [--mode ticker|sector]
 
 Example:
-    python init_workspace.py MXL /path/to/workspace --mode ticker
-    python init_workspace.py "AI Optical Interconnect" /path/to/workspace --mode sector
+    python scripts/init_workspace.py MXL ./workspace/mxl --mode ticker
+    python scripts/init_workspace.py "AI Optical Interconnect" ./workspace/ai-optical-interconnect --mode sector
 """
 
 import argparse
@@ -233,10 +233,10 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
         with open(capability_report_path, "w", encoding="utf-8") as f:
             f.write(f"""# Capability Report: {ticker_or_theme}
 
-Run from the project root:
+Run from the repository root:
 
 ```bash
-python SOFA/scripts/capability_check.py --json
+python scripts/capability_check.py --json
 ```
 
 | Capability | Mode | Status | Notes |
@@ -332,7 +332,7 @@ python SOFA/scripts/capability_check.py --json
     print(f"")
 
     print(f"  Capability check:")
-    print(f"    Run python SOFA/scripts/capability_check.py --json from the project root.")
+    print(f"    Run python scripts/capability_check.py --json from the repository root.")
     for line in render_setup_recommendation_lines():
         print(f"    {line}")
     print(f"")

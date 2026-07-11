@@ -1,5 +1,7 @@
+import re
 import unittest
 from pathlib import Path
+from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,9 +12,19 @@ ALLOWED_HOST_SPECIFIC_FRAGMENTS = (
 )
 CACHE_DIR_NAMES = {
     "__pycache__",
-    ".pytest_cache",
     ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".superpowers",
+    ".tox",
+    ".venv",
     ".git",
+    ".worktrees",
+    "build",
+    "dist",
+    "htmlcov",
+    "node_modules",
+    "venv",
 }
 TEXT_SUFFIXES_TO_SCAN = {
     ".md",
@@ -50,6 +62,38 @@ FORBIDDEN_HOST_SPECIFIC_TERMS = (
     "AskUser" "Question",
     "Web" "Search",
     "Web" "Fetch",
+)
+MARKDOWN_INLINE_LINK = re.compile(r"!?\[[^\]]*\]\((?P<target>[^)\n]+)\)")
+MARKDOWN_REFERENCE_LINK = re.compile(
+    r"^\s*\[[^\]]+\]:\s*(?P<target><[^>]+>|\S+)",
+    re.MULTILINE,
+)
+EXTERNAL_LINK_SCHEMES = (
+    "data:",
+    "http:",
+    "https:",
+    "mailto:",
+    "plugin:",
+)
+URL_LITERAL = re.compile(
+    r"(?:data:|https?://|mailto:|plugin:)[^\s<>)\]\"']+",
+    re.IGNORECASE,
+)
+ABSOLUTE_LOCAL_LITERAL = re.compile(
+    r"(?P<windows>(?<![A-Za-z0-9_])[A-Za-z]:[\\/])"
+    r"|(?P<unc>(?<![\\])\\\\[A-Za-z0-9._-]+[\\/])"
+    r"|(?P<posix>/(?:path/to|tmp|home|Users)(?![A-Za-z0-9_.-]))",
+    re.IGNORECASE,
+)
+REPO_SELF_PREFIX = re.compile(
+    r"(?<![A-Za-z0-9_.-])SOFA/(?:scripts|tests|skills|docs)"
+    r"(?:/|(?=[\s`'\".,;:)]|$))"
+)
+ROOT_LEAK_LITERALS = (
+    "project serenity",
+    ".worktrees",
+    "serenity-osint-v3.6.0",
+    "docs/superpowers",
 )
 
 
@@ -136,14 +180,112 @@ class TestSofaStructure(unittest.TestCase):
             + "\n".join(violations),
         )
 
+    def test_repository_file_references_are_self_contained(self):
+        violations = []
+        for path in _repo_text_files():
+            rel = path.relative_to(ROOT).as_posix()
+            text = path.read_text(encoding="utf-8")
+
+            if "tests" not in path.relative_to(ROOT).parts:
+                for line_number, line in enumerate(text.splitlines(), start=1):
+                    local_text = URL_LITERAL.sub("", line)
+                    for match in ABSOLUTE_LOCAL_LITERAL.finditer(local_text):
+                        violations.append(
+                            f"absolute-local:{rel}:{line_number}: {match.group(0)}"
+                        )
+                    match = REPO_SELF_PREFIX.search(local_text)
+                    if match:
+                        violations.append(
+                            f"repo-self-prefix:{rel}:{line_number}: {match.group(0)}"
+                        )
+                    lowered = local_text.casefold()
+                    for literal in ROOT_LEAK_LITERALS:
+                        if literal.casefold() in lowered:
+                            violations.append(
+                                f"root-leak:{rel}:{line_number}: {literal}"
+                            )
+
+            if path.suffix == ".md":
+                violations.extend(_markdown_link_violations(path, text))
+
+        self.assertEqual(
+            [],
+            sorted(violations),
+            "Repository references must be relative and self-contained:\n"
+            + "\n".join(sorted(violations)),
+        )
+
 
 def _should_scan_path(path):
     if not path.is_file():
         return False
-    if any(part in CACHE_DIR_NAMES for part in path.parts):
+    relative_parts = path.relative_to(ROOT).parts
+    if any(part in CACHE_DIR_NAMES for part in relative_parts):
         return False
     if path.name.endswith("~"):
         return False
     if path.suffix in BINARY_OR_TEMP_SUFFIXES:
         return False
     return path.suffix in TEXT_SUFFIXES_TO_SCAN
+
+
+def _repo_text_files():
+    return sorted(
+        (path for path in ROOT.rglob("*") if _should_scan_path(path)),
+        key=lambda path: path.relative_to(ROOT).as_posix(),
+    )
+
+
+def _markdown_link_violations(path, text):
+    violations = []
+    rel = path.relative_to(ROOT).as_posix()
+    matches = list(MARKDOWN_INLINE_LINK.finditer(text))
+    matches.extend(MARKDOWN_REFERENCE_LINK.finditer(text))
+    for match in matches:
+        target = _markdown_link_target(match.group("target"))
+        if not target or target.startswith("#"):
+            continue
+        if target.casefold().startswith(EXTERNAL_LINK_SCHEMES):
+            continue
+
+        line_number = text.count("\n", 0, match.start()) + 1
+        decoded_target = unquote(target)
+        if _is_absolute_local_link(decoded_target):
+            violations.append(
+                f"markdown-link-absolute:{rel}:{line_number}: {target}"
+            )
+            continue
+
+        local_target = decoded_target.split("#", 1)[0].split("?", 1)[0]
+        if not local_target:
+            continue
+        resolved = (path.parent / local_target).resolve()
+        try:
+            resolved.relative_to(ROOT.resolve())
+        except ValueError:
+            violations.append(
+                f"markdown-link-outside:{rel}:{line_number}: {target}"
+            )
+            continue
+        if not resolved.exists():
+            violations.append(
+                f"markdown-link-missing:{rel}:{line_number}: {target}"
+            )
+    return violations
+
+
+def _markdown_link_target(raw_target):
+    target = raw_target.strip()
+    if target.startswith("<"):
+        closing = target.find(">")
+        if closing != -1:
+            return target[1:closing]
+    return target.split(maxsplit=1)[0] if target else ""
+
+
+def _is_absolute_local_link(target):
+    return (
+        target.startswith(("/", "\\\\"))
+        or re.match(r"^[A-Za-z]:[\\/]", target) is not None
+        or target.casefold().startswith("file:")
+    )
