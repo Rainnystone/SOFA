@@ -20,7 +20,7 @@ CACHE_DIR_NAMES = {
     ".tox",
     ".venv",
     ".git",
-    ".worktrees",
+    "." + "worktrees",
     "build",
     "dist",
     "htmlcov",
@@ -118,8 +118,11 @@ WINDOWS_ROOTED_PATH = re.compile(
     r"(?<![A-Za-z0-9_:\\])\\(?!\\)"
     r"(?:[A-Za-z0-9._~-]{2,}\\)+[A-Za-z0-9._~-]{2,}"
 )
+WINDOWS_ROOTED_SINGLE_TOKEN = re.compile(
+    r"(?<!\S)\\(?!\\)[A-Za-z0-9._~-]{2,}(?=$|[\s`'\"<>|,;:)])"
+)
 FILE_URI_PATH = re.compile(
-    r"(?<![A-Za-z0-9+.-])file:/{1,}(?=[A-Za-z0-9._~-])[^\s`'\"<>]+",
+    r"(?<![A-Za-z0-9+.-])file:/{1,}(?=[%A-Za-z0-9._~-])[^\s`'\"<>]+",
     re.IGNORECASE,
 )
 POSIX_ABSOLUTE_PATH = re.compile(
@@ -128,15 +131,21 @@ POSIX_ABSOLUTE_PATH = re.compile(
     r"(?=$|[\\/\s`'\"<>)\],.;:#?])",
     re.IGNORECASE,
 )
+POSIX_SINGLE_TOKEN_PATH = re.compile(
+    r"(?<!\S)/(?!/)"
+    r"(?!(?:tmp|home|Users)(?=$|[\\/\s`'\"<>)\],.;:#?]))"
+    r"[A-Za-z0-9._~+-]{2,}(?=$|[\s`'\"<>)\],.;:#?])",
+    re.IGNORECASE,
+)
 REPO_SELF_PREFIX = re.compile(
-    r"(?<![A-Za-z0-9_./\\-])SOFA[\\/][^\s`'\"<>]+",
+    r"(?<![A-Za-z0-9_./\\-])(?:\./)?SOFA[\\/][^\s`'\"<>]*",
     re.IGNORECASE,
 )
 ROOT_LEAK_LITERALS = (
-    "project serenity",
-    ".worktrees",
-    "serenity-osint-v3.6.0",
-    "docs/superpowers",
+    "project " + "serenity",
+    "." + "worktrees",
+    "serenity-osint-" + "v3.6.0",
+    "docs/" + "superpowers",
 )
 TRAVERSAL_PATH_SEGMENT = re.compile(r"(?:^|[\\/])\.\.[\\/]")
 TEST_PATH_LITERAL_ALLOWLIST = {
@@ -384,7 +393,7 @@ class TestSofaStructure(unittest.TestCase):
             Path("research_workflow.md"),
             Path("state.json"),
             Path(".superpowers/review.md"),
-            Path(".worktrees/review/tests/test_review.py"),
+            Path("." + "worktrees/review/tests/test_review.py"),
             Path("build/report.txt"),
             Path("dist/report.json"),
             Path("docs/__pycache__/cache.py"),
@@ -436,6 +445,40 @@ class TestSofaStructure(unittest.TestCase):
             if kinds != [expected_kind]:
                 mismatched.append((label, kinds))
         unexpected = [(text, detector(text)) for text in negatives if detector(text)]
+        self.assertEqual([], mismatched)
+        self.assertEqual([], unexpected)
+
+    def test_path_shaped_detector_covers_command_boundaries(self):
+        cases = (
+            (
+                "dot-slash-repo-prefix",
+                "python ./" + "SO" + "FA/scripts/tool.py",
+                "repo-self-prefix",
+            ),
+            ("bare-repo-prefix", "inspect " + "SO" + "FA/", "repo-self-prefix"),
+            ("single-token-posix", "cd " + "/" + "opt", "absolute-local"),
+            ("single-token-windows-rooted", "type " + "\\" + "boot.ini", "absolute-local"),
+            (
+                "percent-encoded-file-uri",
+                "open file:" + "///" + "%2Fetc%2Fpasswd",
+                "absolute-local",
+            ),
+        )
+        negatives = (
+            "regex " + "\\" + "d",
+            "option=" + "/" + "opt",
+        )
+
+        mismatched = []
+        for label, text, expected_kind in cases:
+            kinds = [kind for kind, _matched in _local_path_reference_findings(text)]
+            if kinds != [expected_kind]:
+                mismatched.append((label, kinds))
+        unexpected = [
+            (text, _local_path_reference_findings(text))
+            for text in negatives
+            if _local_path_reference_findings(text)
+        ]
         self.assertEqual([], mismatched)
         self.assertEqual([], unexpected)
 
@@ -491,6 +534,31 @@ class TestSofaStructure(unittest.TestCase):
             [key for key, entry in allowlist.items() if not entry["reason"].strip()],
         )
 
+    def test_non_python_test_text_uses_line_reference_scan(self):
+        scan = globals().get("_repository_text_line_violations")
+        self.assertIsNotNone(scan, "Repository text line scanner is required")
+
+        relative_path = Path("tests/fixtures/config.yml")
+        absolute_path = "D:" + "\\" + "developer\\fixture.json"
+        self.assertEqual(
+            [
+                "absolute-local:tests/fixtures/config.yml:1: "
+                + absolute_path
+            ],
+            scan(relative_path, f"fixture: {absolute_path}\n"),
+        )
+
+    def test_python_test_ast_classifies_root_leak(self):
+        relative_path = Path("tests/test_future_root_leak.py")
+        root_leak = "project " + "serenity/fixture.json"
+        source = f"fixture = {root_leak!r}\n"
+
+        occurrences = _python_string_path_occurrences(relative_path, source)
+        self.assertEqual(
+            ((1, ("root-leak",)),),
+            occurrences.get((relative_path.as_posix(), root_leak)),
+        )
+
     def test_markdown_network_path_is_external_but_unc_is_local(self):
         markdown_path = ROOT / "docs/network-link-fixture.md"
         self.assertEqual(
@@ -516,22 +584,10 @@ class TestSofaStructure(unittest.TestCase):
     def test_repository_file_references_are_self_contained(self):
         violations = []
         for path in _repo_text_files():
-            rel = path.relative_to(ROOT).as_posix()
             text = path.read_text(encoding="utf-8")
-
-            if "tests" not in path.relative_to(ROOT).parts:
-                for line_number, line in enumerate(text.splitlines(), start=1):
-                    local_text = _visible_local_reference_text(line)
-                    for kind, matched in _local_path_reference_findings(line):
-                        violations.append(
-                            f"{kind}:{rel}:{line_number}: {matched}"
-                        )
-                    lowered = local_text.casefold()
-                    for literal in ROOT_LEAK_LITERALS:
-                        if literal.casefold() in lowered:
-                            violations.append(
-                                f"root-leak:{rel}:{line_number}: {literal}"
-                            )
+            violations.extend(
+                _repository_text_line_violations(path.relative_to(ROOT), text)
+            )
 
             if path.suffix == ".md":
                 violations.extend(_markdown_link_violations(path, text))
@@ -598,13 +654,37 @@ def _local_path_reference_findings(text):
         WINDOWS_DRIVE_PATH,
         WINDOWS_UNC_PATH,
         WINDOWS_ROOTED_PATH,
+        WINDOWS_ROOTED_SINGLE_TOKEN,
         POSIX_ABSOLUTE_PATH,
+        POSIX_SINGLE_TOKEN_PATH,
     ):
         for match in pattern.finditer(visible):
             findings.append(("absolute-local", match.group(0)))
     for match in REPO_SELF_PREFIX.finditer(visible):
         findings.append(("repo-self-prefix", match.group(0)))
     return findings
+
+
+def _repository_text_line_violations(relative_path, text):
+    relative_path = Path(relative_path)
+    if (
+        relative_path.parts
+        and relative_path.parts[0] == "tests"
+        and relative_path.suffix.casefold() == ".py"
+    ):
+        return []
+
+    rel = relative_path.as_posix()
+    violations = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        visible = _visible_local_reference_text(line)
+        for kind, matched in _local_path_reference_findings(line):
+            violations.append(f"{kind}:{rel}:{line_number}: {matched}")
+        lowered = visible.casefold()
+        for literal in ROOT_LEAK_LITERALS:
+            if literal.casefold() in lowered:
+                violations.append(f"root-leak:{rel}:{line_number}: {literal}")
+    return violations
 
 
 def _python_string_path_occurrences(relative_path, source):
@@ -617,6 +697,9 @@ def _python_string_path_occurrences(relative_path, source):
         kinds = [kind for kind, _matched in _local_path_reference_findings(node.value)]
         if TRAVERSAL_PATH_SEGMENT.search(node.value):
             kinds.append("traversal")
+        visible = _visible_local_reference_text(node.value).casefold()
+        if any(literal.casefold() in visible for literal in ROOT_LEAK_LITERALS):
+            kinds.append("root-leak")
         if not kinds:
             continue
         key = (relative_path, node.value)
