@@ -31,7 +31,11 @@ from frontier_lifecycle import (
     render_frontier_layer_coverage_md,
     validate_registry,
 )
-from workspace_contract import ArtifactSpec, artifact_contract_for_mode
+from workspace_contract import (
+    ArtifactSpec,
+    artifact_contract_for_mode,
+    upsert_managed_block_after,
+)
 
 try:
     from framing_contract import empty_contract, render_contract_markdown
@@ -71,6 +75,7 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
     # Normalize workspace path
     workspace_path = os.path.normpath(workspace_path)
     created = []
+    updated = []
     skipped_existing = []
     contract = artifact_contract_for_mode(mode)
     mode = contract.mode
@@ -105,6 +110,17 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
             render_frontier_layer_coverage_md(registry_document),
         )
     layer_block_section = f"{layer_block_md}\n\n" if layer_block_md else ""
+
+    repaired_workflow = None
+    if workflow_exists and not registry_exists:
+        with open(workflow_path, "r", encoding="utf-8") as handle:
+            workflow_text = handle.read()
+        repaired_workflow = upsert_managed_block_after(
+            workflow_text,
+            "frontier-layer-coverage",
+            render_frontier_layer_coverage_md(registry_document),
+            after_block_name="frontier-discovery-log",
+        )
 
     # Create directory structure (common)
     _create_directories(workspace_path, contract.directory_specs, created, skipped_existing)
@@ -159,7 +175,8 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
 """)
         created.append("research_workflow.md")
     else:
-        skipped_existing.append("research_workflow.md")
+        if repaired_workflow is None:
+            skipped_existing.append("research_workflow.md")
 
     # Create evidence_ledger.md
     ledger_path = os.path.join(workspace_path, "evidence_ledger.md")
@@ -314,6 +331,10 @@ python scripts/capability_check.py --json
 
     # Create frontier_registry.json for registry schema v3 state.
     if not registry_exists:
+        if repaired_workflow is not None:
+            with open(workflow_path, "w", encoding="utf-8") as f:
+                f.write(repaired_workflow)
+            updated.append("research_workflow.md")
         with open(registry_path, "w", encoding="utf-8") as f:
             json.dump(registry_document, f, indent=2, ensure_ascii=False)
         created.append("frontier_registry.json")
@@ -327,6 +348,9 @@ python scripts/capability_check.py --json
     print(f"  Mode: {'Ticker Dive' if mode == 'ticker' else 'Sector Hunt'}")
     print(f"  Created:")
     _print_items(created)
+    if updated:
+        print(f"  Updated:")
+        _print_items(updated)
     print(f"  Skipped existing:")
     _print_items(skipped_existing)
     print(f"")
