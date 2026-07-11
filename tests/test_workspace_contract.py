@@ -372,6 +372,70 @@ class TestFramingContractArtifactAndManagedBlocks(unittest.TestCase):
                 after_block_name="unknown-anchor",
             )
 
+    def test_strict_replace_after_anchor_requires_target_and_original_topology(self):
+        replace_after = getattr(
+            workspace_contract,
+            "replace_managed_block_after",
+            None,
+        )
+        self.assertIsNotNone(
+            replace_after,
+            "replace_managed_block_after must be exported",
+        )
+        anchor = managed_block_for_name("frontier-discovery-log")
+        target = managed_block_for_name("frontier-layer-coverage")
+        valid_anchor = "\n".join(
+            [anchor.start_marker, "discovery content", anchor.end_marker]
+        )
+        valid_target = "\n".join(
+            [target.start_marker, "old coverage", target.end_marker]
+        )
+        valid = "\n\n".join([valid_anchor, valid_target])
+
+        replaced = replace_after(
+            valid,
+            "frontier-layer-coverage",
+            "new coverage",
+            after_block_name="frontier-discovery-log",
+        )
+        self.assertIn(
+            f"{target.start_marker}\nnew coverage\n{target.end_marker}",
+            replaced,
+        )
+        with self.assertRaisesRegex(ValueError, "has no start marker"):
+            replace_after(
+                valid_anchor,
+                "frontier-layer-coverage",
+                "new coverage",
+                after_block_name="frontier-discovery-log",
+            )
+
+        hidden_markers = {
+            "start": anchor.start_marker,
+            "end": anchor.end_marker,
+        }
+        for marker_kind, hidden_marker in hidden_markers.items():
+            with self.subTest(marker_kind=marker_kind):
+                malformed_target = "\n".join(
+                    [
+                        target.start_marker,
+                        "old coverage",
+                        hidden_marker,
+                        target.end_marker,
+                    ]
+                )
+                malformed = "\n\n".join([valid_anchor, malformed_target])
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"exactly one {marker_kind} marker",
+                ):
+                    replace_after(
+                        malformed,
+                        "frontier-layer-coverage",
+                        "new coverage",
+                        after_block_name="frontier-discovery-log",
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

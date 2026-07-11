@@ -249,9 +249,22 @@ def format_frontier_layer_advisories(
     coverage: dict[str, Any],
     *,
     prefix: str = "",
-    marker_safe_markdown: bool = False,
 ) -> list[str]:
-    """Format structured layer advisories in their deterministic scan order."""
+    """Format structured layer advisories without managed-Markdown encoding."""
+    return _format_frontier_layer_advisories(
+        coverage,
+        prefix=prefix,
+        marker_safe_markdown=False,
+    )
+
+
+def _format_frontier_layer_advisories(
+    coverage: dict[str, Any],
+    *,
+    prefix: str,
+    marker_safe_markdown: bool,
+) -> list[str]:
+    """Format layer advisories in deterministic scan order for one output view."""
     layer_by_index = {layer["index"]: layer for layer in coverage["layers"]}
     lines: list[str] = []
     unrepresented_indexes: list[int] = []
@@ -323,11 +336,7 @@ def format_frontier_layer_advisories(
     return lines
 
 
-def render_frontier_layer_coverage_md(
-    registry: dict[str, Any],
-    *,
-    marker_safe_markdown: bool = True,
-) -> str:
+def render_frontier_layer_coverage_md(registry: dict[str, Any]) -> str:
     """Render only the deterministic managed-block interior for layer coverage."""
     coverage = derive_frontier_layer_coverage(registry)
     lines = [f"> {FRONTIER_LAYER_SEMANTIC_LIMIT}", ""]
@@ -361,10 +370,7 @@ def render_frontier_layer_coverage_md(
             lines.append(
                 "| "
                 + " | ".join(
-                    _escape_markdown_cell(
-                        value,
-                        marker_safe_markdown=marker_safe_markdown,
-                    )
+                    _escape_markdown_cell(value)
                     for value in values
                 )
                 + " |"
@@ -395,10 +401,7 @@ def render_frontier_layer_coverage_md(
             lines.append(
                 "| "
                 + " | ".join(
-                    _escape_markdown_cell(
-                        value,
-                        marker_safe_markdown=marker_safe_markdown,
-                    )
+                    _escape_markdown_cell(value)
                     for value in values
                 )
                 + " |"
@@ -408,10 +411,10 @@ def render_frontier_layer_coverage_md(
         lines.append("")
 
     lines.extend(["### Advisory Gaps", ""])
-    advisory_lines = format_frontier_layer_advisories(
+    advisory_lines = _format_frontier_layer_advisories(
         coverage,
         prefix="- ",
-        marker_safe_markdown=marker_safe_markdown,
+        marker_safe_markdown=True,
     )
     lines.extend(advisory_lines or ["- None at this snapshot."])
     return "\n".join(lines) + "\n"
@@ -421,16 +424,10 @@ def _escape_managed_markdown_text(value: Any) -> str:
     return html.escape(str(value), quote=False)
 
 
-def _escape_markdown_cell(
-    value: Any,
-    *,
-    marker_safe_markdown: bool = True,
-) -> str:
+def _escape_markdown_cell(value: Any) -> str:
     if value is None:
         return "none"
-    text = str(value)
-    if marker_safe_markdown:
-        text = _escape_managed_markdown_text(text)
+    text = _escape_managed_markdown_text(value)
     return text.replace("\\", "\\\\").replace("|", "\\|")
 
 
@@ -1000,26 +997,32 @@ def render_review_log_md(registry: dict[str, Any]) -> str:
     wrote_decision = False
 
     for frontier in registry.get("frontiers", []):
-        frontier_id = frontier.get("id")
-        max_reviews = frontier.get("max_reviews", 0)
+        frontier_id = _escape_managed_markdown_text(frontier.get("id"))
+        max_reviews = _escape_managed_markdown_text(frontier.get("max_reviews", 0))
         for decision in frontier.get("review_decisions", []):
             wrote_decision = True
-            review_number = decision.get("review_number")
-            at_loop = decision.get("at_loop")
+            review_number = _escape_managed_markdown_text(decision.get("review_number"))
+            at_loop = _escape_managed_markdown_text(decision.get("at_loop"))
+            decision_text = _escape_managed_markdown_text(decision.get("decision"))
             lines.extend(
                 [
                     f"## Frontier Review: {frontier_id} @ loop {at_loop} (review {review_number}/{max_reviews})",
-                    f"**Decision**: {decision.get('decision')}",
+                    f"**Decision**: {decision_text}",
                 ]
             )
 
             rationale = decision.get("rationale_short")
             if rationale:
-                lines.append(f"**Rationale**: {rationale}")
+                lines.append(
+                    f"**Rationale**: {_escape_managed_markdown_text(rationale)}"
+                )
 
             retire_category = decision.get("retire_category")
             if retire_category:
-                lines.append(f"**Retire category**: {retire_category}")
+                lines.append(
+                    "**Retire category**: "
+                    + _escape_managed_markdown_text(retire_category)
+                )
 
             actions = decision.get("portfolio_actions", [])
             if actions:
@@ -1043,15 +1046,17 @@ def render_discovery_log_md(registry: dict[str, Any]) -> str:
     wrote_action = False
 
     for frontier in registry.get("frontiers", []):
-        frontier_id = frontier.get("id")
+        frontier_id = _escape_managed_markdown_text(frontier.get("id"))
         for decision in frontier.get("review_decisions", []):
             actions = decision.get("portfolio_actions", [])
             if not actions:
                 continue
 
             wrote_action = True
-            at_loop = decision.get("at_loop")
-            review_number = decision.get("review_number")
+            at_loop = _escape_managed_markdown_text(decision.get("at_loop"))
+            review_number = _escape_managed_markdown_text(
+                decision.get("review_number")
+            )
             lines.append(f"## {frontier_id} @ loop {at_loop} (review {review_number})")
             for action in actions:
                 lines.append(f"- {_render_portfolio_action(action)}")
@@ -1257,49 +1262,56 @@ def _render_portfolio_action(action: dict[str, Any]) -> str:
     reason = action.get("reason")
 
     if action_type == "add":
-        frontier = action.get("frontier")
+        frontier = _escape_managed_markdown_text(action.get("frontier"))
         source_frontier = action.get("source_frontier")
         source = action.get("source")
         text = f"Added {frontier}"
         details = []
         if source:
-            details.append(f"source={source}")
+            details.append(
+                f"source={_escape_managed_markdown_text(source)}"
+            )
         if source_frontier:
-            details.append(f"source_frontier={source_frontier}")
+            details.append(
+                "source_frontier="
+                + _escape_managed_markdown_text(source_frontier)
+            )
         if details:
             text = f"{text} ({', '.join(details)})"
         if reason:
-            text = f"{text}: {reason}"
+            text = f"{text}: {_escape_managed_markdown_text(reason)}"
         return text
 
     if action_type == "reject":
-        candidate = action.get("candidate")
+        candidate = _escape_managed_markdown_text(action.get("candidate"))
         text = f"Rejected {candidate}"
         if reason:
-            text = f"{text}: {reason}"
+            text = f"{text}: {_escape_managed_markdown_text(reason)}"
         return text
 
     if action_type == "retire":
-        frontier = action.get("frontier")
+        frontier = _escape_managed_markdown_text(action.get("frontier"))
         category = action.get("category")
         text = f"Retired {frontier}"
         if category:
-            text = f"{text} (category={category})"
+            text = (
+                f"{text} (category={_escape_managed_markdown_text(category)})"
+            )
         if reason:
-            text = f"{text}: {reason}"
+            text = f"{text}: {_escape_managed_markdown_text(reason)}"
         return text
 
     if action_type == "reprioritize":
-        frontier = action.get("frontier")
+        frontier = _escape_managed_markdown_text(action.get("frontier"))
         priority = action.get("priority")
         text = f"Reprioritized {frontier}"
         if priority:
-            text = f"{text} to {priority}"
+            text = f"{text} to {_escape_managed_markdown_text(priority)}"
         if reason:
-            text = f"{text}: {reason}"
+            text = f"{text}: {_escape_managed_markdown_text(reason)}"
         return text
 
-    text = str(action_type)
+    text = _escape_managed_markdown_text(action_type)
     if reason:
-        text = f"{text}: {reason}"
+        text = f"{text}: {_escape_managed_markdown_text(reason)}"
     return text

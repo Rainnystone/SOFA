@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import sys
@@ -29,7 +30,11 @@ from frontier_lifecycle import (
     transition,
     validate_registry,
 )
-from workspace_contract import replace_managed_block, upsert_managed_block_after
+from workspace_contract import (
+    replace_managed_block,
+    replace_managed_block_after,
+    upsert_managed_block_after,
+)
 
 
 REGISTRY_FILE = "frontier_registry.json"
@@ -403,10 +408,7 @@ def command_status(args: argparse.Namespace) -> int:
             )
     if registry["version"] == CURRENT_REGISTRY_VERSION:
         print(
-            render_frontier_layer_coverage_md(
-                registry,
-                marker_safe_markdown=False,
-            ).rstrip("\n")
+            html.unescape(render_frontier_layer_coverage_md(registry)).rstrip("\n")
         )
     else:
         coverage = derive_frontier_layer_coverage(registry)
@@ -592,33 +594,54 @@ def render_workflow(
     refresh_review_logs: bool = False,
     allow_layer_insert: bool = False,
 ) -> str:
+    if refresh_review_logs:
+        rendered_review = render_review_log_md(registry)
+        rendered_discovery = render_discovery_log_md(registry)
+        replace_managed_block(workflow_text, REVIEW_BLOCK, rendered_review)
+        replace_managed_block(workflow_text, DISCOVERY_BLOCK, rendered_discovery)
+
+    if registry["version"] == CURRENT_REGISTRY_VERSION:
+        rendered_layer = render_frontier_layer_coverage_md(registry)
+        if allow_layer_insert:
+            upsert_managed_block_after(
+                workflow_text,
+                LAYER_BLOCK,
+                rendered_layer,
+                after_block_name=DISCOVERY_BLOCK,
+            )
+        else:
+            replace_managed_block_after(
+                workflow_text,
+                LAYER_BLOCK,
+                rendered_layer,
+                after_block_name=DISCOVERY_BLOCK,
+            )
+
     updated = workflow_text
     if refresh_review_logs:
         updated = replace_managed_block(
             updated,
             REVIEW_BLOCK,
-            render_review_log_md(registry),
+            rendered_review,
         )
         updated = replace_managed_block(
             updated,
             DISCOVERY_BLOCK,
-            render_discovery_log_md(registry),
+            rendered_discovery,
         )
     if registry["version"] == CURRENT_REGISTRY_VERSION:
-        rendered = render_frontier_layer_coverage_md(registry)
         if allow_layer_insert:
             updated = upsert_managed_block_after(
                 updated,
                 LAYER_BLOCK,
-                rendered,
+                rendered_layer,
                 after_block_name=DISCOVERY_BLOCK,
             )
         else:
-            updated = replace_managed_block(updated, LAYER_BLOCK, rendered)
-            updated = upsert_managed_block_after(
+            updated = replace_managed_block_after(
                 updated,
                 LAYER_BLOCK,
-                rendered,
+                rendered_layer,
                 after_block_name=DISCOVERY_BLOCK,
             )
     return updated

@@ -1473,6 +1473,122 @@ class TestFrontierReviewCli(unittest.TestCase):
         )
         self.assert_workspace_snapshot(workspace, before)
 
+    def test_add_and_record_reject_discovery_markers_hidden_in_layer_interior_without_writes(self):
+        discovery_markers = {
+            "start": "<!-- SOFA:frontier-discovery-log:start -->",
+            "end": "<!-- SOFA:frontier-discovery-log:end -->",
+        }
+
+        for operation in ("add", "record"):
+            for marker_kind, hidden_marker in discovery_markers.items():
+                with self.subTest(operation=operation, marker_kind=marker_kind):
+                    workspace = self.make_workspace()
+                    self.configure_layers(workspace)
+                    if operation == "record":
+                        self.add_and_start_frontier(workspace)
+                        self.write_loops(workspace)
+                        command = (
+                            "record",
+                            "F1",
+                            "--decision",
+                            "Continued",
+                            "--rationale",
+                            "Evidence remains material",
+                        )
+                    else:
+                        command = (
+                            "add",
+                            "--name",
+                            "Rejected hidden-anchor add",
+                            "--source",
+                            "initial",
+                            "--at-loop",
+                            "1",
+                            "--layer",
+                            "0",
+                        )
+                    self.replace_managed_block_interior(
+                        workspace,
+                        "frontier-layer-coverage",
+                        f"stale coverage\n{hidden_marker}",
+                    )
+                    before = self.workspace_snapshot(workspace)
+
+                    result = self.run_cli(workspace, *command)
+
+                    self.assertEqual(2, result.returncode)
+                    self.assertEqual("", result.stdout)
+                    self.assertEqual(
+                        "ERROR: managed block 'frontier-discovery-log' must have "
+                        f"exactly one {marker_kind} marker\n",
+                        result.stderr,
+                    )
+                    self.assert_workspace_snapshot(workspace, before)
+
+    def test_record_marker_bearing_dynamic_text_stays_raw_in_registry_and_safe_in_workflow(self):
+        load_review_module()
+        from workspace_contract import artifact_contract_for_mode
+
+        workspace = self.make_workspace()
+        self.configure_layers(workspace)
+        self.add_and_start_frontier(workspace)
+        self.write_loops(workspace)
+        contract = artifact_contract_for_mode("ticker")
+        markers = []
+        for block in contract.managed_blocks:
+            markers.extend([block.start_marker, block.end_marker])
+        payload = " / ".join(markers)
+
+        recorded = self.run_cli(
+            workspace,
+            "record",
+            "F1",
+            "--decision",
+            "Continued",
+            "--rationale",
+            payload,
+            "--reject",
+            f"{payload}::{payload}",
+        )
+
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        self.assertEqual("Recorded F1 -> Continued\n", recorded.stdout)
+        registry = self.registry(workspace)
+        decision = registry["frontiers"][0]["review_decisions"][0]
+        self.assertEqual(payload, decision["rationale_short"])
+        self.assertEqual(
+            {"action": "reject", "candidate": payload, "reason": payload},
+            decision["portfolio_actions"][0],
+        )
+
+        workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+        for block in contract.managed_blocks:
+            with self.subTest(block=block.name):
+                self.assertEqual(1, workflow.count(block.start_marker))
+                self.assertEqual(1, workflow.count(block.end_marker))
+                self.assertIn(
+                    block.start_marker.replace("<", "&lt;").replace(">", "&gt;"),
+                    workflow,
+                )
+                self.assertIn(
+                    block.end_marker.replace("<", "&lt;").replace(">", "&gt;"),
+                    workflow,
+                )
+
+        subsequent = self.run_cli(
+            workspace,
+            "add",
+            "--name",
+            "Subsequent marker-safe mutation",
+            "--source",
+            "initial",
+            "--at-loop",
+            "4",
+            "--layer",
+            "0",
+        )
+        self.assertEqual(0, subsequent.returncode, subsequent.stderr)
+
     def test_bind_layer_cli_sets_rebinds_and_clears_the_complete_binding(self):
         workspace = self.make_workspace()
         configured = self.run_cli(

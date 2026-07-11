@@ -379,6 +379,23 @@ def upsert_managed_block_after(
     return replace_managed_block(text, block_name, replacement)
 
 
+def replace_managed_block_after(
+    text: str,
+    block_name: str,
+    replacement: str,
+    *,
+    after_block_name: str,
+) -> str:
+    """Replace an existing block after validating its original anchor topology."""
+    replace_managed_block(text, block_name, replacement)
+    return upsert_managed_block_after(
+        text,
+        block_name,
+        replacement,
+        after_block_name=after_block_name,
+    )
+
+
 def _normalize_relative_path(relative_path: str | Path) -> str:
     raw_text = str(relative_path)
     raw_path = Path(raw_text)

@@ -1,4 +1,5 @@
 import copy
+import html
 import inspect
 from contextlib import redirect_stdout
 from io import StringIO
@@ -3049,6 +3050,40 @@ class TestFrontierLifecycle(unittest.TestCase):
         )
         review_md = self.module.render_review_log_md(registry)
         discovery_md = self.module.render_discovery_log_md(registry)
+        expected_actions = [
+            "- Added F3 (source=discovery, source_frontier=F1): export permit gate",
+            "- Retired F2 (category=answered_out): legacy branch answered",
+            "- Reprioritized F1 to high: raise review priority",
+            "- Rejected Silicon photonics tangent: does not change Layer 0 demand",
+        ]
+        self.assertEqual(
+            "\n".join(
+                [
+                    "# Frontier Review Log",
+                    "",
+                    "## Frontier Review: F1 @ loop 3 (review 1/3)",
+                    "**Decision**: Continued",
+                    "**Rationale**: yield high",
+                    "",
+                    "### Portfolio Actions",
+                    *expected_actions,
+                    "",
+                ]
+            ),
+            review_md,
+        )
+        self.assertEqual(
+            "\n".join(
+                [
+                    "# Frontier Discovery Log",
+                    "",
+                    "## F1 @ loop 3 (review 1)",
+                    *expected_actions,
+                    "",
+                ]
+            ),
+            discovery_md,
+        )
         self.assertIn("## Frontier Review: F1 @ loop 3 (review 1/3)", review_md)
         self.assertIn("**Decision**: Continued", review_md)
         self.assertIn("Added F3", review_md)
@@ -3057,6 +3092,96 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertIn("Silicon photonics tangent", discovery_md)
         self.assertEqual(review_md, self.module.render_review_log_md(registry))
         self.assertEqual(discovery_md, self.module.render_discovery_log_md(registry))
+
+    def test_review_and_discovery_renderers_encode_registered_markers_in_every_dynamic_field(self):
+        script_dir = str(ROOT / "scripts")
+        if script_dir not in sys.path:
+            sys.path.insert(0, script_dir)
+        from workspace_contract import artifact_contract_for_mode
+
+        markers = []
+        for block in artifact_contract_for_mode("ticker").managed_blocks:
+            markers.extend([block.start_marker, block.end_marker])
+        dynamic = " / ".join(markers)
+        encoded = html.escape(dynamic, quote=False)
+        registry = self.registry()
+        frontier = registry["frontiers"][0]
+        frontier["id"] = dynamic
+        frontier["max_reviews"] = dynamic
+        frontier["review_decisions"] = [
+            {
+                "review_number": dynamic,
+                "at_loop": dynamic,
+                "decision": dynamic,
+                "retire_category": dynamic,
+                "rationale_short": dynamic,
+                "portfolio_actions": [
+                    {
+                        "action": "add",
+                        "frontier": dynamic,
+                        "source": dynamic,
+                        "source_frontier": dynamic,
+                        "reason": dynamic,
+                    },
+                    {
+                        "action": "reject",
+                        "candidate": dynamic,
+                        "reason": dynamic,
+                    },
+                    {
+                        "action": "retire",
+                        "frontier": dynamic,
+                        "category": dynamic,
+                        "reason": dynamic,
+                    },
+                    {
+                        "action": "reprioritize",
+                        "frontier": dynamic,
+                        "priority": dynamic,
+                        "reason": dynamic,
+                    },
+                ],
+            }
+        ]
+        original = copy.deepcopy(registry)
+
+        review_md = self.module.render_review_log_md(registry)
+        discovery_md = self.module.render_discovery_log_md(registry)
+
+        for marker in markers:
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, review_md)
+                self.assertNotIn(marker, discovery_md)
+        self.assertIn(
+            f"## Frontier Review: {encoded} @ loop {encoded} "
+            f"(review {encoded}/{encoded})",
+            review_md,
+        )
+        self.assertIn(f"**Decision**: {encoded}", review_md)
+        self.assertIn(f"**Rationale**: {encoded}", review_md)
+        self.assertIn(f"**Retire category**: {encoded}", review_md)
+        expected_actions = (
+            f"Added {encoded} (source={encoded}, source_frontier={encoded}): {encoded}",
+            f"Rejected {encoded}: {encoded}",
+            f"Retired {encoded} (category={encoded}): {encoded}",
+            f"Reprioritized {encoded} to {encoded}: {encoded}",
+        )
+        for action in expected_actions:
+            self.assertIn(action, review_md)
+            self.assertIn(action, discovery_md)
+        self.assertIn(
+            f"## {encoded} @ loop {encoded} (review {encoded})",
+            discovery_md,
+        )
+        self.assertEqual(original, registry)
+        self.assertEqual(
+            ["registry"],
+            list(inspect.signature(self.module.render_frontier_layer_coverage_md).parameters),
+        )
+        self.assertEqual(
+            ["coverage", "prefix"],
+            list(inspect.signature(self.module.format_frontier_layer_advisories).parameters),
+        )
 
     def test_review_and_discovery_rendering_covers_empty_and_unknown_actions(self):
         empty_registry = self.registry()
