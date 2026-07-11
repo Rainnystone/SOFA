@@ -239,10 +239,12 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
             missing.extend(sc_violations)
 
         # 3. Timeliness Checker: recent events must be tracked
-        if ledger_content is not None:
-            passed_time, time_violations = check_timeliness(workspace_path)
-            if not passed_time:
-                missing.extend(time_violations)
+        passed_time, time_violations = check_timeliness(
+            workspace_path,
+            ledger_text=ledger_content,
+        )
+        if not passed_time:
+            missing.extend(time_violations)
 
         # Check for Serendipity Loop findings (required after 3 frontiers)
         wf_path = os.path.join(workspace_path, "research_workflow.md")

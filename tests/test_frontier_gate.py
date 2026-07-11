@@ -365,8 +365,89 @@ class TestFrontierGateIntegration(unittest.TestCase):
         self.assertNotIn("Traceback", cli_output)
         self.assertNotIn("UnicodeDecodeError", cli_output)
 
+    def test_stage2_unavailable_ledger_preserves_workflow_timeliness_diagnostics(self):
+        workflow_violation = (
+            "research_workflow.md does not appear to have Stage 0 search records"
+        )
+        cases = (
+            ("missing", "evidence_ledger.md not found"),
+            (
+                "malformed",
+                "evidence ledger invalid: 'utf-8' codec can't decode byte 0xff "
+                "in position 0: invalid start byte",
+            ),
+        )
+
+        for case, ledger_violation in cases:
+            with self.subTest(case=case):
+                workspace = self.make_stage_2_ticker_workspace()
+                registry = self.layered_v3_registry(first_status="Active")
+                registry["frontiers"][0]["layer"] = None
+                registry["frontiers"][5]["layer"] = 4
+                self.write_layered_v3_registry(workspace, registry)
+
+                workflow_path = workspace / "research_workflow.md"
+                workflow = workflow_path.read_text(encoding="utf-8")
+                workflow = workflow.replace("# Research Workflow", "# Workflow")
+                workflow = workflow.replace(
+                    "Initial search notes include recent product launch and search records.",
+                    "Stage 0 framing context is documented.",
+                )
+                workflow_path.write_text(workflow, encoding="utf-8")
+
+                ledger_path = workspace / "evidence_ledger.md"
+                if case == "missing":
+                    ledger_path.unlink()
+                else:
+                    ledger_path.write_bytes(b"\xff")
+
+                result, stdout = self.check_gate_with_stdout(workspace)
+                completed = self.run_gate(workspace)
+                cli_output = completed.stdout + completed.stderr
+
+                self.assertEqual(
+                    (False, [ledger_violation, workflow_violation]),
+                    result,
+                )
+                self.assertEqual("", stdout)
+                self.assertNotEqual(0, completed.returncode)
+                self.assertEqual(1, completed.stdout.count(ledger_violation))
+                self.assertEqual(1, completed.stdout.count(workflow_violation))
+                self.assertNotIn("[WARN]", stdout + cli_output)
+                self.assertNotIn("Traceback", stdout + cli_output)
+
+    def test_timeliness_standalone_default_still_checks_ledger_and_workflow(self):
+        from timeliness_checker import check_timeliness
+
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        workspace = Path(temp_dir.name) / "ticker-workspace"
+        workspace.mkdir()
+        (workspace / "evidence_ledger.md").write_text(
+            "# Evidence Ledger\n\nHistorical context only.\n",
+            encoding="utf-8",
+        )
+        (workspace / "research_workflow.md").write_text(
+            "# Workflow\n\nStage 0 framing context is documented.\n",
+            encoding="utf-8",
+        )
+
+        result = check_timeliness(str(workspace))
+
+        self.assertEqual(
+            (
+                False,
+                [
+                    "No timeliness/recent events recorded in evidence_ledger.md",
+                    "research_workflow.md does not appear to have Stage 0 search records",
+                ],
+            ),
+            result,
+        )
+
     def test_stage2_gate_reuses_one_registry_and_ledger_snapshot(self):
         from loop_enforcer import check_loop_depth_from_documents as real_document_helper
+        import timeliness_checker
 
         workspace = self.make_stage_2_ticker_workspace()
         registry = self.layered_v3_registry()
@@ -377,12 +458,15 @@ class TestFrontierGateIntegration(unittest.TestCase):
         real_loader = gate_check.load_frontier_registry
         real_coverage = gate_check.derive_frontier_layer_coverage
         real_lifecycle = gate_check.validate_for_stage_transition
+        real_timeliness = timeliness_checker.check_timeliness
         opened = []
         read_values = {"frontier_registry.json": [], "evidence_ledger.md": []}
         loaded_registries = []
         coverage_inputs = []
         helper_calls = []
         lifecycle_calls = []
+        timeliness_calls = []
+        ledger_not_supplied = object()
 
         class RecordingHandle:
             def __init__(self, handle, name):
@@ -430,9 +514,25 @@ class TestFrontierGateIntegration(unittest.TestCase):
             lifecycle_calls.append((loaded, loop_counts, mode, target_stage))
             return real_lifecycle(loaded, loop_counts, mode, target_stage)
 
+        def recording_timeliness(
+            workspace_path,
+            *,
+            ledger_text=ledger_not_supplied,
+        ):
+            timeliness_calls.append(ledger_text)
+            if ledger_text is ledger_not_supplied:
+                return real_timeliness(workspace_path)
+            return real_timeliness(workspace_path, ledger_text=ledger_text)
+
         stdout = StringIO()
         with (
             mock.patch.object(gate_check, "open", side_effect=recording_open, create=True),
+            mock.patch.object(
+                timeliness_checker,
+                "open",
+                side_effect=recording_open,
+                create=True,
+            ),
             mock.patch.object(
                 gate_check,
                 "load_frontier_registry",
@@ -454,6 +554,11 @@ class TestFrontierGateIntegration(unittest.TestCase):
                 "validate_for_stage_transition",
                 side_effect=recording_lifecycle,
             ),
+            mock.patch.object(
+                gate_check,
+                "check_timeliness",
+                side_effect=recording_timeliness,
+            ),
             redirect_stdout(stdout),
         ):
             result = gate_check.check_gate(str(workspace), "stage_2", "stage_3")
@@ -470,6 +575,7 @@ class TestFrontierGateIntegration(unittest.TestCase):
         self.assertEqual(1, len(coverage_inputs))
         self.assertEqual(1, len(helper_calls))
         self.assertEqual(1, len(lifecycle_calls))
+        self.assertEqual(1, len(timeliness_calls))
 
         loaded = loaded_registries[0]
         helper_ledger, helper_registry, helper_result = helper_calls[0]
@@ -478,6 +584,7 @@ class TestFrontierGateIntegration(unittest.TestCase):
         self.assertIs(loaded, helper_registry)
         self.assertIs(loaded, lifecycle_registry)
         self.assertIs(read_values["evidence_ledger.md"][0], helper_ledger)
+        self.assertIs(read_values["evidence_ledger.md"][0], timeliness_calls[0])
         self.assertEqual(
             (True, {f"F{index}": 3 for index in range(1, 7)}, []),
             helper_result,
