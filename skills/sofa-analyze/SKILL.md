@@ -64,10 +64,10 @@ Mandatory outputs:
 - Blind spot scan with at least six contrarian or risk-oriented searches.
 - For Sector Hunt, an Architecture Shift Brief written to `research_workflow.md`.
 
-After the main thread writes the complete Demand Decomposition Sketch, copy only its six chosen structural labels into the registry:
+After the main thread writes the complete Demand Decomposition Sketch, replace each placeholder below with the exact Layer 0–5 label from that current sketch and copy only those six chosen structural labels into the registry:
 
 ```bash
-python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" set-layers --label 0 "End demand" --label 1 "System or platform" --label 2 "Component or module" --label 3 "Material or process" --label 4 "Constrained input or equipment" --label 5 "Geography or regulation"
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" set-layers --label 0 "<EXACT_LAYER_0_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 1 "<EXACT_LAYER_1_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 2 "<EXACT_LAYER_2_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 3 "<EXACT_LAYER_3_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 4 "<EXACT_LAYER_4_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 5 "<EXACT_LAYER_5_LABEL_FROM_CURRENT_STAGE_0_SKETCH>"
 ```
 
 Every `set-layers` invocation supplies indexes 0 through 5 exactly once. Re-running the same full command is an idempotent repair; changing the full set requires `--replace`. These labels come from the main-thread Stage 0 sketch: the CLI neither generates nor parses that narrative, and structural depth is workspace-defined rather than a fixed hardware taxonomy. `source_frontier` records discovery provenance, while `parent_frontier` is optional structural lineage; they are independent facts. Never hand-edit `frontier_registry.json`.
@@ -91,7 +91,7 @@ Show the options to the user and ask for priority selection when the choice mate
 After the user accepts the frontier set, register each accepted frontier before Stage 2:
 
 ```bash
-python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --layer 0 --at-loop 1
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --layer <ACTUAL_WORKSPACE_LAYER_INDEX_0_TO_5> --at-loop 1
 python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 ```
 

@@ -96,10 +96,10 @@
 
 **输出**：Demand Decomposition Sketch，写入 `research_workflow.md`
 
-主线程先写完完整的 Demand Decomposition Sketch，再只把其中选定的 6 个结构标签复制进 registry：
+主线程先写完完整的 Demand Decomposition Sketch，把下面每个 placeholder 替换为当前 sketch 中对应 Layer 0–5 的精确标签，再只把这 6 个选定的结构标签复制进 registry：
 
 ```bash
-python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" set-layers --label 0 "End demand" --label 1 "System or platform" --label 2 "Component or module" --label 3 "Material or process" --label 4 "Constrained input or equipment" --label 5 "Geography or regulation"
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" set-layers --label 0 "<EXACT_LAYER_0_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 1 "<EXACT_LAYER_1_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 2 "<EXACT_LAYER_2_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 3 "<EXACT_LAYER_3_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 4 "<EXACT_LAYER_4_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 5 "<EXACT_LAYER_5_LABEL_FROM_CURRENT_STAGE_0_SKETCH>"
 ```
 
 每次 `set-layers` 都必须把索引 0 到 5 各提供一次。相同的完整命令可幂等重跑以修复 managed narration；若要改成另一组完整标签，必须加 `--replace`。标签来自主线程的 Stage 0 sketch，CLI 不生成也不解析该叙事；结构深度由当前 workspace 定义，不是固定的硬件 taxonomy。`source_frontier` 记录发现来源，`parent_frontier` 是可选的结构谱系，两者相互独立。不得手工编辑 `frontier_registry.json`。
@@ -183,7 +183,7 @@ Demand slowdown risk: [需求放缓风险]
 用户接受初始 frontier set 后，立即为每个方向注册 lifecycle ID，并启动第一个要执行的 frontier：
 
 ```bash
-python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --layer 0 --at-loop 1
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --layer <ACTUAL_WORKSPACE_LAYER_INDEX_0_TO_5> --at-loop 1
 python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 ```
 
