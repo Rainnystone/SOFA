@@ -402,7 +402,12 @@ def command_status(args: argparse.Namespace) -> int:
                 f"source_frontier={source_frontier}"
             )
     if registry["version"] == CURRENT_REGISTRY_VERSION:
-        print(render_frontier_layer_coverage_md(registry).rstrip("\n"))
+        print(
+            render_frontier_layer_coverage_md(
+                registry,
+                marker_safe_markdown=False,
+            ).rstrip("\n")
+        )
     else:
         coverage = derive_frontier_layer_coverage(registry)
         for line in format_frontier_layer_advisories(
@@ -610,6 +615,12 @@ def render_workflow(
             )
         else:
             updated = replace_managed_block(updated, LAYER_BLOCK, rendered)
+            updated = upsert_managed_block_after(
+                updated,
+                LAYER_BLOCK,
+                rendered,
+                after_block_name=DISCOVERY_BLOCK,
+            )
     return updated
 
 

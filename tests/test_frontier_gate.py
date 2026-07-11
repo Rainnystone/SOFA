@@ -330,13 +330,15 @@ class TestFrontierGateIntegration(unittest.TestCase):
     def test_stage2_malformed_ledger_is_failure_without_traceback(self):
         workspace = self.make_stage_2_ticker_workspace()
         registry = self.layered_v3_registry(first_status="Active")
-        registry["frontiers"][0]["layer"] = None
-        registry["frontiers"][5]["layer"] = 4
+        registry["frontiers"].pop()
         self.write_layered_v3_registry(workspace, registry)
         (workspace / "evidence_ledger.md").write_bytes(b"\xff")
         expected = (
             "evidence ledger invalid: 'utf-8' codec can't decode byte 0xff "
             "in position 0: invalid start byte"
+        )
+        expected_warning = (
+            "[WARN] LAYER_UNREPRESENTED: Layers 5 have no bound frontier."
         )
 
         in_process_error = None
@@ -356,12 +358,12 @@ class TestFrontierGateIntegration(unittest.TestCase):
             leaked.append("CLI leaked UnicodeDecodeError traceback")
         self.assertEqual([], leaked)
         self.assertEqual((False, [expected]), result)
-        self.assertEqual("", stdout)
+        self.assertEqual(expected_warning + "\n", stdout)
         self.assertNotEqual(0, completed.returncode)
         self.assertIn("GATE FAILED: stage_2 -> stage_3", completed.stdout)
         self.assertIn("Missing 1 prerequisite(s):", completed.stdout)
         self.assertEqual(1, completed.stdout.count(expected))
-        self.assertNotIn("[WARN]", completed.stdout)
+        self.assertEqual(1, completed.stdout.count(expected_warning))
         self.assertNotIn("Traceback", cli_output)
         self.assertNotIn("UnicodeDecodeError", cli_output)
 
@@ -382,9 +384,11 @@ class TestFrontierGateIntegration(unittest.TestCase):
             with self.subTest(case=case):
                 workspace = self.make_stage_2_ticker_workspace()
                 registry = self.layered_v3_registry(first_status="Active")
-                registry["frontiers"][0]["layer"] = None
-                registry["frontiers"][5]["layer"] = 4
+                registry["frontiers"].pop()
                 self.write_layered_v3_registry(workspace, registry)
+                expected_warning = (
+                    "[WARN] LAYER_UNREPRESENTED: Layers 5 have no bound frontier."
+                )
 
                 workflow_path = workspace / "research_workflow.md"
                 workflow = workflow_path.read_text(encoding="utf-8")
@@ -409,11 +413,11 @@ class TestFrontierGateIntegration(unittest.TestCase):
                     (False, [ledger_violation, workflow_violation]),
                     result,
                 )
-                self.assertEqual("", stdout)
+                self.assertEqual(expected_warning + "\n", stdout)
                 self.assertNotEqual(0, completed.returncode)
                 self.assertEqual(1, completed.stdout.count(ledger_violation))
                 self.assertEqual(1, completed.stdout.count(workflow_violation))
-                self.assertNotIn("[WARN]", stdout + cli_output)
+                self.assertEqual(1, completed.stdout.count(expected_warning))
                 self.assertNotIn("Traceback", stdout + cli_output)
 
     def test_timeliness_standalone_default_still_checks_ledger_and_workflow(self):

@@ -209,7 +209,7 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
         except (OSError, UnicodeError) as exc:
             missing.append(f"evidence ledger invalid: {exc}")
 
-        if registry is not None and ledger_content is not None:
+        if registry is not None:
             coverage = derive_frontier_layer_coverage(registry)
             for advisory in format_frontier_layer_advisories(
                 coverage,
@@ -217,6 +217,7 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
             ):
                 print(advisory)
 
+        if registry is not None and ledger_content is not None:
             passed_loop, loop_counts, loop_violations = check_loop_depth_from_documents(
                 ledger_content,
                 registry,

@@ -1350,6 +1350,129 @@ class TestFrontierReviewCli(unittest.TestCase):
                     {path.name for path in workspace.iterdir()},
                 )
 
+    def test_marker_bearing_layer_labels_remain_update_safe_and_raw_in_cli_output(self):
+        load_review_module()
+        from workspace_contract import artifact_contract_for_mode
+
+        workspace = self.make_workspace()
+        marker = "<!-- SOFA:frontier-layer-coverage:start -->"
+        label = f"System {marker} authority"
+        labels = [f"Layer {index} label" for index in range(6)]
+        labels[1] = label
+
+        configured = self.run_cli(
+            workspace,
+            "set-layers",
+            *self.layer_label_args(labels=labels),
+        )
+        self.assertEqual(0, configured.returncode, configured.stderr)
+        repeated = self.run_cli(
+            workspace,
+            "set-layers",
+            *self.layer_label_args(labels=labels),
+        )
+        self.assertEqual(0, repeated.returncode, repeated.stderr)
+
+        added = self.run_cli(
+            workspace,
+            "add",
+            "--name",
+            "Marker-safe branch",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "1",
+        )
+        self.assertEqual(0, added.returncode, added.stderr)
+        started = self.run_cli(workspace, "start", "F1")
+        self.assertEqual(0, started.returncode, started.stderr)
+        retired = self.run_cli(
+            workspace,
+            "retire",
+            "F1",
+            "--category",
+            "blocked",
+            "--reason",
+            "Awaiting unavailable evidence",
+        )
+        self.assertEqual(0, retired.returncode, retired.stderr)
+        subsequent = self.run_cli(
+            workspace,
+            "add",
+            "--name",
+            "Subsequent ordinary mutation",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "0",
+        )
+        self.assertEqual(0, subsequent.returncode, subsequent.stderr)
+
+        registry = self.registry(workspace)
+        self.assertEqual(label, registry["layer_labels"][1])
+        status = self.run_cli(workspace, "status")
+        self.assertEqual(0, status.returncode, status.stderr)
+        self.assertIn(label, status.stdout)
+        self.assertNotIn("&lt;", status.stdout)
+
+        workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+        encoded_label = (
+            "System &lt;!-- SOFA:frontier-layer-coverage:start --&gt; authority"
+        )
+        self.assertGreaterEqual(workflow.count(encoded_label), 2)
+        for block in artifact_contract_for_mode("ticker").managed_blocks:
+            with self.subTest(block=block.name):
+                self.assertEqual(1, workflow.count(block.start_marker))
+                self.assertEqual(1, workflow.count(block.end_marker))
+
+    def test_ordinary_v3_mutation_rejects_layer_block_before_discovery_without_writes(self):
+        workspace = self.make_workspace()
+        self.configure_layers(workspace)
+        workflow_path = workspace / "research_workflow.md"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        layer_heading = "## Frontier Layer Coverage\n"
+        layer_end = "<!-- SOFA:frontier-layer-coverage:end -->"
+        discovery_heading = "## Frontier Discovery Log\n"
+        block_start = workflow.index(layer_heading)
+        block_end = workflow.index(layer_end) + len(layer_end)
+        layer_block = workflow[block_start:block_end]
+        without_layer = workflow[:block_start] + workflow[block_end:]
+        insertion = without_layer.index(discovery_heading)
+        workflow_path.write_text(
+            without_layer[:insertion]
+            + layer_block
+            + "\n\n"
+            + without_layer[insertion:],
+            encoding="utf-8",
+        )
+        before = self.workspace_snapshot(workspace)
+
+        result = self.run_cli(
+            workspace,
+            "add",
+            "--name",
+            "Rejected misordered-block add",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "0",
+        )
+
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertEqual(
+            "ERROR: managed block 'frontier-layer-coverage' must appear after "
+            "'frontier-discovery-log'\n",
+            result.stderr,
+        )
+        self.assert_workspace_snapshot(workspace, before)
+
     def test_bind_layer_cli_sets_rebinds_and_clears_the_complete_binding(self):
         workspace = self.make_workspace()
         configured = self.run_cli(

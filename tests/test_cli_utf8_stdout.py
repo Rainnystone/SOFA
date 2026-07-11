@@ -50,6 +50,7 @@ CLI_SCRIPTS_WITH_NON_ASCII_OUTPUT = (
     "assemble_dispatch.py",
     "framing_intake.py",
     "archive_source.py",
+    "init_workspace.py",
     # validate_dossier.py is the reference implementation: already fixed.
     "validate_dossier.py",
 )
@@ -261,23 +262,33 @@ class TestCliStdoutBehaviorUnderLegacyEncoding(unittest.TestCase):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         workspace = Path(temp_dir.name) / "含 空格 的工作区"
-        initialized = subprocess.run(
-            [
-                sys.executable,
-                str(SCRIPTS / "init_workspace.py"),
-                "中文分层路径测试",
-                str(workspace),
-                "--mode",
-                "ticker",
-            ],
-            cwd=str(ROOT),
-            capture_output=True,
+        subject = "中文分层路径测试"
+        initialized = _run_script(
+            SCRIPTS / "init_workspace.py",
+            subject,
+            str(workspace),
+            "--mode",
+            "ticker",
+            cwd=ROOT,
         )
+        init_stdout = initialized.stdout.decode("utf-8")
+        init_stderr = initialized.stderr.decode("utf-8", errors="replace")
         self.assertEqual(
             0,
             initialized.returncode,
-            initialized.stderr.decode("utf-8", errors="replace"),
+            init_stderr,
         )
+        self.assertIn(subject, init_stdout)
+        self.assertIn(str(workspace), init_stdout)
+        self.assertNotIn("UnicodeEncodeError", init_stderr)
+        self.assertNotIn("Traceback", init_stderr)
+        for expected_file in (
+            "frontier_registry.json",
+            "research_workflow.md",
+            "evidence_ledger.md",
+            "state.json",
+        ):
+            self.assertTrue((workspace / expected_file).is_file(), expected_file)
         labels = [
             "终端需求",
             "系统平台",

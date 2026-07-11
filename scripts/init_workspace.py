@@ -348,6 +348,8 @@ def _print_items(items):
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Initialize SOFA workspace")
     parser.add_argument("subject", help="Ticker or theme to research")
     parser.add_argument("workspace_path", help="Path to create workspace")

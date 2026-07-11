@@ -2136,6 +2136,30 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertIn("### Advisory Gaps\n\n- None at this snapshot.\n", represented_rendered)
         self.assertEqual(original_represented, represented)
 
+    def test_managed_layer_markdown_neutralizes_marker_labels_without_changing_cli_text(self):
+        marker = "<!-- SOFA:frontier-layer-coverage:start -->"
+        label = f"System {marker} authority"
+        registry = self.layer_coverage_registry()
+        registry["layer_labels"][1] = label
+        self.module.validate_registry(registry)
+        original = copy.deepcopy(registry)
+
+        coverage = self.module.derive_frontier_layer_coverage(registry)
+        cli_advisories = self.module.format_frontier_layer_advisories(
+            coverage,
+            prefix="[ADVISORY] ",
+        )
+        rendered = self.module.render_frontier_layer_coverage_md(registry)
+        encoded_label = (
+            "System &lt;!-- SOFA:frontier-layer-coverage:start --&gt; authority"
+        )
+
+        self.assertIn(label, "\n".join(cli_advisories))
+        self.assertNotIn("&lt;", "\n".join(cli_advisories))
+        self.assertNotIn(marker, rendered)
+        self.assertEqual(2, rendered.count(encoded_label))
+        self.assertEqual(original, registry)
+
     def test_layer_renderer_sorts_frontier_lineage_and_unbound_ids_numerically(self):
         registry = self.layer_coverage_registry()
         original = copy.deepcopy(registry)

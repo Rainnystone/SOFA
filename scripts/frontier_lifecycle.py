@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import html
 import re
 import unicodedata
 from typing import Any
@@ -248,6 +249,7 @@ def format_frontier_layer_advisories(
     coverage: dict[str, Any],
     *,
     prefix: str = "",
+    marker_safe_markdown: bool = False,
 ) -> list[str]:
     """Format structured layer advisories in their deterministic scan order."""
     layer_by_index = {layer["index"]: layer for layer in coverage["layers"]}
@@ -284,6 +286,8 @@ def format_frontier_layer_advisories(
         elif code == "LAYER_BLOCKED_ONLY":
             index = advisory["layer_indexes"][0]
             label = layer_by_index[index]["label"]
+            if marker_safe_markdown:
+                label = _escape_managed_markdown_text(label)
             message = (
                 f"LAYER_BLOCKED_ONLY: Layer {index} ({label}) has only blocked retired "
                 f"frontiers: {', '.join(frontier_ids)}."
@@ -291,6 +295,9 @@ def format_frontier_layer_advisories(
         elif code == "LAYER_RETIRED_ONLY":
             index = advisory["layer_indexes"][0]
             layer = layer_by_index[index]
+            label = layer["label"]
+            if marker_safe_markdown:
+                label = _escape_managed_markdown_text(label)
             frontier_by_id = {
                 frontier["frontier_id"]: frontier for frontier in layer["frontiers"]
             }
@@ -300,7 +307,7 @@ def format_frontier_layer_advisories(
                 for frontier_id in frontier_ids
             ]
             message = (
-                f"LAYER_RETIRED_ONLY: Layer {index} ({layer['label']}) has only retired "
+                f"LAYER_RETIRED_ONLY: Layer {index} ({label}) has only retired "
                 f"frontiers: {', '.join(facts)}."
             )
         elif code == "FRONTIER_LAYER_UNBOUND":
@@ -316,7 +323,11 @@ def format_frontier_layer_advisories(
     return lines
 
 
-def render_frontier_layer_coverage_md(registry: dict[str, Any]) -> str:
+def render_frontier_layer_coverage_md(
+    registry: dict[str, Any],
+    *,
+    marker_safe_markdown: bool = True,
+) -> str:
     """Render only the deterministic managed-block interior for layer coverage."""
     coverage = derive_frontier_layer_coverage(registry)
     lines = [f"> {FRONTIER_LAYER_SEMANTIC_LIMIT}", ""]
@@ -347,7 +358,17 @@ def render_frontier_layer_coverage_md(registry: dict[str, Any]) -> str:
                 layer["status_counts"]["Retired"],
                 ", ".join(frontier_facts) if frontier_facts else None,
             ]
-            lines.append("| " + " | ".join(_escape_markdown_cell(value) for value in values) + " |")
+            lines.append(
+                "| "
+                + " | ".join(
+                    _escape_markdown_cell(
+                        value,
+                        marker_safe_markdown=marker_safe_markdown,
+                    )
+                    for value in values
+                )
+                + " |"
+            )
 
         lines.extend(
             [
@@ -371,21 +392,46 @@ def render_frontier_layer_coverage_md(registry: dict[str, Any]) -> str:
                 frontier["status"],
                 frontier["retire_category"],
             ]
-            lines.append("| " + " | ".join(_escape_markdown_cell(value) for value in values) + " |")
+            lines.append(
+                "| "
+                + " | ".join(
+                    _escape_markdown_cell(
+                        value,
+                        marker_safe_markdown=marker_safe_markdown,
+                    )
+                    for value in values
+                )
+                + " |"
+            )
         if not lineage:
             lines.append("_No frontiers are registered._")
         lines.append("")
 
     lines.extend(["### Advisory Gaps", ""])
-    advisory_lines = format_frontier_layer_advisories(coverage, prefix="- ")
+    advisory_lines = format_frontier_layer_advisories(
+        coverage,
+        prefix="- ",
+        marker_safe_markdown=marker_safe_markdown,
+    )
     lines.extend(advisory_lines or ["- None at this snapshot."])
     return "\n".join(lines) + "\n"
 
 
-def _escape_markdown_cell(value: Any) -> str:
+def _escape_managed_markdown_text(value: Any) -> str:
+    return html.escape(str(value), quote=False)
+
+
+def _escape_markdown_cell(
+    value: Any,
+    *,
+    marker_safe_markdown: bool = True,
+) -> str:
     if value is None:
         return "none"
-    return str(value).replace("\\", "\\\\").replace("|", "\\|")
+    text = str(value)
+    if marker_safe_markdown:
+        text = _escape_managed_markdown_text(text)
+    return text.replace("\\", "\\\\").replace("|", "\\|")
 
 
 def _compress_layer_indexes(indexes: list[int]) -> str:
