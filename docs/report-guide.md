@@ -50,6 +50,11 @@ Append or link:
 - gate scorecards;
 - financial bridge;
 - red-team trail;
-- watch protocol.
+- watch protocol;
+- registry-derived frontier-layer snapshot.
+
+The frontier-layer snapshot must expose unrepresented layers, blocked-only layers, retired-only layers, unbound frontiers, and structural lineage facts where present. It is a deterministic presence/status view, not proof that any layer has adequate research. The report body may explain how those gaps limit confidence.
+
+The complete company/technology/evidence/double-bottleneck dependency ladder remains main-thread-authored. A frontier's structural parent records research-direction lineage, not an economic dependency edge. The snapshot cannot generate or upgrade an evidence grade, confidence, action class, Ticker conclusion, or Sector ranked queue. Sector Hunt still ends with a map and ranked queue; Ticker Dive or Ultra Dive is required before action-class language.
 
 The appendix exists so the front page can stay readable without losing traceability.

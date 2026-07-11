@@ -190,6 +190,7 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
 
 1. 汇总所有前序阶段的输出：
    - `research_workflow.md`（Pre-Stage 0 ~ Stage 5 全流程记录）
+   - `frontier_registry.json` 及其 registry-derived `frontier-layer-coverage` managed narration
    - `evidence_ledger.md`（Stage 2 证据台账）
    - `scouts/` 目录下各轮 scout 交付文件
    - `challenges/` 目录下各轮 challenge 交付文件
@@ -201,6 +202,12 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
 
 3. 文件命名规则：
    - `[SUBJECT]_SOFA_Report_[YYYY-MM-DD].md`（如可用 docx 技能，优先生成 `.docx`）
+
+### Frontier Layer Snapshot 边界
+
+Audit Appendix 必须包含 registry-derived Frontier Layer Snapshot，并明确列出 unrepresented layers、blocked-only layers、retired-only layers、unbound frontiers，以及存在时的 structural lineage facts。报告正文可以说明这些 gap 如何限制 confidence，但 snapshot 只表达 frontier presence/status，不能证明研究充分性。
+
+完整的 company/technology/evidence/double-bottleneck dependency ladder 始终由主线程撰写；frontier structural parent 是研究方向的谱系，不是经济 dependency edge。Snapshot 不得生成或升级 evidence grade、confidence、action class、Ticker conclusion 或 Sector ranked queue。Sector Hunt 仍以 map 和 ranked queue 结束；只有完成 Ticker Dive 或 Ultra Dive，才能使用 action-class language。
 
 ### 报告结构模板
 
@@ -293,7 +300,10 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
 - 第一次复盘: [日期]
 - Thesis 过期日: [日期]
 
-## 附录
+## Audit Appendix（审计附录）
+
+### Frontier Layer Snapshot
+[从 frontier registry 的确定性派生 narration 提取：列明 unrepresented layers、blocked-only layers、retired-only layers、unbound frontiers，以及存在时的 structural lineage facts。仅表达 presence/status，不把它解释为研究充分性。]
 
 ### 完整 Claim Ledger
 [从 evidence_ledger.md 提取]

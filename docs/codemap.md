@@ -35,8 +35,8 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 
 | Script | Main tests | Responsibility |
 |--------|------------|----------------|
-| `scripts/init_workspace.py` | `tests/test_workspace_scripts.py` | Create workspace files, registry, managed Markdown blocks, and initial state from `workspace_contract` facts. |
-| `scripts/workspace_contract/` | `tests/test_workspace_contract.py`, `tests/test_workspace_scripts.py`, `tests/test_sofa_contract.py` | Canonical workspace artifact/scaffold facts, mode-specific scaffold paths, managed blocks (including registered `ManagedBlock` lookup and `replace_managed_block` helper), and worker-output path classification. |
+| `scripts/init_workspace.py` | `tests/test_workspace_scripts.py` | Create workspace files, the schema-v3 registry, initial state, and deterministic managed blocks (including `frontier-layer-coverage`) from `workspace_contract` facts. |
+| `scripts/workspace_contract/` | `tests/test_workspace_contract.py`, `tests/test_workspace_scripts.py`, `tests/test_sofa_contract.py` | Canonical workspace artifact/scaffold facts, mode-specific paths, managed-block registration/replacement helpers, and worker-output path classification. The layer block is a rendering surface, not another JSON authority. |
 | `scripts/worker_role_catalog/` | `tests/test_worker_role_catalog.py`, `tests/test_sofa_contract.py` | Canonical worker role facts, prompt paths, delivery folders, method-card expectations, source-trace rules, forbidden worker-output classes, and dispatch aliases consumed by `sofa_contract`. |
 | `scripts/capability_policy/` | `tests/test_capability_policy.py`, `tests/test_capability_check.py`, `tests/test_sofa_contract.py` | Canonical capability facts: search chain, provider ids, finance recommendations, search-record vocabulary, and render helpers consumed by `capability_check.py`, `init_workspace.py`, and `sofa_contract`. |
 | `scripts/search_intel.py` | `tests/test_search_intel.py`, `tests/test_cli_utf8_stdout.py` | CLI rendering prior-query digests and advisory yield statistics from `capability_policy.search_records`. |
@@ -44,10 +44,11 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 | `scripts/framing_contract/` + `scripts/framing_intake.py` | `tests/test_framing_contract.py`, `tests/test_cli_utf8_stdout.py` | Stage 0 framing intent contract authority: schema, field vocabulary, completeness evaluation, JSON authority, Markdown mirror, mutation CLI, and research-posture vocabulary. Consumed by `sofa_contract` for the stage_0 gate. |
 | `scripts/source_cache/` + `scripts/archive_source.py` | `tests/test_source_cache.py`, `tests/test_cli_utf8_stdout.py` | Workspace source cache authority: index schema, append-only archival, hash dedupe, validation issue codes, source-id pattern, and bibliography rendering. Consumed by `sofa_contract` and `dispatch_assembly`. |
 | `scripts/sofa_contract/` | `tests/test_sofa_contract.py` | Shared compliance contract package for structured pass/fail/warn results and DSV4P-hardening checks; consumes `workspace_contract` for workspace shape facts and `worker_role_catalog` for role-specific dispatch and worker-output checks. |
-| `scripts/frontier_lifecycle.py` | `tests/test_frontier_lifecycle.py` | Pure lifecycle model: stable ID loop binding, transition legality, review due, portfolio limits, and rendering. |
-| `scripts/frontier_review.py` | `tests/test_frontier_review_cli.py` | CLI for adding, starting, reviewing, retiring, reactivating, and reporting frontier status. |
-| `scripts/loop_enforcer.py` | `tests/test_frontier_lifecycle.py` | Validate ledger loop headers against registry IDs. |
-| `scripts/gate_check.py` | `tests/test_frontier_gate.py` | Enforce stage transition gates, including lifecycle convergence before Stage 3. |
+| `scripts/frontier_lifecycle.py` | `tests/test_frontier_lifecycle.py` | Pure registry/lifecycle model: v2/v3 validation, explicit v2 adoption, layer binding, stable-ID loop facts, transitions, review due, portfolio limits, frontier layer coverage and advisories, and rendering. |
+| `scripts/frontier_review.py` | `tests/test_frontier_review_cli.py`, `tests/test_cli_utf8_stdout.py` | Parser and mutation orchestrator for lifecycle, `set-layers`, and `bind-layer`; owns shared render-before-write and two-file registry/workflow persistence. |
+| `scripts/loop_enforcer.py` | `tests/test_frontier_lifecycle.py`, `tests/test_frontier_gate.py` | Validate ledger loop headers against registry IDs from supplied canonical documents; direct standalone reads remain supported. |
+| `scripts/gate_check.py` | `tests/test_frontier_gate.py` | Enforce stage transitions; at Stage 2, read one registry/ledger snapshot for warning-only layer advisories, loop binding, lifecycle convergence, and freshness. Malformed registry/ledger authority blocks. |
+| `scripts/timeliness_checker.py` | `tests/test_frontier_gate.py` | Consume the Stage 2 gate's preloaded ledger without a second read while retaining standalone behavior. |
 | `scripts/capability_check.py` | `tests/test_capability_check.py` | Detect optional search and financial-data capability availability. |
 | `scripts/generate_ultra_packet.py` | structure and workspace tests | Generate bounded Ultra Dive packets from Sector Hunt outputs. |
 | `scripts/run_coverage.py` | manual verification gate | Run cross-platform coverage for the lifecycle module. |
@@ -90,19 +91,20 @@ Use this path when changing the search chain, provider recommendations, finance 
 
 Use this path for lifecycle changes:
 
-1. Add or update focused tests in `tests/test_frontier_lifecycle.py` for pure behavior.
-2. Add or update CLI tests in `tests/test_frontier_review_cli.py` when command behavior or persistence changes.
-3. Modify `scripts/frontier_lifecycle.py` first for shared legality and rendering.
-4. Modify `scripts/frontier_review.py` only for CLI parsing, transaction behavior, and workspace I/O.
-5. If stage convergence changes, update `scripts/gate_check.py` and `tests/test_frontier_gate.py`.
-6. Update `workflow-guide.md`, `ticker-dive-guide.md`, and `sector-hunt-guide.md` if user-facing workflow semantics changed.
-7. Run targeted lifecycle tests, then the full suite.
+After focused tests pin the intended contract, the safe change order is pure model first, CLI/persistence second, and derived consumers third:
+
+1. Add or update pure-model tests in `tests/test_frontier_lifecycle.py`.
+2. Modify `scripts/frontier_lifecycle.py` for registry validation/adoption, shared legality, binding, derivation, and rendering.
+3. Add or update `tests/test_frontier_review_cli.py` and modify `scripts/frontier_review.py` for CLI parsing, mutation orchestration, and transaction behavior.
+4. Update derived consumers only as required: `workspace_contract`/`init_workspace.py` with `tests/test_workspace_contract.py` and `tests/test_workspace_scripts.py`; gate/loop/timeliness with `tests/test_frontier_gate.py`.
+5. Update `workflow-guide.md`, `ticker-dive-guide.md`, and `sector-hunt-guide.md` if user-facing workflow semantics changed.
+6. Run targeted lifecycle, CLI, workspace, and gate tests, then the full suite.
 
 Current lifecycle source of truth:
 
 - per-frontier loop counts are derived from `evidence_ledger.md` headers;
-- `frontier_registry.json` stores status, source, lifecycle history, review decisions, and portfolio limits;
-- `research_workflow.md` receives managed review and discovery logs rendered from registry data;
+- schema-v3 `frontier_registry.json` owns workspace layer labels, nullable bindings, optional structural parents, provenance, status, lifecycle history, review decisions, and portfolio limits;
+- `research_workflow.md` receives managed review, discovery, and frontier-layer-coverage narration rendered from registry data; those blocks are not separate authorities;
 - no Active or New frontier may remain before Stage 3.
 
 ## Documentation Change Path

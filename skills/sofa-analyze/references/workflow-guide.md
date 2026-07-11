@@ -96,6 +96,14 @@
 
 **输出**：Demand Decomposition Sketch，写入 `research_workflow.md`
 
+主线程先写完完整的 Demand Decomposition Sketch，再只把其中选定的 6 个结构标签复制进 registry：
+
+```bash
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" set-layers --label 0 "End demand" --label 1 "System or platform" --label 2 "Component or module" --label 3 "Material or process" --label 4 "Constrained input or equipment" --label 5 "Geography or regulation"
+```
+
+每次 `set-layers` 都必须把索引 0 到 5 各提供一次。相同的完整命令可幂等重跑以修复 managed narration；若要改成另一组完整标签，必须加 `--replace`。标签来自主线程的 Stage 0 sketch，CLI 不生成也不解析该叙事；结构深度由当前 workspace 定义，不是固定的硬件 taxonomy。`source_frontier` 记录发现来源，`parent_frontier` 是可选的结构谱系，两者相互独立。不得手工编辑 `frontier_registry.json`。
+
 **为什么强制**：frontier 设计如果遗漏了某个关键层级，后续所有 loop 都无法弥补。需求拆解是 frontier 规划的地基。
 
 ### Step 4 — Blind Spot Scan（盲区扫描，强制）
@@ -175,11 +183,18 @@ Demand slowdown risk: [需求放缓风险]
 用户接受初始 frontier set 后，立即为每个方向注册 lifecycle ID，并启动第一个要执行的 frontier：
 
 ```bash
-python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --at-loop 1
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --layer 0 --at-loop 1
 python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 ```
 
-对每个 accepted frontier 重复 `add`；只对当前要执行的第一个 frontier 运行 `start`。Registry ID（如 `F1`, `F2`, `F3`）是机器绑定 key。Display name 可以随着研究理解变清晰而调整，但 `evidence_ledger.md` 的 loop header 必须保留稳定 ID。
+对每个 accepted frontier 重复 `add`，并填写它实际对应的 workspace layer；结构判断存在且 parent 已绑定在更浅层时可加 `--parent F{id}`，但 parent 不是必填项，也不得根据 frontier 名称推断。只对选中作为当前 active direction 的一个 frontier 运行 `start`。Registry ID（如 `F1`, `F2`, `F3`）是机器绑定 key。Display name 可以随着研究理解变清晰而调整，但 `evidence_ledger.md` 的 loop header 必须保留稳定 ID。
+
+后续显式放置或重新放置使用 `bind-layer`；没有结构 parent 时省略 `--parent`。`--clear` 会有意清除整个 layer/parent binding：
+
+```bash
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" bind-layer F2 --layer 2 --parent F1
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" bind-layer F2 --clear
+```
 
 ---
 
