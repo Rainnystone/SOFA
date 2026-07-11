@@ -151,4 +151,4 @@ Contrarian search:
 
 ## Capability Setup
 
-See `SOFA/docs/capability-setup.md` for installation recommendations. SOFA detects optional tools and prints recommendations, but it does not silently install tools or write credentials.
+See `docs/capability-setup.md` for installation recommendations. SOFA detects optional tools and prints recommendations, but it does not silently install tools or write credentials.

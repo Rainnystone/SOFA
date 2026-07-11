@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import sys
@@ -13,16 +14,27 @@ from pathlib import Path
 from typing import Any
 
 from frontier_lifecycle import (
+    CURRENT_REGISTRY_VERSION,
     LifecycleError,
+    bind_frontier_layer,
     check_review_due,
     create_frontier,
+    derive_frontier_layer_coverage,
     derive_loop_counts,
+    format_frontier_layer_advisories,
     get_frontier,
+    render_frontier_layer_coverage_md,
     render_discovery_log_md,
     render_review_log_md,
+    set_layer_labels,
     transition,
+    validate_registry,
 )
-from workspace_contract import replace_managed_block
+from workspace_contract import (
+    replace_managed_block,
+    replace_managed_block_after,
+    upsert_managed_block_after,
+)
 
 
 REGISTRY_FILE = "frontier_registry.json"
@@ -30,17 +42,24 @@ LEDGER_FILE = "evidence_ledger.md"
 WORKFLOW_FILE = "research_workflow.md"
 REVIEW_BLOCK = "frontier-review-log"
 DISCOVERY_BLOCK = "frontier-discovery-log"
+LAYER_BLOCK = "frontier-layer-coverage"
 COMMANDS = frozenset(
     {
         "add",
+        "bind-layer",
         "start",
         "check-review",
         "record",
         "retire",
         "reactivate",
+        "set-layers",
         "status",
     }
 )
+
+
+class PersistenceRollbackError(OSError):
+    """Both workflow persistence and registry rollback failed."""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,8 +91,36 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["initial", "discovery", "serendipity", "user"],
     )
     add_parser.add_argument("--source-frontier")
+    add_parser.add_argument("--layer", type=_layer_index)
+    add_parser.add_argument("--parent", dest="parent_frontier")
     add_parser.add_argument("--at-loop", required=True, type=_positive_int)
     add_parser.set_defaults(handler=command_add)
+
+    set_layers_parser = subparsers.add_parser(
+        "set-layers",
+        help="Register or replace workspace layer labels",
+    )
+    set_layers_parser.add_argument(
+        "--label",
+        dest="labels",
+        action="append",
+        nargs=2,
+        required=True,
+        metavar=("INDEX", "TEXT"),
+    )
+    set_layers_parser.add_argument("--replace", action="store_true")
+    set_layers_parser.set_defaults(handler=command_set_layers)
+
+    bind_parser = subparsers.add_parser(
+        "bind-layer",
+        help="Bind, rebind, or clear one frontier layer",
+    )
+    bind_parser.add_argument("frontier_id")
+    binding = bind_parser.add_mutually_exclusive_group(required=True)
+    binding.add_argument("--layer", type=_layer_index)
+    binding.add_argument("--clear", action="store_true")
+    bind_parser.add_argument("--parent", dest="parent_frontier")
+    bind_parser.set_defaults(handler=command_bind_layer)
 
     start_parser = subparsers.add_parser("start", help="Activate a New frontier")
     start_parser.add_argument("frontier_id")
@@ -115,24 +162,90 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def command_add(args: argparse.Namespace) -> int:
+    if args.parent_frontier is not None and args.layer is None:
+        raise LifecycleError("--parent requires --layer")
     workspace = workspace_path(args)
-    registry = read_registry(workspace)
+    registry, original_registry_bytes = read_registry_snapshot(workspace)
     updated = create_frontier_for_cli(
         registry,
         name=args.name,
         proposed_at_loop=args.at_loop,
         source=args.source,
         source_frontier=args.source_frontier,
+        layer=args.layer,
+        parent_frontier=args.parent_frontier,
     )
     added = updated["frontiers"][-1]
-    write_registry(workspace, updated)
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_registry_bytes,
+        updated_registry=updated,
+    )
     print(f"Added {added['id']} ({added['status']}): {added['name']}")
+    return 0
+
+
+def command_set_layers(args: argparse.Namespace) -> int:
+    workspace = workspace_path(args)
+    registry, original_bytes = read_registry_snapshot(workspace)
+    previous = registry.get("layer_labels", [])
+    updated = set_layer_labels(
+        registry,
+        parse_indexed_labels(args.labels),
+        replace=args.replace,
+    )
+    changed = previous != updated["layer_labels"]
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_bytes,
+        updated_registry=updated,
+        allow_layer_insert=True,
+    )
+    print("Layer labels configured")
+    if args.replace and changed:
+        bound_ids = [
+            row["frontier_id"]
+            for row in derive_frontier_layer_coverage(updated)["lineage"]
+            if row["layer"] is not None
+        ]
+        if bound_ids:
+            print(
+                "NOTICE: Review layer binding semantics for: "
+                + ", ".join(bound_ids)
+            )
+    return 0
+
+
+def command_bind_layer(args: argparse.Namespace) -> int:
+    if args.parent_frontier is not None and args.layer is None:
+        raise LifecycleError("--parent requires --layer")
+    workspace = workspace_path(args)
+    registry, original_bytes = read_registry_snapshot(workspace)
+    updated = bind_frontier_layer(
+        registry,
+        args.frontier_id,
+        layer=None if args.clear else args.layer,
+        parent_frontier=None if args.clear else args.parent_frontier,
+    )
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_bytes,
+        updated_registry=updated,
+    )
+    if args.clear:
+        print(f"Cleared layer binding for {args.frontier_id}")
+    else:
+        parent = args.parent_frontier or "none"
+        print(
+            f"Bound {args.frontier_id} layer={args.layer} "
+            f"parent_frontier={parent}"
+        )
     return 0
 
 
 def command_start(args: argparse.Namespace) -> int:
     workspace = workspace_path(args)
-    registry = read_registry(workspace)
+    registry, original_registry_bytes = read_registry_snapshot(workspace)
     loop_counts = read_loop_counts(workspace, registry)
     frontier = get_frontier(registry, args.frontier_id)
     at_loop = loop_counts.get(args.frontier_id) or frontier.get("proposed_at_loop")
@@ -146,7 +259,11 @@ def command_start(args: argparse.Namespace) -> int:
         at_loop=at_loop,
         ts=utc_now(),
     )
-    write_registry(workspace, updated)
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_registry_bytes,
+        updated_registry=updated,
+    )
     print(f"{args.frontier_id} -> Active")
     return 0
 
@@ -157,19 +274,26 @@ def command_check_review(args: argparse.Namespace) -> int:
     loop_counts = read_loop_counts(workspace, registry)
     due = check_review_due(registry, loop_counts)
 
-    if not due:
+    if due:
+        for frontier_id in due:
+            print(f"{frontier_id} reached loop {loop_counts.get(frontier_id, 0)}")
+        result = 1
+    else:
         print("No Frontier Review due")
-        return 0
+        result = 0
 
-    for frontier_id in due:
-        print(f"{frontier_id} reached loop {loop_counts.get(frontier_id, 0)}")
-    return 1
+    coverage = derive_frontier_layer_coverage(registry)
+    for line in format_frontier_layer_advisories(
+        coverage,
+        prefix="[ADVISORY] ",
+    ):
+        print(line)
+    return result
 
 
 def command_record(args: argparse.Namespace) -> int:
     workspace = workspace_path(args)
-    original_registry_text = read_required_text(workspace / REGISTRY_FILE)
-    registry = json.loads(original_registry_text)
+    registry, original_registry_bytes = read_registry_snapshot(workspace)
     loop_counts = read_loop_counts(workspace, registry)
     at_loop = loop_counts.get(args.frontier_id, 0)
 
@@ -194,23 +318,23 @@ def command_record(args: argparse.Namespace) -> int:
     reviewed = get_frontier(updated, args.frontier_id)
     reviewed["review_decisions"][-1]["portfolio_actions"] = portfolio_actions
 
-    workflow_text = read_required_text(workspace / WORKFLOW_FILE)
-    rendered_workflow = render_workflow(workflow_text, updated)
-    rendered_registry = registry_to_text(updated)
-
-    persist_record_outputs(
+    persist_mutation(
         workspace=workspace,
-        original_registry_text=original_registry_text,
-        rendered_registry=rendered_registry,
-        rendered_workflow=rendered_workflow,
+        original_registry_bytes=original_registry_bytes,
+        updated_registry=updated,
+        refresh_review_logs=True,
     )
     print(f"Recorded {args.frontier_id} -> {args.decision}")
+    if updated["version"] == CURRENT_REGISTRY_VERSION:
+        for action in portfolio_actions:
+            if action["action"] == "add":
+                print(f"Added {action['frontier']} (unbound)")
     return 0
 
 
 def command_retire(args: argparse.Namespace) -> int:
     workspace = workspace_path(args)
-    registry = read_registry(workspace)
+    registry, original_registry_bytes = read_registry_snapshot(workspace)
     loop_counts = read_loop_counts(workspace, registry)
     updated = transition(
         registry,
@@ -224,14 +348,18 @@ def command_retire(args: argparse.Namespace) -> int:
         at_loop=loop_counts.get(args.frontier_id, 0),
         ts=utc_now(),
     )
-    write_registry(workspace, updated)
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_registry_bytes,
+        updated_registry=updated,
+    )
     print(f"{args.frontier_id} -> Retired ({args.category})")
     return 0
 
 
 def command_reactivate(args: argparse.Namespace) -> int:
     workspace = workspace_path(args)
-    registry = read_registry(workspace)
+    registry, original_registry_bytes = read_registry_snapshot(workspace)
     loop_counts = read_loop_counts(workspace, registry)
     updated = transition(
         registry,
@@ -243,7 +371,11 @@ def command_reactivate(args: argparse.Namespace) -> int:
         at_loop=loop_counts.get(args.frontier_id, 0),
         ts=utc_now(),
     )
-    write_registry(workspace, updated)
+    persist_mutation(
+        workspace=workspace,
+        original_registry_bytes=original_registry_bytes,
+        updated_registry=updated,
+    )
     print(f"{args.frontier_id} -> Active")
     return 0
 
@@ -261,6 +393,30 @@ def command_status(args: argparse.Namespace) -> int:
             f"review_count={frontier.get('review_count', 0)} "
             f"name={frontier.get('name')}"
         )
+        if registry["version"] == CURRENT_REGISTRY_VERSION:
+            layer = frontier["layer"]
+            layer_text = "unbound" if layer is None else str(layer)
+            label = "none" if layer is None else registry["layer_labels"][layer]
+            parent = frontier["parent_frontier"]
+            parent_frontier = "none" if parent is None else parent
+            source = frontier.get("source_frontier")
+            source_frontier = "none" if source is None else source
+            print(
+                f"  layer={layer_text} label={label} "
+                f"parent_frontier={parent_frontier} "
+                f"source_frontier={source_frontier}"
+            )
+    if registry["version"] == CURRENT_REGISTRY_VERSION:
+        print(
+            html.unescape(render_frontier_layer_coverage_md(registry)).rstrip("\n")
+        )
+    else:
+        coverage = derive_frontier_layer_coverage(registry)
+        for line in format_frontier_layer_advisories(
+            coverage,
+            prefix="[ADVISORY] ",
+        ):
+            print(line)
     return 0
 
 
@@ -271,6 +427,8 @@ def create_frontier_for_cli(
     proposed_at_loop: int,
     source: str,
     source_frontier: str | None,
+    layer: int | None = None,
+    parent_frontier: str | None = None,
 ) -> dict[str, Any]:
     if source == "user":
         if source_frontier is not None:
@@ -280,10 +438,13 @@ def create_frontier_for_cli(
             name=name,
             proposed_at_loop=proposed_at_loop,
             source="initial",
+            layer=layer,
+            parent_frontier=parent_frontier,
             initial_status="New",
             ts=utc_now(),
         )
         updated["frontiers"][-1]["source"] = "user"
+        validate_registry(updated)
         return updated
 
     return create_frontier(
@@ -292,6 +453,8 @@ def create_frontier_for_cli(
         proposed_at_loop=proposed_at_loop,
         source=source,
         source_frontier=source_frontier,
+        layer=layer,
+        parent_frontier=parent_frontier,
         initial_status="New",
         ts=utc_now(),
     )
@@ -424,9 +587,64 @@ def parse_exact_parts(
     return parts
 
 
-def render_workflow(workflow_text: str, registry: dict[str, Any]) -> str:
-    updated = replace_managed_block(workflow_text, REVIEW_BLOCK, render_review_log_md(registry))
-    return replace_managed_block(updated, DISCOVERY_BLOCK, render_discovery_log_md(registry))
+def render_workflow(
+    workflow_text: str,
+    registry: dict[str, Any],
+    *,
+    refresh_review_logs: bool = False,
+    allow_layer_insert: bool = False,
+) -> str:
+    if refresh_review_logs:
+        rendered_review = render_review_log_md(registry)
+        rendered_discovery = render_discovery_log_md(registry)
+        replace_managed_block(workflow_text, REVIEW_BLOCK, rendered_review)
+        replace_managed_block(workflow_text, DISCOVERY_BLOCK, rendered_discovery)
+
+    if registry["version"] == CURRENT_REGISTRY_VERSION:
+        rendered_layer = render_frontier_layer_coverage_md(registry)
+        if allow_layer_insert:
+            upsert_managed_block_after(
+                workflow_text,
+                LAYER_BLOCK,
+                rendered_layer,
+                after_block_name=DISCOVERY_BLOCK,
+            )
+        else:
+            replace_managed_block_after(
+                workflow_text,
+                LAYER_BLOCK,
+                rendered_layer,
+                after_block_name=DISCOVERY_BLOCK,
+            )
+
+    updated = workflow_text
+    if refresh_review_logs:
+        updated = replace_managed_block(
+            updated,
+            REVIEW_BLOCK,
+            rendered_review,
+        )
+        updated = replace_managed_block(
+            updated,
+            DISCOVERY_BLOCK,
+            rendered_discovery,
+        )
+    if registry["version"] == CURRENT_REGISTRY_VERSION:
+        if allow_layer_insert:
+            updated = upsert_managed_block_after(
+                updated,
+                LAYER_BLOCK,
+                rendered_layer,
+                after_block_name=DISCOVERY_BLOCK,
+            )
+        else:
+            updated = replace_managed_block_after(
+                updated,
+                LAYER_BLOCK,
+                rendered_layer,
+                after_block_name=DISCOVERY_BLOCK,
+            )
+    return updated
 
 
 def read_loop_counts(workspace: Path, registry: dict[str, Any]) -> dict[str, int]:
@@ -440,38 +658,94 @@ def read_loop_counts(workspace: Path, registry: dict[str, Any]) -> dict[str, int
     return counts
 
 
+def read_registry_snapshot(workspace: Path) -> tuple[dict[str, Any], bytes]:
+    original, text = read_required_utf8(workspace / REGISTRY_FILE)
+    registry = json.loads(text)
+    validate_registry(registry)
+    return registry, original
+
+
 def read_registry(workspace: Path) -> dict[str, Any]:
-    registry_path = workspace / REGISTRY_FILE
-    return json.loads(read_required_text(registry_path))
-
-
-def write_registry(workspace: Path, registry: dict[str, Any]) -> None:
-    write_text(workspace / REGISTRY_FILE, registry_to_text(registry))
+    registry, _ = read_registry_snapshot(workspace)
+    return registry
 
 
 def registry_to_text(registry: dict[str, Any]) -> str:
     return json.dumps(registry, indent=2, ensure_ascii=False) + "\n"
 
 
-def persist_record_outputs(
+def persist_registry_and_workflow(
     *,
-    workspace: Path,
-    original_registry_text: str,
+    registry_path: Path,
+    workflow_path: Path,
+    original_registry_bytes: bytes,
     rendered_registry: str,
     rendered_workflow: str,
 ) -> None:
-    registry_path = workspace / REGISTRY_FILE
-    workflow_path = workspace / WORKFLOW_FILE
     write_text(registry_path, rendered_registry)
     try:
         write_text(workflow_path, rendered_workflow)
-    except OSError:
-        write_text(registry_path, original_registry_text)
+    except (OSError, UnicodeError) as primary:
+        try:
+            write_bytes(registry_path, original_registry_bytes)
+        except (OSError, UnicodeError) as rollback:
+            raise PersistenceRollbackError(
+                f"workflow write failed: {primary}; "
+                f"registry rollback failed: {rollback}"
+            ) from rollback
         raise
 
 
+def persist_mutation(
+    *,
+    workspace: Path,
+    original_registry_bytes: bytes,
+    updated_registry: dict[str, Any],
+    refresh_review_logs: bool = False,
+    allow_layer_insert: bool = False,
+) -> None:
+    validate_registry(updated_registry)
+    rendered_registry = registry_to_text(updated_registry)
+    needs_workflow = (
+        updated_registry["version"] == CURRENT_REGISTRY_VERSION
+        or refresh_review_logs
+    )
+    if not needs_workflow:
+        write_text(workspace / REGISTRY_FILE, rendered_registry)
+        return
+
+    original_workflow_bytes, workflow_text = read_required_utf8(
+        workspace / WORKFLOW_FILE
+    )
+    rendered_workflow = render_workflow(
+        workflow_text,
+        updated_registry,
+        refresh_review_logs=refresh_review_logs,
+        allow_layer_insert=allow_layer_insert,
+    )
+    _ = original_workflow_bytes
+    persist_registry_and_workflow(
+        registry_path=workspace / REGISTRY_FILE,
+        workflow_path=workspace / WORKFLOW_FILE,
+        original_registry_bytes=original_registry_bytes,
+        rendered_registry=rendered_registry,
+        rendered_workflow=rendered_workflow,
+    )
+
+
+def read_required_utf8(path: Path) -> tuple[bytes, str]:
+    original = Path(path).read_bytes()
+    try:
+        decoded = original.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise LifecycleError(f"{Path(path).name} must be valid UTF-8") from exc
+    normalized = decoded.replace("\r\n", "\n").replace("\r", "\n")
+    return original, normalized
+
+
 def read_required_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    _, text = read_required_utf8(path)
+    return text
 
 
 def replace_with_retry(
@@ -491,7 +765,7 @@ def replace_with_retry(
     ``os.replace`` — so behavior there is unchanged.
 
     Like ``os.replace`` itself, this does not clean up ``src`` on failure; the
-    caller (``write_text``) owns temp-file cleanup. ``delay`` grows slightly
+    caller (``write_atomic``) owns temp-file cleanup. ``delay`` grows slightly
     between attempts (linear backoff) to give the lock holder time to release.
     """
     if is_windows is None:
@@ -511,13 +785,21 @@ def replace_with_retry(
             time.sleep(delay * (attempt + 1))
 
 
-def write_text(path: Path, text: str) -> None:
+def write_atomic(path: Path, payload: str | bytes) -> None:
     path = Path(path)
-    temp_path = None
+    binary = isinstance(payload, bytes)
+    mode = "wb" if binary else "w"
+    kwargs = {} if binary else {"encoding": "utf-8"}
+    temp_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        with tempfile.NamedTemporaryFile(
+            mode,
+            dir=path.parent,
+            delete=False,
+            **kwargs,
+        ) as handle:
             temp_path = Path(handle.name)
-            handle.write(text)
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         replace_with_retry(temp_path, path)
@@ -525,6 +807,14 @@ def write_text(path: Path, text: str) -> None:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
         raise
+
+
+def write_text(path: Path, text: str) -> None:
+    write_atomic(path, text)
+
+
+def write_bytes(path: Path, data: bytes) -> None:
+    write_atomic(path, data)
 
 
 def workspace_path(args: argparse.Namespace) -> Path:
@@ -544,6 +834,31 @@ def _positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def _layer_index(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "layer index must be an integer from 0 through 5"
+        ) from exc
+    if parsed < 0 or parsed > 5:
+        raise argparse.ArgumentTypeError(
+            "layer index must be an integer from 0 through 5"
+        )
+    return parsed
+
+
+def parse_indexed_labels(raw_labels: list[list[str]]) -> list[tuple[int, str]]:
+    indexed: list[tuple[int, str]] = []
+    for raw_index, label in raw_labels:
+        try:
+            index = _layer_index(raw_index)
+        except argparse.ArgumentTypeError as exc:
+            raise LifecycleError(str(exc)) from exc
+        indexed.append((index, label))
+    return indexed
 
 
 def utc_now() -> str:

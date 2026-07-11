@@ -190,6 +190,7 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
 
 1. 汇总所有前序阶段的输出：
    - `research_workflow.md`（Pre-Stage 0 ~ Stage 5 全流程记录）
+   - `frontier_registry.json` 及其 registry-derived `frontier-layer-coverage` managed narration
    - `evidence_ledger.md`（Stage 2 证据台账）
    - `scouts/` 目录下各轮 scout 交付文件
    - `challenges/` 目录下各轮 challenge 交付文件
@@ -202,14 +203,22 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
 3. 文件命名规则：
    - `[SUBJECT]_SOFA_Report_[YYYY-MM-DD].md`（如可用 docx 技能，优先生成 `.docx`）
 
+### Frontier Layer Snapshot 边界
+
+Audit Appendix 必须包含 registry-derived Frontier Layer Snapshot，并明确列出 unrepresented layers、blocked-only layers、retired-only layers、unbound frontiers，以及存在时的 structural lineage facts。报告正文可以说明这些 gap 如何限制 confidence，但 snapshot 只表达 frontier presence/status，不能证明研究充分性。
+
+完整的 company/technology/evidence/double-bottleneck dependency ladder 始终由主线程撰写；frontier structural parent 是研究方向的谱系，不是经济 dependency edge。Snapshot 不得生成或升级 evidence grade、confidence、action class、Ticker conclusion 或 Sector ranked queue。Sector Hunt 仍以 map 和 ranked queue 结束；只有完成 Ticker Dive 或 Ultra Dive，才能使用 action-class language。
+
 ### 报告结构模板
 
 ```markdown
 # [Company/Theme] — SOFA OSINT Research Report
 
 **研究日期**: YYYY-MM-DD
-**研究模式**: Ticker Dive / Sector Hunt
-**最终 Action Class**: [Act / Watch / Trade-only / Basket-only / Reject / Needs Primary Evidence]
+**研究模式**: [Ticker Dive / Ultra Dive / Sector Hunt]
+[以下两行只保留当前研究模式对应的一行]
+**最终 Action Class（Ticker Dive / Ultra Dive only）**: [Act / Watch / Trade-only / Basket-only / Reject / Needs Primary Evidence]
+**最终输出（Sector Hunt only）**: Map + Ranked Candidate Queue
 **Confidence**: [High / Medium / Low]
 **Time Horizon**: [6 months / 1-2 years / 3-5 years]
 
@@ -217,7 +226,10 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
 
 ## 一句话结论
 
-[用一段话给出明确结论，包含 action class、核心 thesis、confidence 和 time horizon。不允许"建议继续关注"式的模糊结尾。]
+[只保留当前研究模式对应的写法：
+- Ticker Dive / Ultra Dive：用一段话给出 action class、核心 thesis、confidence 和 time horizon。
+- Sector Hunt：用一段话概括 architecture shift、map 的关键 bottleneck、ranked queue 首选项、confidence 和 time horizon，并给出下一步 dive 方向。
+两种模式都不允许用"建议继续关注"式的模糊结尾。]
 
 ## 核心 Thesis
 
@@ -271,7 +283,9 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
 - **Survival**: Intact / Weakened / Refuted
 - **Confidence 调整**: [是否降级]
 
-## 最终裁决
+[以下两个最终输出分支只保留当前研究模式对应的一个]
+
+## 最终裁决（Ticker Dive / Ultra Dive）
 
 ### Action Class: [具体档位]
 
@@ -281,7 +295,17 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
 1. [具体事件] → [为什么推翻 thesis]
 2. ...
 
-## 观察协议（Watch Protocol）
+## Sector Hunt Map + Ranked Queue
+
+### Map Artifact
+[主线程撰写的完整 dependency map / layered map，包括关键 bottleneck 与 double-bottleneck facts。]
+
+### Ranked Candidate Queue
+[按证据与 mapping rationale 排序的候选队列；列明 tier、排序理由、关键 gap 和建议的下一步 Ticker Dive / Ultra Dive。]
+
+[以下两个 follow-up 分支只保留当前研究模式对应的一个]
+
+## 观察协议（Ticker Dive / Ultra Dive Watch Protocol）
 
 ### 升级触发
 1. [事件] → [Watch 升级为 Act]
@@ -293,7 +317,26 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
 - 第一次复盘: [日期]
 - Thesis 过期日: [日期]
 
-## 附录
+## Mapping and Queue Review Protocol（Sector Hunt）
+
+### Queue Promotion Triggers
+1. [可观测证据] → [候选上调到更高 queue tier，或进入下一步 Ticker Dive / Ultra Dive]
+
+### Queue Downgrade / Deprioritization Triggers
+1. [可观测证据] → [候选降低排序、移出 queue 或重开 mapping]
+
+### Map Refresh Triggers
+1. [新技术路线、监管变化、供给变化或关键反证] → [需要重绘的节点、层级或 dependency edge]
+
+### 复盘日期
+- 第一次 map 复盘: [日期]
+- Ranked queue 刷新日: [日期]
+- Evidence stale date: [日期]
+
+## Audit Appendix（审计附录）
+
+### Frontier Layer Snapshot
+[从 frontier registry 的确定性派生 narration 提取：列明 unrepresented layers、blocked-only layers、retired-only layers、unbound frontiers，以及存在时的 structural lineage facts。仅表达 presence/status，不把它解释为研究充分性。]
 
 ### 完整 Claim Ledger
 [从 evidence_ledger.md 提取]
@@ -309,10 +352,10 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
 
 报告生成前必须通过以下检查：
 
-1. **结论明确性**: 第一页必须能看到 Action Class 和一句话结论，不需要读完全文才知道结论
+1. **按模式结论明确性**: Ticker Dive / Ultra Dive 第一页必须能看到 Action Class 和一句话结论；Sector Hunt 第一页必须能看到 Map Artifact、Ranked Candidate Queue 和一句话结论，且不得包含 Action Class
 2. **证据可追溯**: 每个关键 claim 都有来源 URL 或文件引用
 3. **反向证据正面呈现**: 不藏在附录或 footnote，而是在正文中有独立章节
-4. **失效条件具体**: 不允许"如果基本面恶化"这种废话，必须是具体可观测事件
+4. **触发条件具体**: Ticker Dive / Ultra Dive 的失效条件和 Sector Hunt 的 map/queue 修订条件都必须是具体可观测事件；不允许"如果基本面恶化"这种废话
 5. **无模棱两可话术**: 检查并删除以下表达：
    - "建议继续关注"（改为具体观察什么、什么条件下升级/降级）
    - "存在不确定性"（改为具体是什么不确定性、需要什么证据才能消除）

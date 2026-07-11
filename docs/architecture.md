@@ -52,8 +52,8 @@ A SOFA workspace is the durable research ledger. The important files are:
 | Workspace file | Role |
 |----------------|------|
 | `state.json` | Coarse workspace mode and stage state. It is not the source of truth for per-frontier loop counts. |
-| `frontier_registry.json` | Machine-readable frontier lifecycle state: IDs, status, source, lifecycle history, review decisions, and limits. |
-| `research_workflow.md` | Human-readable stage log, decision log, and managed Frontier Review / Discovery blocks. |
+| `frontier_registry.json` | Registry schema v3 authority for workspace-defined layer labels, nullable frontier layer facts, optional structural parents, discovery provenance, lifecycle status/history, review decisions, and limits. |
+| `research_workflow.md` | Human-readable stage and decision log with managed Frontier Review / Discovery blocks plus the deterministic `frontier-layer-coverage` narration. The managed coverage block is never a second authority. |
 | `evidence_ledger.md` | Evidence loop record. Stable headers like `## Loop N: F{id} - {name}` are the source of truth for per-frontier loop counts. |
 | `claim_ledger.md` | Important claims, status, evidence grade, and unresolved gaps. |
 | `search_log.md` | Human-readable mirror for search trail and capability limitations. |
@@ -73,7 +73,7 @@ The workspace artifact inventory and worker-output path classification are defin
 
 ## Frontier Lifecycle Architecture
 
-Frontiers are first-class research objects. Stage 1 proposes the initial set, but Stage 2 can add, start, continue, retire, reprioritize, and reactivate them through the lifecycle CLI.
+Frontiers are first-class research objects. Stage 0 defines the workspace's six structural labels, Stage 1 registers the initial set, and Stage 2 can add, bind, rebind, start, continue, retire, reprioritize, and reactivate them through the lifecycle CLI. `set-layers` is also the explicit v2 adoption path; it does not infer layer placement from existing frontier names or history.
 
 ```text
 evidence_ledger.md
@@ -81,11 +81,15 @@ evidence_ledger.md
   -> check whether Active frontiers crossed an unrecorded review boundary
   -> record Continued or Retired decisions
   -> update frontier_registry.json
-  -> render managed review/discovery logs into research_workflow.md
+  -> render managed review/discovery logs and frontier-layer-coverage narration
   -> gate_check.py blocks Stage 3 until no Active or New frontier remains
 ```
 
 The review trigger is boundary-window based: a frontier is review-due when `derived_loop_count // every_loops > review_count` and `review_count < max_reviews`. Counts 3, 6, and 9 open review windows; if the main thread overshoots to loop 4 or 5 without recording the review, the frontier remains due until the review is recorded.
+
+`frontier_lifecycle.py` owns registry validation, explicit v2 adoption, layer binding, lifecycle behavior, frontier layer coverage and advisory derivation, and deterministic rendering. `frontier_review.py` owns CLI parsing, mutation orchestration, and the shared render-before-write/two-file persistence path for `frontier_registry.json` and `research_workflow.md`.
+
+Layer gaps are advisory warnings, because they report presence/status rather than research adequacy. A malformed registry or ledger authority is blocking. Gate and loop paths use the canonical registry/ledger document readers; during the Stage 2 transition, `gate_check.py` loads one registry/ledger snapshot and reuses it for coverage warnings, loop binding, lifecycle convergence, and timeliness. `timeliness_checker.py` can consume that preloaded ledger while retaining its standalone read-and-check behavior.
 
 ## Deterministic Boundary
 
@@ -96,11 +100,12 @@ Scripts enforce rules that should not depend on agent memory:
 | `init_workspace.py` | Create a workspace from the artifact contract with required files, registry, and managed Markdown blocks. |
 | `workspace_contract/` | Own canonical workspace artifact, scaffold, managed-block, and worker-output path facts consumed by setup and validators. |
 | `worker_role_catalog/` | Own canonical worker role facts: prompt templates, delivery folders, mode applicability, method-card expectations, source-trace requirements, required output markers, dispatch aliases, and forbidden worker output classes. |
-| `frontier_lifecycle.py` | Pure lifecycle state machine, loop binding, review due checks, portfolio limits, and Markdown rendering. |
-| `frontier_review.py` | Main-thread CLI for lifecycle mutations and managed review log updates. |
-| `loop_enforcer.py` | Validate evidence ledger loop headers against stable frontier IDs. |
-| `gate_check.py` | Enforce stage transition gates, including lifecycle convergence before Stage 3. |
-| `scorecard_validator.py` / `timeliness_checker.py` / `synthesis_checker.py` | Validate stage artifacts and freshness requirements. |
+| `frontier_lifecycle.py` | Validate v2/v3 registries; own explicit v2 adoption, pure lifecycle and layer binding, loop/review rules, portfolio limits, coverage and advisory derivation, and Markdown rendering. |
+| `frontier_review.py` | Parse main-thread lifecycle commands, orchestrate mutations, render before writes, and persist registry/workflow changes through the shared two-file transaction path. |
+| `loop_enforcer.py` | Validate stable-ID ledger headers from supplied registry/ledger documents, with a standalone reader retained for direct use. |
+| `gate_check.py` | Enforce stage transitions; at Stage 2, reuse one registry/ledger snapshot for advisory coverage, loop binding, lifecycle convergence, and freshness checks. Malformed authority blocks while layer gaps warn. |
+| `timeliness_checker.py` | Validate freshness from the gate's preloaded ledger or, when run standalone, read the ledger itself. |
+| `scorecard_validator.py` / `synthesis_checker.py` | Validate scorecards and synthesis artifacts. |
 | `validate_dossier.py` / `redteam_debate_validator.py` | Validate final report and red-team artifacts. |
 | `capability_check.py` | Detect optional search and financial-data capabilities without silently installing them; renders provider names and recommendations from `capability_policy/`. |
 | `capability_policy/` | Own canonical capability facts: search chain order, provider ids and labels, finance recommendations, search-record status vocabulary, stage-0 binding, dead-end categories, and missing-tool confidence language. |

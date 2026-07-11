@@ -82,6 +82,19 @@ python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --deci
 python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Retired --category answered_out --rationale "[why the 3-loop review retires this frontier]"
 ```
 
+如果本次 review 接受一个 discovery/serendipity follow-up，必须把它放进同一条 `record` 命令；四段 `record --add` grammar 保持 `NAME::source::source_frontier::reason` 不变：
+
+```bash
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F{id} --decision Continued --rationale "[why this frontier should stay in the durable queue]" --add "[new frontier name]::discovery::F{id}::[why this direction enters the portfolio]"
+```
+
+在 registry v3 中，成功加入 portfolio 会打印 `Added F{id} (unbound)`。新方向此时只有 discovery provenance，主线程必须根据已有结构判断显式选择以下一种完整命令，才能把它视为已做结构映射；没有 structural parent 时使用第一种，有 parent 时使用第二种：
+
+```bash
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" bind-layer F{new_id} --layer N
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" bind-layer F{new_id} --layer N --parent F{structural_parent_id}
+```
+
 3-loop review-based retirement 只允许 `answered_out`、`bad_pick`、`superseded`。如果使用 `bad_pick` 或 `superseded`，替换上例中的 category 值即可。
 
 3-loop review 之外的提前结束使用 standalone `retire`：
@@ -103,7 +116,9 @@ Do not use `blocked` or `invalidated` as `record --decision Retired` categories.
 
 ### Serendipity Loop（每 3 个 frontier 后）
 
-搜索相邻领域（上游的上游、下游的下游、平行技术、监管动态、宏观经济），至少 3 个搜索方向。结果写入 Synthesis Notes。
+搜索相邻领域（上游的上游、下游的下游、平行技术、监管动态、宏观经济），至少 3 个搜索方向；也可把 frontier layer coverage advisory 中未被表示的 layer index/label 作为一个可选方向输入。结果写入 Synthesis Notes。
+
+Layer advisory 不会自动创建 frontier、重排 portfolio、降低每 3 个 frontier 一次的触发频率，也不会减少 search 或 challenge floor。它只显示 frontier 的 presence/status gap，不能证明对应层级已经得到充分研究。
 
 ### 禁止压缩循环
 

@@ -6,16 +6,18 @@ SOFA is a framework repo. Minimal use does not require installing optional searc
 
 ## Minimal Local Use
 
+Run the commands below from the repository root.
+
 1. Place or clone the repo where your host agent can read it.
-2. Use `SOFA/skills/sofa-analyze/SKILL.md` as the framework entry.
+2. Use `skills/sofa-analyze/SKILL.md` as the framework entry.
 3. Run workspace initialization before research:
 
 ```bash
-python SOFA/scripts/init_workspace.py "SUBJECT" "./workspace" --mode ticker
-python SOFA/scripts/init_workspace.py "THEME" "./workspace" --mode sector
+python scripts/init_workspace.py "SUBJECT" "./workspace" --mode ticker
+python scripts/init_workspace.py "THEME" "./workspace" --mode sector
 ```
 
-4. Run gates and validators from `SOFA/scripts/` as the workflow progresses.
+4. Run gates and validators from `scripts/` as the workflow progresses.
 
 ## Optional Native Subagent Setup
 
@@ -42,8 +44,8 @@ SOFA does not silently install optional tools, write credentials, or assume one 
 ## Recommended Checks
 
 ```bash
-python -m compileall -q SOFA/scripts SOFA/tests
-python -m unittest discover -s SOFA/tests -p "test_*.py"
+python -m compileall -q scripts tests
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
 ## Next Steps

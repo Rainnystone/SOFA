@@ -12,7 +12,14 @@ import sys
 import re
 
 
-def check_timeliness(workspace_path: str) -> tuple[bool, list[str]]:
+_READ_LEDGER_FROM_WORKSPACE = object()
+
+
+def check_timeliness(
+    workspace_path: str,
+    *,
+    ledger_text: str | None | object = _READ_LEDGER_FROM_WORKSPACE,
+) -> tuple[bool, list[str]]:
     """
     Check that the research has timeliness awareness: recent events, conferences,
     earnings, product launches, or other time-sensitive context.
@@ -23,9 +30,17 @@ def check_timeliness(workspace_path: str) -> tuple[bool, list[str]]:
     violations = []
 
     # Check evidence_ledger for timeliness keywords
-    if os.path.exists(ledger_path):
-        with open(ledger_path, "r", encoding="utf-8") as f:
-            content = f.read()
+    if ledger_text is _READ_LEDGER_FROM_WORKSPACE:
+        ledger_exists = os.path.exists(ledger_path)
+    else:
+        ledger_exists = ledger_text is not None
+
+    if ledger_exists:
+        if ledger_text is _READ_LEDGER_FROM_WORKSPACE:
+            with open(ledger_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        else:
+            content = ledger_text
 
         timeliness_keywords = [
             "时效性", "recent", "news", "conference", "event",
@@ -36,7 +51,7 @@ def check_timeliness(workspace_path: str) -> tuple[bool, list[str]]:
         has_timeliness = any(kw in content.lower() for kw in timeliness_keywords)
         if not has_timeliness:
             violations.append("No timeliness/recent events recorded in evidence_ledger.md")
-    else:
+    elif ledger_text is _READ_LEDGER_FROM_WORKSPACE:
         violations.append("evidence_ledger.md not found")
 
     # Check research_workflow for Stage 0 search records

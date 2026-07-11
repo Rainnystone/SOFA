@@ -6,6 +6,7 @@ from pathlib import Path, PureWindowsPath
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import workspace_contract
 from workspace_contract import (
     all_worker_output_directories,
     artifact_contract_for_mode,
@@ -202,6 +203,238 @@ class TestFramingContractArtifactAndManagedBlocks(unittest.TestCase):
             "<!-- SOFA:frontier-review-log:start -->\nnew content\n<!-- SOFA:frontier-review-log:end -->",
             updated,
         )
+
+    def test_frontier_layer_block_is_registered_and_upserted_after_discovery(self):
+        contract = artifact_contract_for_mode("ticker")
+        self.assertEqual(
+            [
+                "framing-contract",
+                "frontier-review-log",
+                "frontier-discovery-log",
+                "frontier-layer-coverage",
+            ],
+            [block.name for block in contract.managed_blocks],
+        )
+
+        anchor = managed_block_for_name("frontier-discovery-log")
+        target = managed_block_for_name("frontier-layer-coverage")
+        self.assertEqual("Frontier Layer Coverage", target.heading)
+        self.assertEqual(
+            "<!-- SOFA:frontier-layer-coverage:start -->",
+            target.start_marker,
+        )
+        self.assertEqual(
+            "<!-- SOFA:frontier-layer-coverage:end -->",
+            target.end_marker,
+        )
+
+        upsert = workspace_contract.upsert_managed_block_after
+        valid_anchor = "\n".join(
+            [
+                "## Frontier Discovery Log",
+                anchor.start_marker,
+                "discovery content",
+                anchor.end_marker,
+            ]
+        )
+        original = "\n".join(
+            [
+                "# Workflow",
+                valid_anchor,
+                "",
+                "## Current Claim Ledger (summary)",
+                "claim suffix sentinel",
+                "",
+            ]
+        )
+
+        inserted = upsert(
+            original,
+            "frontier-layer-coverage",
+            "first coverage\n",
+            after_block_name="frontier-discovery-log",
+        )
+        self.assertEqual(
+            "\n".join(
+                [
+                    "# Workflow",
+                    valid_anchor,
+                    "",
+                    "## Frontier Layer Coverage",
+                    target.start_marker,
+                    "first coverage",
+                    target.end_marker,
+                    "",
+                    "## Current Claim Ledger (summary)",
+                    "claim suffix sentinel",
+                    "",
+                ]
+            ),
+            inserted,
+        )
+        self.assertLess(inserted.index(anchor.end_marker), inserted.index(target.start_marker))
+        self.assertLess(
+            inserted.index(target.end_marker),
+            inserted.index("## Current Claim Ledger (summary)"),
+        )
+
+        replaced = upsert(
+            inserted,
+            "frontier-layer-coverage",
+            "second coverage\n",
+            after_block_name="frontier-discovery-log",
+        )
+        self.assertEqual(1, replaced.count(target.start_marker))
+        self.assertEqual(1, replaced.count(target.end_marker))
+        self.assertIn(
+            f"{target.start_marker}\nsecond coverage\n{target.end_marker}",
+            replaced,
+        )
+        self.assertNotIn("first coverage", replaced)
+        self.assertIn("claim suffix sentinel", replaced)
+
+        valid_target = "\n".join(
+            [
+                "## Frontier Layer Coverage",
+                target.start_marker,
+                "existing coverage",
+                target.end_marker,
+            ]
+        )
+        malformed_inputs = {
+            "target-start-only": f"{valid_anchor}\n{target.start_marker}\n",
+            "target-end-only": f"{valid_anchor}\n{target.end_marker}\n",
+            "target-duplicate-start": "\n".join(
+                [
+                    valid_anchor,
+                    target.start_marker,
+                    target.start_marker,
+                    target.end_marker,
+                ]
+            ),
+            "target-duplicate-end": "\n".join(
+                [
+                    valid_anchor,
+                    target.start_marker,
+                    target.end_marker,
+                    target.end_marker,
+                ]
+            ),
+            "target-misordered": "\n".join(
+                [valid_anchor, target.end_marker, target.start_marker]
+            ),
+            "anchor-missing": "# Workflow\n## Current Claim Ledger (summary)\n",
+            "anchor-start-only": f"{anchor.start_marker}\n",
+            "anchor-end-only": f"{anchor.end_marker}\n",
+            "anchor-duplicate-start": "\n".join(
+                [anchor.start_marker, anchor.start_marker, anchor.end_marker]
+            ),
+            "anchor-duplicate-end": "\n".join(
+                [anchor.start_marker, anchor.end_marker, anchor.end_marker]
+            ),
+            "anchor-misordered": "\n".join(
+                [anchor.end_marker, anchor.start_marker]
+            ),
+            "valid-target-malformed-anchor": "\n".join(
+                [anchor.start_marker, valid_target]
+            ),
+            "target-before-anchor": "\n".join([valid_target, valid_anchor]),
+            "target-inside-anchor": "\n".join(
+                [
+                    anchor.start_marker,
+                    valid_target,
+                    anchor.end_marker,
+                ]
+            ),
+        }
+        for case, malformed_text in malformed_inputs.items():
+            with self.subTest(case=case, input_text=malformed_text):
+                with self.assertRaises(ValueError):
+                    upsert(
+                        malformed_text,
+                        "frontier-layer-coverage",
+                        "new coverage",
+                        after_block_name="frontier-discovery-log",
+                    )
+
+        with self.assertRaises(ValueError):
+            upsert(
+                original,
+                "unknown-target",
+                "new coverage",
+                after_block_name="frontier-discovery-log",
+            )
+        with self.assertRaises(ValueError):
+            upsert(
+                original,
+                "frontier-layer-coverage",
+                "new coverage",
+                after_block_name="unknown-anchor",
+            )
+
+    def test_strict_replace_after_anchor_requires_target_and_original_topology(self):
+        replace_after = getattr(
+            workspace_contract,
+            "replace_managed_block_after",
+            None,
+        )
+        self.assertIsNotNone(
+            replace_after,
+            "replace_managed_block_after must be exported",
+        )
+        anchor = managed_block_for_name("frontier-discovery-log")
+        target = managed_block_for_name("frontier-layer-coverage")
+        valid_anchor = "\n".join(
+            [anchor.start_marker, "discovery content", anchor.end_marker]
+        )
+        valid_target = "\n".join(
+            [target.start_marker, "old coverage", target.end_marker]
+        )
+        valid = "\n\n".join([valid_anchor, valid_target])
+
+        replaced = replace_after(
+            valid,
+            "frontier-layer-coverage",
+            "new coverage",
+            after_block_name="frontier-discovery-log",
+        )
+        self.assertIn(
+            f"{target.start_marker}\nnew coverage\n{target.end_marker}",
+            replaced,
+        )
+        with self.assertRaisesRegex(ValueError, "has no start marker"):
+            replace_after(
+                valid_anchor,
+                "frontier-layer-coverage",
+                "new coverage",
+                after_block_name="frontier-discovery-log",
+            )
+
+        hidden_markers = {
+            "start": anchor.start_marker,
+            "end": anchor.end_marker,
+        }
+        for marker_kind, hidden_marker in hidden_markers.items():
+            with self.subTest(marker_kind=marker_kind):
+                malformed_target = "\n".join(
+                    [
+                        target.start_marker,
+                        "old coverage",
+                        hidden_marker,
+                        target.end_marker,
+                    ]
+                )
+                malformed = "\n\n".join([valid_anchor, malformed_target])
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"exactly one {marker_kind} marker",
+                ):
+                    replace_after(
+                        malformed,
+                        "frontier-layer-coverage",
+                        "new coverage",
+                        after_block_name="frontier-discovery-log",
+                    )
 
 
 if __name__ == "__main__":

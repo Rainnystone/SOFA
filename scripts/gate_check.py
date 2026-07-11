@@ -24,12 +24,18 @@ import sys
 
 # Import enhanced enforcers
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from loop_enforcer import check_loop_depth
+from loop_enforcer import check_loop_depth_from_documents
 from scorecard_validator import validate_scorecards
 from timeliness_checker import check_timeliness
 from synthesis_checker import check_synthesis
 from redteam_debate_validator import validate_debate
-from frontier_lifecycle import LifecycleError, derive_loop_counts, validate_for_stage_transition
+from frontier_lifecycle import (
+    LifecycleError,
+    derive_frontier_layer_coverage,
+    format_frontier_layer_advisories,
+    validate_for_stage_transition,
+    validate_registry,
+)
 from sofa_contract import ContractProfile, evaluate_workspace
 
 
@@ -46,7 +52,9 @@ def load_frontier_registry(workspace_path: str) -> dict | None:
     if not os.path.exists(registry_path):
         return None
     with open(registry_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        registry = json.load(f)
+    validate_registry(registry)
+    return registry
 
 
 def save_state(workspace_path: str, state: dict) -> None:
@@ -180,20 +188,43 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
                 missing.append("maps/dependency_ladder.md not found (Sector Hunt core deliverable)")
 
         # === ENHANCED ENFORCERS (v3.3) ===
-        # 1. Loop Enforcer: ledger loop headers must bind to stable frontier IDs
-        passed_loop, loop_violations = check_loop_depth(workspace_path)
-        if not passed_loop:
-            missing.extend(loop_violations)
+        # 1. Loop Enforcer: one registry/ledger snapshot drives warnings,
+        # binding counts, and lifecycle convergence.
+        registry = None
+        try:
+            registry = load_frontier_registry(workspace_path)
+        except (OSError, UnicodeError, json.JSONDecodeError, LifecycleError) as exc:
+            missing.append(f"frontier registry invalid: {exc}")
+        else:
+            if registry is None:
+                missing.append("frontier_registry.json not found - run init_workspace.py first")
 
-        registry = load_frontier_registry(workspace_path)
-        if registry is None:
-            missing.append("frontier_registry.json not found - run init_workspace.py first")
-        elif passed_loop:
-            ledger_path = os.path.join(workspace_path, "evidence_ledger.md")
-            try:
-                with open(ledger_path, "r", encoding="utf-8") as f:
-                    ledger_content = f.read()
-                loop_counts = derive_loop_counts(ledger_content, registry)
+        ledger_content = None
+        ledger_path = os.path.join(workspace_path, "evidence_ledger.md")
+        try:
+            with open(ledger_path, "r", encoding="utf-8") as f:
+                ledger_content = f.read()
+        except FileNotFoundError:
+            missing.append("evidence_ledger.md not found")
+        except (OSError, UnicodeError) as exc:
+            missing.append(f"evidence ledger invalid: {exc}")
+
+        if registry is not None:
+            coverage = derive_frontier_layer_coverage(registry)
+            for advisory in format_frontier_layer_advisories(
+                coverage,
+                prefix="[WARN] ",
+            ):
+                print(advisory)
+
+        if registry is not None and ledger_content is not None:
+            passed_loop, loop_counts, loop_violations = check_loop_depth_from_documents(
+                ledger_content,
+                registry,
+            )
+            if not passed_loop:
+                missing.extend(loop_violations)
+            else:
                 passed_lifecycle, lifecycle_violations = validate_for_stage_transition(
                     registry,
                     loop_counts,
@@ -202,10 +233,6 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
                 )
                 if not passed_lifecycle:
                     missing.extend(lifecycle_violations)
-            except FileNotFoundError:
-                missing.append("evidence_ledger.md not found")
-            except LifecycleError as exc:
-                missing.append(str(exc))
 
         # 2. Scorecard Validator: Gate Scorecards must be filled
         passed_sc, sc_violations = validate_scorecards(workspace_path)
@@ -213,7 +240,10 @@ def check_gate(workspace_path: str, from_stage: str, to_stage: str) -> tuple[boo
             missing.extend(sc_violations)
 
         # 3. Timeliness Checker: recent events must be tracked
-        passed_time, time_violations = check_timeliness(workspace_path)
+        passed_time, time_violations = check_timeliness(
+            workspace_path,
+            ledger_text=ledger_content,
+        )
         if not passed_time:
             missing.extend(time_violations)
 

@@ -9,6 +9,8 @@ from .artifacts import (
     managed_block_for_name,
     normalize_mode,
     replace_managed_block,
+    replace_managed_block_after,
+    upsert_managed_block_after,
 )
 
 __all__ = [
@@ -22,4 +24,6 @@ __all__ = [
     "managed_block_for_name",
     "normalize_mode",
     "replace_managed_block",
+    "replace_managed_block_after",
+    "upsert_managed_block_after",
 ]

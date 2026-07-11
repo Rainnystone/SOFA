@@ -64,6 +64,14 @@ Mandatory outputs:
 - Blind spot scan with at least six contrarian or risk-oriented searches.
 - For Sector Hunt, an Architecture Shift Brief written to `research_workflow.md`.
 
+After the main thread writes the complete Demand Decomposition Sketch, replace each placeholder below with the exact Layer 0–5 label from that current sketch and copy only those six chosen structural labels into the registry:
+
+```bash
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" set-layers --label 0 "<EXACT_LAYER_0_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 1 "<EXACT_LAYER_1_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 2 "<EXACT_LAYER_2_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 3 "<EXACT_LAYER_3_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 4 "<EXACT_LAYER_4_LABEL_FROM_CURRENT_STAGE_0_SKETCH>" --label 5 "<EXACT_LAYER_5_LABEL_FROM_CURRENT_STAGE_0_SKETCH>"
+```
+
+Every `set-layers` invocation supplies indexes 0 through 5 exactly once. Re-running the same full command is an idempotent repair; changing the full set requires `--replace`. These labels come from the main-thread Stage 0 sketch: the CLI neither generates nor parses that narrative, and structural depth is workspace-defined rather than a fixed hardware taxonomy. `source_frontier` records discovery provenance, while `parent_frontier` is optional structural lineage; they are independent facts. Never hand-edit `frontier_registry.json`.
+
 Gate:
 
 ```bash
@@ -83,11 +91,18 @@ Show the options to the user and ask for priority selection when the choice mate
 After the user accepts the frontier set, register each accepted frontier before Stage 2:
 
 ```bash
-python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --at-loop 1
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "[frontier display name]" --source initial --layer <ACTUAL_WORKSPACE_LAYER_INDEX_0_TO_5> --at-loop 1
 python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F1
 ```
 
-Repeat `add` for each accepted frontier, start only the first active frontier, and keep all loop headers in `## Loop {N}: F{id} - {name}` format.
+Repeat `add` for each accepted frontier with its actual workspace layer. When the structural judgment is available and the parent is already bound to a shallower layer, append `--parent F{id}`; a parent is optional and must not be inferred from the frontier name. Start only the one selected as the current active frontier, and keep all loop headers in `## Loop {N}: F{id} - {name}` format.
+
+Use `bind-layer` for later explicit placement or re-placement. Omit `--parent` when no structural parent is known; `--clear` intentionally removes the whole layer/parent binding:
+
+```bash
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" bind-layer F2 --layer 2 --parent F1
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" bind-layer F2 --clear
+```
 
 Gate:
 

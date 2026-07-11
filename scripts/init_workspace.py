@@ -6,11 +6,11 @@ Creates a SOFA workspace directory structure and initializes all required
 state files. Must be called as the FIRST action in any SOFA research session.
 
 Usage:
-    python init_workspace.py <TICKER_OR_THEME> <WORKSPACE_PATH> [--mode ticker|sector]
+    python scripts/init_workspace.py <TICKER_OR_THEME> <WORKSPACE_PATH> [--mode ticker|sector]
 
 Example:
-    python init_workspace.py MXL /path/to/workspace --mode ticker
-    python init_workspace.py "AI Optical Interconnect" /path/to/workspace --mode sector
+    python scripts/init_workspace.py MXL ./workspace/mxl --mode ticker
+    python scripts/init_workspace.py "AI Optical Interconnect" ./workspace/ai-optical-interconnect --mode sector
 """
 
 import argparse
@@ -25,8 +25,18 @@ from capability_policy import (
     render_finance_summary,
     render_setup_recommendation_lines,
 )
-from frontier_lifecycle import make_registry
-from workspace_contract import ArtifactSpec, artifact_contract_for_mode
+from frontier_lifecycle import (
+    CURRENT_REGISTRY_VERSION,
+    make_registry,
+    render_frontier_layer_coverage_md,
+    validate_registry,
+)
+from frontier_review import write_atomic
+from workspace_contract import (
+    ArtifactSpec,
+    artifact_contract_for_mode,
+    upsert_managed_block_after,
+)
 
 try:
     from framing_contract import empty_contract, render_contract_markdown
@@ -66,9 +76,23 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
     # Normalize workspace path
     workspace_path = os.path.normpath(workspace_path)
     created = []
+    updated = []
     skipped_existing = []
     contract = artifact_contract_for_mode(mode)
     mode = contract.mode
+
+    registry_path = os.path.join(workspace_path, "frontier_registry.json")
+    workflow_path = os.path.join(workspace_path, "research_workflow.md")
+    registry_exists = os.path.exists(registry_path)
+    workflow_exists = os.path.exists(workflow_path)
+
+    registry_document = None
+    if not registry_exists:
+        registry_document = make_registry(ticker_or_theme, mode)
+    elif not workflow_exists:
+        with open(registry_path, "r", encoding="utf-8") as handle:
+            registry_document = json.load(handle)
+        validate_registry(registry_document)
 
     # Compute the empty framing contract and its Markdown mirror once; both
     # the workflow scaffold and the machine-ledger write consume this.
@@ -76,12 +100,34 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
     framing_mirror = render_contract_markdown(framing_contract_doc)
     framing_block_md = _managed_block_markdown(contract, "framing-contract", framing_mirror)
 
+    layer_block_md = ""
+    if (
+        not workflow_exists
+        and registry_document["version"] == CURRENT_REGISTRY_VERSION
+    ):
+        layer_block_md = _managed_block_markdown(
+            contract,
+            "frontier-layer-coverage",
+            render_frontier_layer_coverage_md(registry_document),
+        )
+    layer_block_section = f"{layer_block_md}\n\n" if layer_block_md else ""
+
+    repaired_workflow = None
+    if workflow_exists and not registry_exists:
+        with open(workflow_path, "r", encoding="utf-8") as handle:
+            workflow_text = handle.read()
+        repaired_workflow = upsert_managed_block_after(
+            workflow_text,
+            "frontier-layer-coverage",
+            render_frontier_layer_coverage_md(registry_document),
+            after_block_name="frontier-discovery-log",
+        )
+
     # Create directory structure (common)
     _create_directories(workspace_path, contract.directory_specs, created, skipped_existing)
 
     # Create research_workflow.md
-    workflow_path = os.path.join(workspace_path, "research_workflow.md")
-    if not os.path.exists(workflow_path):
+    if not workflow_exists:
         with open(workflow_path, "w", encoding="utf-8") as f:
             f.write(f"""# Research Workflow: {ticker_or_theme}
 
@@ -120,7 +166,7 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
 
 {_managed_block_markdown(contract, "frontier-discovery-log")}
 
-## Current Claim Ledger (summary)
+{layer_block_section}## Current Claim Ledger (summary)
 (See evidence_ledger.md for full content)
 
 ## Synthesis Notes
@@ -130,7 +176,8 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
 """)
         created.append("research_workflow.md")
     else:
-        skipped_existing.append("research_workflow.md")
+        if repaired_workflow is None:
+            skipped_existing.append("research_workflow.md")
 
     # Create evidence_ledger.md
     ledger_path = os.path.join(workspace_path, "evidence_ledger.md")
@@ -204,10 +251,10 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
         with open(capability_report_path, "w", encoding="utf-8") as f:
             f.write(f"""# Capability Report: {ticker_or_theme}
 
-Run from the project root:
+Run from the repository root:
 
 ```bash
-python SOFA/scripts/capability_check.py --json
+python scripts/capability_check.py --json
 ```
 
 | Capability | Mode | Status | Notes |
@@ -233,18 +280,18 @@ python SOFA/scripts/capability_check.py --json
 
 ---
 
-## Layer 0: Terminal Demand
+## Layer 0: [Workspace label from Stage 0]
 (待 Stage 0 Demand Decomposition + Stage 2 Mapping Loop 填充)
 
-## Layer 1: System / Platform
+## Layer 1: [Workspace label from Stage 0]
 
-## Layer 2: Component / Module
+## Layer 2: [Workspace label from Stage 0]
 
-## Layer 3: Material / Process
+## Layer 3: [Workspace label from Stage 0]
 
-## Layer 4: Raw Material / Equipment
+## Layer 4: [Workspace label from Stage 0]
 
-## Layer 5: Geography / Regulation
+## Layer 5: [Workspace label from Stage 0]
 
 ---
 
@@ -283,12 +330,18 @@ python SOFA/scripts/capability_check.py --json
     else:
         skipped_existing.append("state.json")
 
-    # Create frontier_registry.json for v4 frontier lifecycle state.
-    registry_path = os.path.join(workspace_path, "frontier_registry.json")
-    if not os.path.exists(registry_path):
-        registry = make_registry(ticker_or_theme, mode)
-        with open(registry_path, "w", encoding="utf-8") as f:
-            json.dump(registry, f, indent=2, ensure_ascii=False)
+    # Create frontier_registry.json for registry schema v3 state.
+    if not registry_exists:
+        if repaired_workflow is not None:
+            write_atomic(workflow_path, repaired_workflow)
+            updated.append("research_workflow.md")
+            write_atomic(
+                registry_path,
+                json.dumps(registry_document, indent=2, ensure_ascii=False),
+            )
+        else:
+            with open(registry_path, "w", encoding="utf-8") as f:
+                json.dump(registry_document, f, indent=2, ensure_ascii=False)
         created.append("frontier_registry.json")
     else:
         skipped_existing.append("frontier_registry.json")
@@ -300,12 +353,15 @@ python SOFA/scripts/capability_check.py --json
     print(f"  Mode: {'Ticker Dive' if mode == 'ticker' else 'Sector Hunt'}")
     print(f"  Created:")
     _print_items(created)
+    if updated:
+        print(f"  Updated:")
+        _print_items(updated)
     print(f"  Skipped existing:")
     _print_items(skipped_existing)
     print(f"")
 
     print(f"  Capability check:")
-    print(f"    Run python SOFA/scripts/capability_check.py --json from the project root.")
+    print(f"    Run python scripts/capability_check.py --json from the repository root.")
     for line in render_setup_recommendation_lines():
         print(f"    {line}")
     print(f"")
@@ -321,6 +377,8 @@ def _print_items(items):
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Initialize SOFA workspace")
     parser.add_argument("subject", help="Ticker or theme to research")
     parser.add_argument("workspace_path", help="Path to create workspace")

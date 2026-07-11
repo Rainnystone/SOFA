@@ -50,6 +50,7 @@ CLI_SCRIPTS_WITH_NON_ASCII_OUTPUT = (
     "assemble_dispatch.py",
     "framing_intake.py",
     "archive_source.py",
+    "init_workspace.py",
     # validate_dossier.py is the reference implementation: already fixed.
     "validate_dossier.py",
 )
@@ -256,6 +257,116 @@ class TestCliStdoutBehaviorUnderLegacyEncoding(unittest.TestCase):
         stderr = broken.stderr.decode("utf-8", errors="replace")
         self.assertIn("错误", stderr)
         self.assertNotIn("UnicodeEncodeError", stderr)
+
+    def test_set_layers_and_status_emit_utf8_bytes_for_cjk_labels_under_legacy_encoding(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        workspace = Path(temp_dir.name) / "含 空格 的工作区"
+        subject = "中文分层路径测试"
+        initialized = _run_script(
+            SCRIPTS / "init_workspace.py",
+            subject,
+            str(workspace),
+            "--mode",
+            "ticker",
+            cwd=ROOT,
+        )
+        init_stdout = initialized.stdout.decode("utf-8")
+        init_stderr = initialized.stderr.decode("utf-8", errors="replace")
+        self.assertEqual(
+            0,
+            initialized.returncode,
+            init_stderr,
+        )
+        self.assertIn(subject, init_stdout)
+        self.assertIn(str(workspace), init_stdout)
+        self.assertNotIn("UnicodeEncodeError", init_stderr)
+        self.assertNotIn("Traceback", init_stderr)
+        for expected_file in (
+            "frontier_registry.json",
+            "research_workflow.md",
+            "evidence_ledger.md",
+            "state.json",
+        ):
+            self.assertTrue((workspace / expected_file).is_file(), expected_file)
+        labels = [
+            "终端需求",
+            "系统平台",
+            "组件模块",
+            "材料工艺",
+            "受限投入设备",
+            "地域监管",
+        ]
+        label_args = []
+        for index, label in enumerate(labels):
+            label_args.extend(["--label", str(index), label])
+
+        result = _run_script(
+            SCRIPTS / "frontier_review.py",
+            str(workspace),
+            "set-layers",
+            *label_args,
+            cwd=ROOT,
+        )
+
+        stdout = result.stdout.decode("utf-8")
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        self.assertEqual(0, result.returncode, stderr)
+        self.assertEqual(["Layer labels configured"], stdout.splitlines())
+        self.assertNotIn("UnicodeEncodeError", stderr)
+        registry = json.loads(
+            (workspace / "frontier_registry.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(labels, registry["layer_labels"])
+
+        added = _run_script(
+            SCRIPTS / "frontier_review.py",
+            str(workspace),
+            "add",
+            "--name",
+            "CJK label frontier",
+            "--source",
+            "initial",
+            "--at-loop",
+            "1",
+            "--layer",
+            "0",
+            cwd=ROOT,
+        )
+        self.assertEqual(
+            0,
+            added.returncode,
+            added.stderr.decode("utf-8", errors="replace"),
+        )
+
+        status = _run_script(
+            SCRIPTS / "frontier_review.py",
+            str(workspace),
+            "status",
+            cwd=ROOT,
+        )
+
+        status_stdout = status.stdout.decode("utf-8")
+        status_stderr = status.stderr.decode("utf-8", errors="replace")
+        self.assertEqual(0, status.returncode, status_stderr)
+        self.assertIn(labels[0], status_stdout)
+        self.assertNotIn("\ufffd", status_stdout)
+        self.assertNotIn("UnicodeEncodeError", status_stderr)
+        lead_line = (
+            "F1 status=New derived_loops=0 review_count=0 "
+            "name=CJK label frontier"
+        )
+        detail_line = (
+            f"  layer=0 label={labels[0]} parent_frontier=none "
+            "source_frontier=none"
+        )
+        status_lines = status_stdout.splitlines()
+        self.assertIn(lead_line, status_lines)
+        self.assertIn(detail_line, status_lines)
+        self.assertEqual(
+            status_lines.index(lead_line) + 1,
+            status_lines.index(detail_line),
+        )
 
 
 if __name__ == "__main__":

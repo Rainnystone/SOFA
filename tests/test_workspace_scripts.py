@@ -14,13 +14,442 @@ from unittest import mock
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import init_workspace
+from frontier_lifecycle import (
+    bind_frontier_layer,
+    create_frontier,
+    make_registry as make_frontier_registry,
+    render_frontier_layer_coverage_md,
+    set_layer_labels,
+)
 from workspace_contract import artifact_contract_for_mode
 
 INIT_SCRIPT = ROOT / "scripts/init_workspace.py"
+REVIEW_SCRIPT = ROOT / "scripts/frontier_review.py"
 PACKET_SCRIPT = ROOT / "scripts/generate_ultra_packet.py"
 
 
 class TestWorkspaceScripts(unittest.TestCase):
+    def test_init_workspace_scaffolds_v3_registry_and_layer_block_in_stable_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "ticker-workspace"
+            registry = make_frontier_registry("Coherent Corp", "ticker")
+            events = []
+            real_json_dump = json.dump
+
+            def render_spy(document):
+                self.assertIs(registry, document)
+                events.append("render")
+                return render_frontier_layer_coverage_md(document)
+
+            def dump_spy(document, *args, **kwargs):
+                if document is registry:
+                    events.append("persist")
+                return real_json_dump(document, *args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    init_workspace,
+                    "make_registry",
+                    return_value=registry,
+                ) as registry_factory,
+                mock.patch.object(
+                    init_workspace,
+                    "render_frontier_layer_coverage_md",
+                    create=True,
+                    side_effect=render_spy,
+                ) as renderer,
+                mock.patch.object(init_workspace.json, "dump", side_effect=dump_spy),
+            ):
+                init_workspace.create_workspace(
+                    "Coherent Corp",
+                    str(workspace),
+                    "ticker",
+                )
+
+            registry_factory.assert_called_once_with("Coherent Corp", "ticker")
+            renderer.assert_called_once_with(registry)
+            self.assertEqual(["render", "persist"], events)
+            self.assertEqual(
+                registry,
+                json.loads(
+                    (workspace / "frontier_registry.json").read_text(encoding="utf-8")
+                ),
+            )
+
+            workflow = (workspace / "research_workflow.md").read_text(encoding="utf-8")
+            headings = [
+                "## Frontier Review Log",
+                "## Frontier Discovery Log",
+                "## Frontier Layer Coverage",
+                "## Current Claim Ledger (summary)",
+            ]
+            self.assertEqual(
+                sorted(workflow.index(heading) for heading in headings),
+                [workflow.index(heading) for heading in headings],
+            )
+            start_marker = "<!-- SOFA:frontier-layer-coverage:start -->"
+            end_marker = "<!-- SOFA:frontier-layer-coverage:end -->"
+            self.assertEqual(1, workflow.count(start_marker))
+            self.assertEqual(1, workflow.count(end_marker))
+            interior = workflow.split(f"{start_marker}\n", 1)[1].split(
+                f"\n{end_marker}", 1
+            )[0]
+            self.assertEqual(
+                "\n".join(
+                    [
+                        "> Presence/status snapshot only. This does not establish research completeness, evidence adequacy, or action-class readiness.",
+                        "",
+                        "### Advisory Gaps",
+                        "",
+                        "- LAYER_LABELS_UNCONFIGURED: Frontier layer labels are unavailable; run set-layers.",
+                    ]
+                ),
+                interior,
+            )
+            self.assertNotIn("| Layer | Label |", interior)
+
+    def test_new_sector_ladder_uses_neutral_labels_without_generated_nodes_or_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "sector-workspace"
+            init_workspace.create_workspace(
+                "AI Optical Interconnect",
+                str(workspace),
+                "sector",
+            )
+
+            ladder_path = workspace / "maps" / "dependency_ladder.md"
+            ladder = ladder_path.read_text(encoding="utf-8")
+            self.assertEqual(
+                [
+                    f"## Layer {index}: [Workspace label from Stage 0]"
+                    for index in range(6)
+                ],
+                [line for line in ladder.splitlines() if line.startswith("## Layer ")],
+            )
+            self.assertIn("## Node Registry", ladder)
+            self.assertIn("## Double Bottleneck Candidates", ladder)
+            self.assertIn("## Chokepoint Scoring Matrix (Stage 3)", ladder)
+            node_registry = ladder.split("## Node Registry\n", 1)[1].split(
+                "\n## Double Bottleneck Candidates",
+                1,
+            )[0]
+            self.assertEqual(
+                "\n".join(
+                    [
+                        "| Company | Ticker | Layer | Role | Market Cap Bucket | Evidence Grade | Chokepoint Pre-Score |",
+                        "|---------|--------|-------|------|-------------------|----------------|---------------------|",
+                        "",
+                    ]
+                ),
+                node_registry,
+            )
+
+            sentinel_bytes = b"existing ladder sentinel\r\n"
+            ladder_path.write_bytes(sentinel_bytes)
+            init_workspace.create_workspace(
+                "AI Optical Interconnect",
+                str(workspace),
+                "sector",
+            )
+            self.assertEqual(sentinel_bytes, ladder_path.read_bytes())
+
+    def test_init_workspace_rebuilds_missing_workflow_from_existing_registry_authority(self):
+        def registry_bytes(document):
+            return (
+                json.dumps(document, ensure_ascii=False, indent=1).replace("\n", "\r\n")
+                + "\r\n"
+            ).encode("utf-8")
+
+        def run_init(subject, workspace, mode):
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    init_workspace.create_workspace(subject, str(workspace), mode)
+            except Exception as error:
+                self.fail(f"valid recovery authority raised {type(error).__name__}: {error}")
+
+        labels = [
+            "Demand edge",
+            "Platform fabric",
+            "Optical modules",
+            "Process inputs",
+            "Production equipment",
+            "Regulatory geography",
+        ]
+        configured_v3 = make_frontier_registry("Configured authority", "sector")
+        configured_v3 = create_frontier(
+            configured_v3,
+            name="Bound optical frontier",
+            proposed_at_loop=1,
+            source="initial",
+        )
+        configured_v3 = set_layer_labels(
+            configured_v3,
+            list(enumerate(labels)),
+        )
+        configured_v3 = bind_frontier_layer(configured_v3, "F1", layer=2)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            configured_workspace = root / "configured-v3"
+            configured_workspace.mkdir()
+            configured_path = configured_workspace / "frontier_registry.json"
+            configured_original = registry_bytes(configured_v3)
+            configured_path.write_bytes(configured_original)
+
+            run_init("Ignored scaffold subject", configured_workspace, "sector")
+
+            self.assertEqual(configured_original, configured_path.read_bytes())
+            configured_workflow = (
+                configured_workspace / "research_workflow.md"
+            ).read_text(encoding="utf-8")
+            start_marker = "<!-- SOFA:frontier-layer-coverage:start -->"
+            end_marker = "<!-- SOFA:frontier-layer-coverage:end -->"
+            configured_interior = configured_workflow.split(
+                f"{start_marker}\n",
+                1,
+            )[1].split(f"\n{end_marker}", 1)[0]
+            self.assertEqual(
+                render_frontier_layer_coverage_md(configured_v3).rstrip(),
+                configured_interior,
+            )
+            for index, label in enumerate(labels):
+                self.assertIn(f"| {index} | {label} |", configured_interior)
+            self.assertIn("F1=New", configured_interior)
+
+            legacy_workspace = root / "legacy-v2"
+            legacy_workspace.mkdir()
+            legacy_path = legacy_workspace / "frontier_registry.json"
+            legacy_registry = {
+                "version": 2,
+                "subject": "Legacy authority",
+                "mode": "ticker",
+                "frontiers": [],
+            }
+            legacy_original = registry_bytes(legacy_registry)
+            legacy_path.write_bytes(legacy_original)
+
+            run_init("Ignored legacy subject", legacy_workspace, "ticker")
+
+            self.assertEqual(legacy_original, legacy_path.read_bytes())
+            legacy_workflow = (legacy_workspace / "research_workflow.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("## Frontier Review Log", legacy_workflow)
+            self.assertIn("## Frontier Discovery Log", legacy_workflow)
+            self.assertNotIn("## Frontier Layer Coverage", legacy_workflow)
+            self.assertNotIn("SOFA:frontier-layer-coverage", legacy_workflow)
+
+            both_workspace = root / "both-existing"
+            both_workspace.mkdir()
+            both_workflow_path = both_workspace / "research_workflow.md"
+            both_registry_path = both_workspace / "frontier_registry.json"
+            both_workflow_original = b"existing complete workflow\r\n"
+            both_registry_original = registry_bytes(configured_v3)
+            both_workflow_path.write_bytes(both_workflow_original)
+            both_registry_path.write_bytes(both_registry_original)
+
+            run_init("Ignored complete subject", both_workspace, "sector")
+
+            self.assertEqual(both_workflow_original, both_workflow_path.read_bytes())
+            self.assertEqual(both_registry_original, both_registry_path.read_bytes())
+
+    def _make_workflow_only_recovery_workspace(self, temp_dir):
+        workspace = Path(temp_dir) / "workflow-only"
+        init_workspace.create_workspace("Coherent Corp", str(workspace), "ticker")
+
+        workflow_path = workspace / "research_workflow.md"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        layer_heading = "## Frontier Layer Coverage\n"
+        layer_end = "<!-- SOFA:frontier-layer-coverage:end -->"
+        prefix, remainder = workflow.split(layer_heading, 1)
+        _, suffix = remainder.split(layer_end, 1)
+        workflow_path.write_text(
+            prefix.rstrip() + "\n\n" + suffix.lstrip("\r\n"),
+            encoding="utf-8",
+        )
+        (workspace / "frontier_registry.json").unlink()
+        return workspace
+
+    def test_init_workspace_repairs_existing_workflow_before_creating_missing_v3_registry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self._make_workflow_only_recovery_workspace(temp_dir)
+            workflow_path = workspace / "research_workflow.md"
+            layer_end = "<!-- SOFA:frontier-layer-coverage:end -->"
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                init_workspace.create_workspace("Coherent Corp", str(workspace), "ticker")
+
+            repaired = workflow_path.read_text(encoding="utf-8")
+            start_marker = "<!-- SOFA:frontier-layer-coverage:start -->"
+            self.assertEqual(1, repaired.count(start_marker))
+            self.assertEqual(1, repaired.count(layer_end))
+            self.assertLess(
+                repaired.index("<!-- SOFA:frontier-discovery-log:end -->"),
+                repaired.index("## Frontier Layer Coverage"),
+            )
+            self.assertLess(
+                repaired.index("## Frontier Layer Coverage"),
+                repaired.index("## Current Claim Ledger (summary)"),
+            )
+
+            registry = json.loads(
+                (workspace / "frontier_registry.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(3, registry["version"])
+
+            add = subprocess.run(
+                [
+                    sys.executable,
+                    str(REVIEW_SCRIPT),
+                    str(workspace),
+                    "add",
+                    "--name",
+                    "Supply risk",
+                    "--source",
+                    "initial",
+                    "--at-loop",
+                    "1",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(0, add.returncode, add.stderr)
+            self.assertIn("Added F1", add.stdout)
+
+    def test_init_workspace_preserves_existing_workflow_when_atomic_repair_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self._make_workflow_only_recovery_workspace(temp_dir)
+            workflow_path = workspace / "research_workflow.md"
+            original_workflow = workflow_path.read_bytes()
+
+            with mock.patch.object(
+                init_workspace,
+                "write_atomic",
+                side_effect=OSError("simulated workflow replace failure"),
+                create=True,
+            ) as write_atomic:
+                with self.assertRaisesRegex(OSError, "workflow replace failure"):
+                    init_workspace.create_workspace(
+                        "Coherent Corp",
+                        str(workspace),
+                        "ticker",
+                    )
+
+            write_atomic.assert_called_once()
+            self.assertEqual(workflow_path, Path(write_atomic.call_args.args[0]))
+            self.assertEqual(original_workflow, workflow_path.read_bytes())
+            self.assertFalse((workspace / "frontier_registry.json").exists())
+
+    def test_init_workspace_registry_write_failure_leaves_retryable_repaired_workflow(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self._make_workflow_only_recovery_workspace(temp_dir)
+            workflow_path = workspace / "research_workflow.md"
+            registry_path = workspace / "frontier_registry.json"
+            destinations = []
+
+            def fail_registry_write(path, payload):
+                target = Path(path)
+                destinations.append(target)
+                if len(destinations) == 2:
+                    raise OSError("simulated registry replace failure")
+                target.write_text(payload, encoding="utf-8")
+
+            with mock.patch.object(
+                init_workspace,
+                "write_atomic",
+                side_effect=fail_registry_write,
+                create=True,
+            ):
+                with self.assertRaisesRegex(OSError, "registry replace failure"):
+                    init_workspace.create_workspace(
+                        "Coherent Corp",
+                        str(workspace),
+                        "ticker",
+                    )
+
+            self.assertEqual([workflow_path, registry_path], destinations)
+            repaired = workflow_path.read_text(encoding="utf-8")
+            self.assertEqual(
+                1,
+                repaired.count("<!-- SOFA:frontier-layer-coverage:start -->"),
+            )
+            self.assertFalse(registry_path.exists())
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                init_workspace.create_workspace("Coherent Corp", str(workspace), "ticker")
+
+            self.assertEqual(
+                3,
+                json.loads(registry_path.read_text(encoding="utf-8"))["version"],
+            )
+            self.assertEqual(
+                1,
+                workflow_path.read_text(encoding="utf-8").count(
+                    "<!-- SOFA:frontier-layer-coverage:start -->"
+                ),
+            )
+
+    def test_init_workspace_rejects_unanchored_workflow_before_creating_v3_registry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "malformed-workflow"
+            workspace.mkdir()
+            workflow_path = workspace / "research_workflow.md"
+            original = b"existing workflow without managed anchors\r\n"
+            workflow_path.write_bytes(original)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "frontier-discovery-log.*exactly one start marker",
+            ):
+                init_workspace.create_workspace(
+                    "Coherent Corp",
+                    str(workspace),
+                    "ticker",
+                )
+
+            self.assertEqual(original, workflow_path.read_bytes())
+            self.assertFalse((workspace / "frontier_registry.json").exists())
+            self.assertEqual({"research_workflow.md"}, {path.name for path in workspace.iterdir()})
+
+    def test_init_workspace_rejects_malformed_existing_registry_before_workflow_write(self):
+        malformed_documents = {
+            "unreadable-json": b'{"version": 3, invalid json',
+            "invalid-v3-schema": json.dumps(
+                {
+                    "version": 3,
+                    "subject": "Malformed authority",
+                    "mode": "ticker",
+                    "layer_labels": ["only one label"],
+                    "frontiers": [],
+                },
+                ensure_ascii=False,
+            ).encode("utf-8"),
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for case, original_bytes in malformed_documents.items():
+                with self.subTest(case=case):
+                    workspace = root / case
+                    workspace.mkdir()
+                    registry_path = workspace / "frontier_registry.json"
+                    registry_path.write_bytes(original_bytes)
+
+                    with self.assertRaises((json.JSONDecodeError, ValueError)):
+                        init_workspace.create_workspace(
+                            "Ignored subject",
+                            str(workspace),
+                            "ticker",
+                        )
+
+                    self.assertEqual(original_bytes, registry_path.read_bytes())
+                    self.assertEqual(
+                        {"frontier_registry.json"},
+                        {path.name for path in workspace.iterdir()},
+                    )
+                    self.assertFalse((workspace / "research_workflow.md").exists())
+
     def test_create_workspace_uses_artifact_contract_for_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "sector-workspace"
@@ -91,9 +520,10 @@ class TestWorkspaceScripts(unittest.TestCase):
             registry = json.loads(
                 (workspace / "frontier_registry.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(2, registry["version"])
+            self.assertEqual(3, registry["version"])
             self.assertEqual("AI Optical Interconnect", registry["subject"])
             self.assertEqual("sector", registry["mode"])
+            self.assertEqual([], registry["layer_labels"])
             self.assertEqual([], registry["frontiers"])
             self.assertEqual(
                 {"max_active": 3, "max_active_plus_new": 5},

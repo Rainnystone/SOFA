@@ -4,11 +4,11 @@ SOFA detects optional tools and prints recommendations. It never silently instal
 
 The deterministic source for the chain order, provider ids, and recommendation text is `scripts/capability_policy/`. This page is human-readable setup guidance summarizing those facts.
 
-Run the capability check when you want to see what is available:
+From the repository root, run the capability check when you want to see what is available:
 
 ```bash
-python SOFA/scripts/capability_check.py
-python SOFA/scripts/capability_check.py --json
+python scripts/capability_check.py
+python scripts/capability_check.py --json
 ```
 
 ## General Search Chain
