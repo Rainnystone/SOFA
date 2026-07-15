@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -171,10 +172,14 @@ def _require_any_claim_id(value: Any, path: str, cycle_id: str) -> str:
     )
 
 
+def _contains_control_character(value: str) -> bool:
+    return any(unicodedata.category(character) == "Cc" for character in value)
+
+
 def _require_non_empty_text(value: Any, path: str) -> str:
     if not isinstance(value, str) or not value:
         raise RevisitContractError(f"{path} must be non-empty text")
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+    if _contains_control_character(value):
         raise RevisitContractError(f"{path} must not contain control characters")
     return value
 
@@ -184,7 +189,7 @@ def _require_nullable_text(value: Any, path: str) -> str | None:
         return None
     if not isinstance(value, str) or not value:
         raise RevisitContractError(f"{path} must be non-empty text or null")
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+    if _contains_control_character(value):
         raise RevisitContractError(f"{path} must not contain control characters")
     return value
 
@@ -580,11 +585,15 @@ def _validate_claims(raw: dict[str, Any]) -> None:
     known_claim_ids = {
         claim["claim_id"] for claim in raw["intake"]["selected_claims"]
     }
-    known_claim_ids.update(
-        claim["claim_id"]
-        for claim in derived_values
-        if isinstance(claim, dict) and "claim_id" in claim
-    )
+    for index, claim in enumerate(derived_values):
+        if isinstance(claim, dict) and "claim_id" in claim:
+            known_claim_ids.add(
+                _require_derived_claim_id(
+                    claim["claim_id"],
+                    f"{derived_path}[{index}].claim_id",
+                    raw["cycle_id"],
+                )
+            )
     for index, claim_value in enumerate(derived_values):
         path = f"{derived_path}[{index}]"
         claim = _require_object(claim_value, path)

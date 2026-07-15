@@ -1211,6 +1211,45 @@ class TestCycleSchema(unittest.TestCase):
             r"cycle\.derived_claims\[0\] missing field\(s\): claim_id",
         )
 
+    def test_malformed_derived_claim_id_containers_use_the_public_error(self):
+        for malformed_id in ([], {}):
+            with self.subTest(malformed_id=malformed_id):
+                cycle = make_populated_cycle()
+                cycle["derived_claims"][0]["claim_id"] = malformed_id
+
+                self.assert_contract_error(
+                    lambda: revisit_contract.validate_cycle(cycle),
+                    r"cycle\.derived_claims\[0\]\.claim_id must match RC-NNNN-DC-NN",
+                )
+
+    def test_free_text_rejects_unicode_c1_controls(self):
+        cases = (
+            (
+                ("derived_claims", 0, "statement"),
+                r"cycle\.derived_claims\[0\]\.statement must not contain control characters",
+            ),
+            (
+                ("claim_resolutions", 0, "rationale"),
+                r"cycle\.claim_resolutions\[0\]\.rationale must not contain control characters",
+            ),
+        )
+        for path, pattern in cases:
+            with self.subTest(path=path):
+                cycle = make_populated_cycle()
+                set_nested_value(cycle, path, "plain\u0085text")
+
+                self.assert_contract_error(
+                    lambda: revisit_contract.validate_cycle(cycle), pattern
+                )
+
+        ordinary_unicode = make_populated_cycle()
+        ordinary_unicode["derived_claims"][0]["statement"] = "普通文本 café — Δ"
+        ordinary_unicode["claim_resolutions"][0]["rationale"] = "证据审阅完成"
+        self.assertIs(
+            ordinary_unicode,
+            revisit_contract.validate_cycle(ordinary_unicode),
+        )
+
     def test_claim_resolution_scalars_and_references_are_strict(self):
         cases = (
             ("claim_id", "bad", "claim_id must match RC-NNNN-CL-NN or RC-NNNN-DC-NN"),
