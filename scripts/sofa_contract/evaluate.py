@@ -34,6 +34,21 @@ except ImportError:
         has_registered_source_id_reference,
     )
 
+try:
+    from revisit_contract import (
+        RevisitContractError,
+        load_cycle,
+        load_pointer,
+        sha256_bytes,
+    )
+except ImportError:
+    from scripts.revisit_contract import (
+        RevisitContractError,
+        load_cycle,
+        load_pointer,
+        sha256_bytes,
+    )
+
 from .result import ContractProfile, ContractResult
 from .workspace import (
     find_markdown_reports,
@@ -42,6 +57,7 @@ from .workspace import (
     markdown_table_has_data_row,
     parse_stage_progress,
     read_json_file,
+    read_specific_markdown_report,
     read_text_file,
 )
 
@@ -101,6 +117,55 @@ CORE_WORKSPACE_FILE_FAILURES = {
         "evidence_ledger.md is required for evidence-first research",
     ),
 }
+
+
+def evaluate_specific_ticker_report(
+    workspace: Path | str,
+    report_path: str,
+    *,
+    expected_sha256: str | None = None,
+    expected_metadata: str | None = None,
+) -> ContractResult:
+    root = Path(workspace)
+    result = ContractResult()
+    try:
+        relative, payload, text = read_specific_markdown_report(root, report_path)
+    except (OSError, ValueError, RevisitContractError) as exc:
+        result.fail(
+            code="CURRENT_REPORT_INVALID",
+            message=str(exc),
+            path=str(report_path),
+        )
+        return result
+    if expected_sha256 is not None and sha256_bytes(payload) != expected_sha256:
+        result.fail(
+            code="CURRENT_REPORT_HASH_DRIFT",
+            message="registered report bytes do not match report_sha256",
+            path=relative,
+        )
+        return result
+    if expected_metadata is not None and not _has_exact_single_metadata_block(
+        payload.decode("utf-8"),
+        expected_metadata,
+    ):
+        result.fail(
+            code="REVISIT_REPORT_METADATA_MISMATCH",
+            message="report does not contain the exact derived revisit metadata block",
+            path=relative,
+        )
+    profile = ContractProfile(mode="ticker", target="final_report")
+    for label in _missing_final_report_requirements(text, profile):
+        result.fail(
+            code=f"FINAL_REPORT_MISSING_{label}",
+            message=f"final report is missing required area: {label.lower().replace('_', ' ')}",
+            path=relative,
+            evidence=", ".join(TICKER_REPORT_REQUIREMENTS[label]),
+        )
+    return result
+
+
+def _has_exact_single_metadata_block(report_text: str, expected_metadata: str) -> bool:
+    return report_text.count(expected_metadata) == 1
 
 
 def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> ContractResult:
@@ -727,6 +792,44 @@ def _worker_role_for_output(rel: str, delivered_roles: dict[str, str], candidate
 
 
 def _check_final_report(workspace: Path, profile: ContractProfile, result: ContractResult) -> None:
+    if profile.mode == "ticker":
+        try:
+            pointer = load_pointer(workspace, allow_missing=True)
+        except (OSError, RevisitContractError) as exc:
+            result.fail(
+                code="CURRENT_REPORT_INVALID",
+                message=str(exc),
+                path="revisit_contract.json",
+            )
+            return
+        if pointer is None or pointer["current_revision"] is None:
+            result.fail(
+                code="FINAL_REPORT_MISSING",
+                message="ticker final report authority has no registered current report",
+                path="revisit_contract.json",
+            )
+            result.fail(
+                code="CURRENT_REPORT_UNREGISTERED",
+                message="ticker final-report readiness requires an explicitly registered current report",
+                path="revisit_contract.json",
+            )
+            return
+        revision = pointer["current_revision"]
+        if revision["cycle_id"] is not None and not _check_current_revision_cycle(
+            workspace,
+            revision,
+            result,
+        ):
+            return
+        result.extend(
+            evaluate_specific_ticker_report(
+                workspace,
+                revision["report_path"],
+                expected_sha256=revision["report_sha256"],
+            )
+        )
+        return
+
     reports = find_markdown_reports(workspace)
     if not reports:
         result.fail(
@@ -764,6 +867,53 @@ def _check_final_report(workspace: Path, profile: ContractProfile, result: Contr
             path=best_path.relative_to(workspace).as_posix(),
             evidence=", ".join(markers),
         )
+
+
+def _check_current_revision_cycle(
+    workspace: Path,
+    revision: dict,
+    result: ContractResult,
+) -> bool:
+    cycle_id = revision["cycle_id"]
+    try:
+        cycle = load_cycle(workspace, cycle_id)
+    except (OSError, RevisitContractError) as exc:
+        result.fail(
+            code="CURRENT_REPORT_CYCLE_INVALID",
+            message=str(exc),
+            path=f"revisit_cycles/{cycle_id}.json",
+        )
+        return False
+    if cycle["status"] != "completed":
+        result.fail(
+            code="CURRENT_REPORT_CYCLE_INVALID",
+            message="current report must originate from an immutable completed cycle",
+            path=f"revisit_cycles/{cycle_id}.json",
+        )
+        return False
+
+    candidate = cycle["report_candidate"]
+    assessment = cycle["decision_assessment"]
+    base_revision = cycle["intake"]["base_revision"]
+    candidate_matches = (
+        cycle["candidate_revision_id"] == revision["revision_id"]
+        and isinstance(candidate, dict)
+        and candidate["revision_id"] == revision["revision_id"]
+        and candidate["revision_of"] == revision["revision_of"]
+        and candidate["report_path"] == revision["report_path"]
+        and candidate["report_sha256"] == revision["report_sha256"]
+        and base_revision["revision_id"] == revision["revision_of"]
+        and isinstance(assessment, dict)
+        and assessment["new_action_class"] == revision["action_class"]
+    )
+    if not candidate_matches:
+        result.fail(
+            code="CURRENT_REPORT_LINEAGE_MISMATCH",
+            message="current revision does not exactly match its completed cycle candidate lineage",
+            path=f"revisit_cycles/{cycle_id}.json",
+        )
+        return False
+    return True
 
 
 def _report_requirements_for(profile: ContractProfile) -> dict:

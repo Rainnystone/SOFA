@@ -14,6 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import init_workspace
+import revisit_contract
 from frontier_lifecycle import (
     bind_frontier_layer,
     create_frontier,
@@ -239,6 +240,8 @@ class TestWorkspaceScripts(unittest.TestCase):
             self.assertIn("## Frontier Discovery Log", legacy_workflow)
             self.assertNotIn("## Frontier Layer Coverage", legacy_workflow)
             self.assertNotIn("SOFA:frontier-layer-coverage", legacy_workflow)
+            self.assertFalse((legacy_workspace / "revisit_cycles").exists())
+            self.assertFalse((legacy_workspace / "revisit_contract.json").exists())
 
             both_workspace = root / "both-existing"
             both_workspace.mkdir()
@@ -565,6 +568,98 @@ class TestWorkspaceScripts(unittest.TestCase):
             self.assertNotIn(
                 "coverage", artifact_contract_for_mode("ticker").all_scaffold_paths()
             )
+
+    def test_fresh_ticker_init_writes_exact_empty_revisit_pointer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "ticker-workspace"
+
+            init_workspace.create_workspace("MXL", str(workspace), "ticker")
+
+            self.assertTrue((workspace / "revisit_cycles").is_dir())
+            self.assertEqual(
+                revisit_contract.canonical_document_bytes(
+                    revisit_contract.empty_pointer()
+                ),
+                (workspace / "revisit_contract.json").read_bytes(),
+            )
+
+    def test_fresh_sector_init_does_not_create_revisit_scaffold(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "sector-workspace"
+
+            init_workspace.create_workspace(
+                "AI Optical Interconnect",
+                str(workspace),
+                "sector",
+            )
+
+            self.assertFalse((workspace / "revisit_cycles").exists())
+            self.assertFalse((workspace / "revisit_contract.json").exists())
+
+    def test_legacy_ticker_init_does_not_silently_create_revisit_authority(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "legacy-ticker"
+            workspace.mkdir()
+            (workspace / "state.json").write_text(
+                json.dumps(
+                    {
+                        "subject": "MXL",
+                        "mode": "ticker",
+                        "current_stage": "stage_3",
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout):
+                init_workspace.create_workspace("MXL", str(workspace), "ticker")
+
+            self.assertFalse((workspace / "revisit_cycles").exists())
+            self.assertFalse((workspace / "revisit_contract.json").exists())
+            self.assertNotIn("revisit_cycles/", stdout.getvalue())
+            self.assertNotIn("revisit_contract.json", stdout.getvalue())
+
+    def test_workflow_only_legacy_ticker_is_not_silently_adopted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self._make_workflow_only_recovery_workspace(temp_dir)
+            (workspace / "state.json").unlink()
+            (workspace / "revisit_contract.json").unlink()
+            (workspace / "revisit_cycles").rmdir()
+            stdout = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout):
+                init_workspace.create_workspace("MXL", str(workspace), "ticker")
+
+            self.assertFalse((workspace / "revisit_cycles").exists())
+            self.assertFalse((workspace / "revisit_contract.json").exists())
+            self.assertNotIn("revisit_cycles/", stdout.getvalue())
+            self.assertNotIn("revisit_contract.json", stdout.getvalue())
+
+    def test_adopted_ticker_init_repairs_directory_without_rewriting_pointer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "adopted-ticker"
+            init_workspace.create_workspace("MXL", str(workspace), "ticker")
+            pointer = revisit_contract.empty_pointer()
+            pointer["current_revision"] = {
+                "revision_id": "REV-0001",
+                "cycle_id": None,
+                "report_path": "reports/final.md",
+                "report_sha256": "a" * 64,
+                "action_class": "Watch with Trigger",
+                "validated_at": "2026-07-15T00:00:00Z",
+                "revision_of": None,
+            }
+            pointer_bytes = revisit_contract.canonical_document_bytes(pointer)
+            pointer_path = workspace / "revisit_contract.json"
+            pointer_path.write_bytes(pointer_bytes)
+            (workspace / "revisit_cycles").rmdir()
+
+            init_workspace.create_workspace("MXL", str(workspace), "ticker")
+
+            self.assertEqual(pointer_bytes, pointer_path.read_bytes())
+            self.assertTrue((workspace / "revisit_cycles").is_dir())
 
     def test_init_workspace_scaffolds_source_cache(self):
         with tempfile.TemporaryDirectory() as tmp:

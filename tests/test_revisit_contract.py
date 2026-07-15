@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,77 @@ import scripts.revisit_contract as revisit_contract
 import scripts.revisit_contract.model as revisit_model
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+REVISIT_CYCLE_SCRIPT = REPO_ROOT / "scripts" / "revisit_cycle.py"
+
+
+def complete_ticker_report_bytes() -> bytes:
+    return (
+        "\n".join(
+            [
+                "# Final Report",
+                "Conclusion: research status is Watch with Trigger.",
+                "Confidence: medium.",
+                "Time horizon: 12 months.",
+                "Top supporting evidence: evidence_ledger.md#loop-1.",
+                "Strongest counter evidence: customer qualification risk.",
+                "Evidence map: evidence_ledger.md.",
+                "Financial bridge: revenue bridge is constrained by qualification timing.",
+                "Catalyst clock: next filing and customer update.",
+                "Red-team results: unresolved substitution risk.",
+                "Invalidation triggers: lost customer qualification.",
+                "Watch protocol: monitor customer updates.",
+                "UTF-8 proof: 中文证据保持原字节。",
+            ]
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def make_registration_workspace(root: Path, *, mode: str = "ticker") -> tuple[Path, Path]:
+    workspace = root / "workspace"
+    reports = workspace / "reports"
+    reports.mkdir(parents=True)
+    (workspace / "state.json").write_text(
+        json.dumps(
+            {
+                "subject": "TEST",
+                "mode": mode,
+                "current_stage": "stage_5",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    report = reports / "final.md"
+    report.write_bytes(complete_ticker_report_bytes())
+    return workspace, report
+
+
+def run_revisit_cycle_cli(workspace: Path, *arguments: str, env=None):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(REVISIT_CYCLE_SCRIPT),
+            str(workspace),
+            *arguments,
+        ],
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        env=env,
+    )
+
+
+def snapshot_tree(root: Path) -> dict[str, tuple[str, bytes | None]]:
+    snapshot = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_dir():
+            snapshot[relative] = ("directory", None)
+        else:
+            snapshot[relative] = ("file", path.read_bytes())
+    return snapshot
 
 
 def make_initial_revision():
@@ -262,6 +335,294 @@ class TestRevisitPackageBootstrap(unittest.TestCase):
         self.assertTrue(
             (REPO_ROOT / "scripts" / "revisit_contract" / "__init__.py").is_file()
         )
+
+
+class TestRevisitCycleCliBootstrap(unittest.TestCase):
+    def test_revisit_cycle_cli_entrypoint_exists(self):
+        self.assertTrue(
+            REVISIT_CYCLE_SCRIPT.is_file(),
+            "scripts/revisit_cycle.py must exist before behavioral CLI tests run",
+        )
+
+    def test_revisit_cycle_cli_module_imports_from_repo_root(self):
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", "import scripts.revisit_cycle"],
+            cwd=REPO_ROOT,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_register_current_adopts_one_explicit_complete_legacy_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, report = make_registration_workspace(Path(temp_dir))
+            original_report = report.read_bytes()
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "register-current",
+                "--report",
+                "reports/final.md",
+                "--action-class",
+                "Watch with Trigger",
+            )
+
+            pointer_path = workspace / "revisit_contract.json"
+            self.assertTrue(
+                pointer_path.is_file(),
+                f"registration did not create pointer: {result.stdout}{result.stderr}",
+            )
+            pointer = revisit_contract.load_pointer(workspace)
+            revision = pointer["current_revision"]
+            self.assertEqual("REV-0001", revision["revision_id"])
+            self.assertIsNone(revision["cycle_id"])
+            self.assertEqual("reports/final.md", revision["report_path"])
+            self.assertEqual(
+                hashlib.sha256(original_report).hexdigest(),
+                revision["report_sha256"],
+            )
+            self.assertEqual("Watch with Trigger", revision["action_class"])
+            self.assertRegex(
+                revision["validated_at"],
+                r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+            )
+            self.assertIsNone(revision["revision_of"])
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue((workspace / "revisit_cycles").is_dir())
+            self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
+            self.assertEqual(original_report, report.read_bytes())
+
+
+class TestRevisitCycleRegisterCurrentCli(unittest.TestCase):
+    def test_register_current_accepts_exact_locked_action_vocabulary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index, action_class in enumerate(revisit_contract.ACTION_CLASSES):
+                with self.subTest(action_class=action_class):
+                    workspace, _ = make_registration_workspace(root / str(index))
+
+                    result = run_revisit_cycle_cli(
+                        workspace,
+                        "register-current",
+                        "--report",
+                        "reports/final.md",
+                        "--action-class",
+                        action_class,
+                    )
+
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual(
+                        action_class,
+                        revisit_contract.load_pointer(workspace)["current_revision"][
+                            "action_class"
+                        ],
+                    )
+
+    def test_register_current_rejects_non_exact_action_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _ = make_registration_workspace(Path(temp_dir))
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "register-current",
+                "--report",
+                "reports/final.md",
+                "--action-class",
+                "watch with trigger",
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_register_current_rejects_unsafe_outside_and_non_markdown_paths_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, _ = make_registration_workspace(root)
+            outside = root / "outside.md"
+            outside.write_bytes(complete_ticker_report_bytes())
+            (workspace / "reports" / "final.txt").write_bytes(
+                complete_ticker_report_bytes()
+            )
+            (workspace / "reports" / "nonutf8.md").write_bytes(b"\xff\xfe")
+            paths = (
+                "/".join(("..", "outside.md")),
+                "/".join(("reports", "..", "outside.md")),
+                str(outside.resolve()),
+                "reports/final.txt",
+                "reports/nonutf8.md",
+                "reports/missing.md",
+            )
+            for report_path in paths:
+                with self.subTest(report_path=report_path):
+                    before = snapshot_tree(workspace)
+                    outside_before = outside.read_bytes()
+
+                    result = run_revisit_cycle_cli(
+                        workspace,
+                        "register-current",
+                        "--report",
+                        report_path,
+                        "--action-class",
+                        "Watch with Trigger",
+                    )
+
+                    self.assertEqual(2, result.returncode, result.stderr)
+                    self.assertEqual(before, snapshot_tree(workspace))
+                    self.assertEqual(outside_before, outside.read_bytes())
+
+    def test_incomplete_report_is_readiness_failure_with_zero_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, report = make_registration_workspace(Path(temp_dir))
+            report.write_bytes(
+                report.read_bytes().replace(
+                    b"Watch protocol: monitor customer updates.\n",
+                    b"",
+                )
+            )
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "register-current",
+                "--report",
+                "reports/final.md",
+                "--action-class",
+                "Watch with Trigger",
+            )
+
+            self.assertEqual(1, result.returncode, result.stderr)
+            self.assertIn("FINAL_REPORT_MISSING_WATCH_PROTOCOL", result.stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_register_current_accepts_strict_empty_pointer_and_preserves_raw_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, report = make_registration_workspace(Path(temp_dir))
+            original_report = report.read_bytes().replace(b"\n", b"\r\n")
+            report.write_bytes(original_report)
+            revisit_contract.persist_pointer(
+                workspace,
+                revisit_contract.empty_pointer(),
+                expected_sha256=None,
+            )
+            (workspace / "revisit_cycles").mkdir()
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "register-current",
+                "--report",
+                "reports/final.md",
+                "--action-class",
+                "Watch with Trigger",
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            revision = revisit_contract.load_pointer(workspace)["current_revision"]
+            self.assertEqual(
+                hashlib.sha256(original_report).hexdigest(),
+                revision["report_sha256"],
+            )
+            self.assertEqual(original_report, report.read_bytes())
+            self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
+
+    def test_second_registration_cannot_replace_non_null_current(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _ = make_registration_workspace(Path(temp_dir))
+            first = run_revisit_cycle_cli(
+                workspace,
+                "register-current",
+                "--report",
+                "reports/final.md",
+                "--action-class",
+                "Watch with Trigger",
+            )
+            self.assertEqual(0, first.returncode, first.stderr)
+            second_report = workspace / "reports" / "second.md"
+            second_report.write_bytes(complete_ticker_report_bytes())
+            before = snapshot_tree(workspace)
+
+            second = run_revisit_cycle_cli(
+                workspace,
+                "register-current",
+                "--report",
+                "reports/second.md",
+                "--action-class",
+                "Reject",
+            )
+
+            self.assertEqual(2, second.returncode, second.stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_sector_workspace_is_rejected_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _ = make_registration_workspace(
+                Path(temp_dir),
+                mode="sector",
+            )
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "register-current",
+                "--report",
+                "reports/final.md",
+                "--action-class",
+                "Watch with Trigger",
+            )
+
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_malformed_pointer_is_rejected_without_repair_or_cycle_creation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _ = make_registration_workspace(Path(temp_dir))
+            pointer = workspace / "revisit_contract.json"
+            pointer.write_bytes(b'{"schema_version": 1, invalid json')
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "register-current",
+                "--report",
+                "reports/final.md",
+                "--action-class",
+                "Watch with Trigger",
+            )
+
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_validation_error_prints_utf8_safely_under_ascii_stdio(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, report = make_registration_workspace(Path(temp_dir))
+            unicode_report = report.with_name("报告.md")
+            unicode_report.write_bytes(
+                report.read_bytes().replace(
+                    b"Watch protocol: monitor customer updates.\n",
+                    b"",
+                )
+            )
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "ascii"
+            env["LC_ALL"] = "C"
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "register-current",
+                "--report",
+                "reports/报告.md",
+                "--action-class",
+                "Watch with Trigger",
+                env=env,
+            )
+
+            self.assertEqual(1, result.returncode, result.stderr)
+            self.assertIn("reports/报告.md", result.stderr)
+            self.assertNotIn("UnicodeEncodeError", result.stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
 
 
 class TestPointerSchema(unittest.TestCase):

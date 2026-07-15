@@ -6,6 +6,11 @@ from typing import Any, Iterator
 
 from workspace_contract import all_worker_output_directories, is_main_thread_artifact
 
+try:
+    from revisit_contract import RevisitContractError, resolve_workspace_path
+except ImportError:
+    from scripts.revisit_contract import RevisitContractError, resolve_workspace_path
+
 
 def read_text_file(path: Path) -> str | None:
     if not path.exists():
@@ -99,3 +104,21 @@ def find_markdown_reports(workspace_path: Path) -> list[Path]:
     if not reports_dir.exists():
         return []
     return sorted(path for path in reports_dir.iterdir() if path.suffix == ".md")
+
+
+def read_specific_markdown_report(
+    workspace_path: Path | str,
+    report_path: str,
+) -> tuple[str, bytes, str]:
+    root = Path(workspace_path).resolve()
+    resolved = resolve_workspace_path(
+        root,
+        report_path,
+        parent="reports",
+        suffix=".md",
+    )
+    if not resolved.is_file():
+        raise RevisitContractError(f"report is not a file: {report_path}")
+    payload = resolved.read_bytes()
+    text = payload.decode("utf-8").lower()
+    return resolved.relative_to(root).as_posix(), payload, text

@@ -102,6 +102,10 @@ SECTOR_DIRECTORY_SPECS = (
     ArtifactSpec("coverage", "coverage/", "directory"),
 )
 
+TICKER_DIRECTORY_SPECS = (
+    ArtifactSpec("revisit_cycles", "revisit_cycles/", "directory"),
+)
+
 COMMON_FILE_SPECS = (
     ArtifactSpec("research_workflow.md", "research_workflow.md", "file"),
     ArtifactSpec("evidence_ledger.md", "evidence_ledger.md", "file"),
@@ -120,6 +124,10 @@ SECTOR_FILE_SPECS = (
     ArtifactSpec("maps/dependency_ladder.md", "maps/dependency_ladder.md", "file"),
 )
 
+TICKER_FILE_SPECS = (
+    ArtifactSpec("revisit_contract.json", "revisit_contract.json", "file"),
+)
+
 MACHINE_LEDGERS = (
     "framing_contract.json",
     "search_log.jsonl",
@@ -128,6 +136,7 @@ MACHINE_LEDGERS = (
     "frontier_registry.json",
     "sources_index.jsonl",
 )
+TICKER_MACHINE_LEDGERS = MACHINE_LEDGERS + ("revisit_contract.json",)
 
 CORE_REQUIRED_FILES = (
     "state.json",
@@ -236,10 +245,10 @@ def artifact_contract_for_mode(mode: str) -> WorkspaceArtifactContract:
     return WorkspaceArtifactContract(
         mode="ticker",
         common_directory_specs=COMMON_DIRECTORY_SPECS,
-        mode_directory_specs=(),
+        mode_directory_specs=TICKER_DIRECTORY_SPECS,
         common_file_specs=COMMON_FILE_SPECS,
-        mode_file_specs=(),
-        machine_ledgers=MACHINE_LEDGERS,
+        mode_file_specs=TICKER_FILE_SPECS,
+        machine_ledgers=TICKER_MACHINE_LEDGERS,
         managed_blocks=MANAGED_BLOCKS,
         workflow_stage_markers=TICKER_WORKFLOW_STAGE_MARKERS,
         worker_output_directories=TICKER_WORKER_OUTPUT_DIRECTORIES,
