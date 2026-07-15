@@ -225,6 +225,306 @@ def make_revisit_start_workspace(root: Path) -> tuple[Path, Path]:
     return workspace, write_valid_revisit_request(root, workspace)
 
 
+def make_task5_mutation_workspace(root: Path) -> tuple[Path, str]:
+    workspace, request_path = make_revisit_start_workspace(root)
+    start = run_revisit_cycle_cli(
+        workspace,
+        "start",
+        "--intake-file",
+        str(request_path),
+    )
+    if start.returncode != 0:
+        raise AssertionError(start.stderr)
+
+    excerpt = "Current source excerpt for the revised qualification window.\n"
+    excerpt_path = workspace / "sources" / "src-002.md"
+    excerpt_path.write_text(excerpt, encoding="utf-8")
+    source_record = {
+        "source_id": "src-002",
+        "url": "https://example.test/revised-qualification",
+        "title": "Revised qualification source",
+        "retrieved": "2026-07-14",
+        "grade": "B",
+        "excerpt_path": "sources/src-002.md",
+        "sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+    }
+    with (workspace / "sources_index.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(source_record, ensure_ascii=False) + "\n")
+
+    delivery_path = workspace / "scouts" / "loop_10_scout.md"
+    delivery_path.parent.mkdir()
+    delivery_path.write_text("# Delivered Scout\n", encoding="utf-8")
+    dispatch = {
+        "dispatch_id": "dispatch_0010_scout",
+        "loop_id": "loop_10",
+        "role": "scout",
+        "mechanism": "host_subagent",
+        "delivery_path": "scouts/loop_10_scout.md",
+        "status": "delivered",
+    }
+    (workspace / "dispatch_log.jsonl").write_text(
+        json.dumps(dispatch, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return workspace, "RC-0001"
+
+
+def make_emergent_claim_request() -> dict:
+    return {
+        "origin": "emergent",
+        "statement": (
+            "The revised qualification window depends on a new packaging constraint."
+        ),
+        "derived_from": None,
+        "accepted_from": {
+            "loop_id": "loop_10",
+            "dispatch_id": "dispatch_0010_scout",
+            "evidence_refs": [
+                {
+                    "kind": "source",
+                    "source_id": "src-002",
+                    "checked_at": "2026-07-14T12:00:00Z",
+                }
+            ],
+        },
+        "acceptance_rationale": (
+            "The main thread accepted the constraint after checking the cited source."
+        ),
+    }
+
+
+def bind_selected_claim_for_task5(workspace: Path, cycle_id: str) -> None:
+    cycle = revisit_contract.load_cycle(workspace, cycle_id)
+    cycle["frontier_bindings"] = [
+        {
+            "frontier_id": "F1",
+            "action": "reactivated",
+            "claim_ids": [f"{cycle_id}-CL-01"],
+            "expected_evidence": ["Current qualification evidence"],
+            "baseline_loop_count": 2,
+            "baseline_review_count": 1,
+            "registry_sha256": cycle["intake"]["workspace_boundary"][
+                "frontier_registry_sha256"
+            ],
+            "bound_at": "2026-07-14T11:00:00Z",
+        }
+    ]
+    attach_valid_audit(cycle)
+    revisit_contract.persist_cycle(
+        workspace,
+        cycle,
+        expected_sha256=revisit_contract.sha256_file(
+            workspace / "revisit_cycles" / f"{cycle_id}.json"
+        ),
+    )
+
+
+def make_confirmed_resolution_request() -> dict:
+    return {
+        "status": "confirmed",
+        "revised_statement": None,
+        "current_evidence_refs": [
+            {
+                "kind": "source",
+                "source_id": "src-002",
+                "checked_at": "2026-07-14T12:00:00Z",
+            }
+        ],
+        "counter_evidence_refs": [],
+        "current_grade": "B",
+        "current_confidence": "medium",
+        "bound_frontier_ids": ["F1"],
+        "rationale": "Current evidence directly supports the atomic proposition.",
+        "missing_proof": None,
+        "attempted_loop_ids": [],
+        "attempted_search_refs": [],
+        "verdict_impact": None,
+        "split_child_ids": [],
+    }
+
+
+def make_blocked_resolution(claim_id: str, frontier_id: str) -> dict:
+    return {
+        "claim_id": claim_id,
+        "status": "blocked",
+        "revised_statement": None,
+        "current_evidence_refs": [],
+        "counter_evidence_refs": [],
+        "current_grade": None,
+        "current_confidence": None,
+        "bound_frontier_ids": [frontier_id],
+        "rationale": "The required public proof remains unavailable.",
+        "missing_proof": "A named customer acceptance filing.",
+        "attempted_loop_ids": ["loop-001"],
+        "attempted_search_refs": [
+            {"loop_id": "loop-001", "query": "customer acceptance filing"}
+        ],
+        "verdict_impact": "The action class cannot be upgraded.",
+        "split_child_ids": [],
+    }
+
+
+def make_bound_model_cycle() -> dict:
+    cycle = make_minimal_cycle()
+    cycle["frontier_bindings"] = [
+        {
+            "frontier_id": "F1",
+            "action": "reactivated",
+            "claim_ids": ["RC-0001-CL-01"],
+            "expected_evidence": ["Current qualification evidence"],
+            "baseline_loop_count": 2,
+            "baseline_review_count": 1,
+            "registry_sha256": "c" * 64,
+            "bound_at": "2026-07-15T00:10:00Z",
+        }
+    ]
+    attach_valid_audit(cycle)
+    return cycle
+
+
+def make_terminal_model_cycle(status: str) -> dict:
+    cycle = make_bound_model_cycle()
+    outcome = make_confirmed_resolution_request()
+    if status == "refuted":
+        outcome.update(
+            {
+                "status": "refuted",
+                "current_evidence_refs": [],
+                "counter_evidence_refs": [
+                    {
+                        "kind": "source",
+                        "source_id": "src-001",
+                        "checked_at": "2026-07-14T12:00:00Z",
+                    }
+                ],
+                "current_grade": None,
+                "current_confidence": None,
+                "rationale": "Current counter-evidence defeats the proposition.",
+            }
+        )
+    elif status == "blocked":
+        outcome = make_blocked_resolution("RC-0001-CL-01", "F1")
+        outcome.pop("claim_id")
+    proposed = revisit_contract.resolve_claim(
+        cycle, "RC-0001-CL-01", outcome
+    )
+    return revisit_model.with_audit(
+        cycle,
+        proposed,
+        "resolve-claim",
+        ["RC-0001-CL-01"],
+        "2026-07-15T00:20:00Z",
+    )
+
+
+def make_split_terminal_model_cycle() -> dict:
+    cycle = make_bound_model_cycle()
+    for number, statement in ((1, "Customer A qualifies."), (2, "Customer B qualifies.")):
+        request = {
+            "origin": "split_child",
+            "statement": statement,
+            "derived_from": "RC-0001-CL-01",
+            "accepted_from": None,
+            "acceptance_rationale": "The parent combined two customers.",
+        }
+        proposed = revisit_contract.add_derived_claim(cycle, request)
+        cycle = revisit_model.with_audit(
+            cycle,
+            proposed,
+            "add-derived-claim",
+            [f"RC-0001-DC-{number:02d}"],
+            f"2026-07-15T00:{20 + number:02d}:00Z",
+        )
+    cycle["frontier_bindings"].append(
+        {
+            "frontier_id": "F2",
+            "action": "added",
+            "claim_ids": ["RC-0001-DC-01", "RC-0001-DC-02"],
+            "expected_evidence": ["Atomic customer qualification evidence"],
+            "baseline_loop_count": 0,
+            "baseline_review_count": 0,
+            "registry_sha256": "c" * 64,
+            "bound_at": "2026-07-15T00:23:00Z",
+        }
+    )
+    attach_valid_audit(cycle)
+    for number in (1, 2):
+        outcome = make_confirmed_resolution_request()
+        outcome["bound_frontier_ids"] = ["F2"]
+        claim_id = f"RC-0001-DC-{number:02d}"
+        proposed = revisit_contract.resolve_claim(cycle, claim_id, outcome)
+        cycle = revisit_model.with_audit(
+            cycle,
+            proposed,
+            "resolve-claim",
+            [claim_id],
+            f"2026-07-15T00:{23 + number:02d}:00Z",
+        )
+    split = make_confirmed_resolution_request()
+    split.update(
+        {
+            "status": "split",
+            "current_evidence_refs": [],
+            "current_grade": None,
+            "current_confidence": None,
+            "bound_frontier_ids": [],
+            "rationale": None,
+            "split_child_ids": ["RC-0001-DC-01", "RC-0001-DC-02"],
+        }
+    )
+    proposed = revisit_contract.resolve_claim(
+        cycle, "RC-0001-CL-01", split
+    )
+    return revisit_model.with_audit(
+        cycle,
+        proposed,
+        "resolve-claim",
+        ["RC-0001-CL-01"],
+        "2026-07-15T00:26:00Z",
+    )
+
+
+def make_decision_assessment_request() -> dict:
+    return {
+        "new_action_class": "Watch with Trigger",
+        "financial_bridge_affected": False,
+        "financial_bridge_rationale": (
+            "No accepted claim changes the modeled revenue transmission."
+        ),
+        "risk_class_changed": False,
+        "risk_class_rationale": (
+            "The remaining gap is disclosed but does not change the selected risk class."
+        ),
+        "supporting_claim_ids": ["RC-0001-CL-01"],
+        "verdict_rationale": (
+            "The trigger changes timing evidence but not the current action class."
+        ),
+        "blocked_claim_ids": [],
+    }
+
+
+def make_assessment_workspace(root: Path, *, outcome: dict | None = None) -> tuple[Path, str]:
+    workspace, cycle_id = make_task5_mutation_workspace(root)
+    bind_selected_claim_for_task5(workspace, cycle_id)
+    resolution = outcome or make_confirmed_resolution_request()
+    resolution_path = root / "assessment-prerequisite-resolution.json"
+    resolution_path.write_text(
+        json.dumps(resolution, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    result = run_revisit_cycle_cli(
+        workspace,
+        "resolve-claim",
+        cycle_id,
+        f"{cycle_id}-CL-01",
+        "--resolution-file",
+        str(resolution_path),
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    return workspace, cycle_id
+
+
 def run_revisit_cycle_cli(workspace: Path, *arguments: str, env=None):
     return subprocess.run(
         [
@@ -458,7 +758,7 @@ def make_populated_cycle():
         {
             "frontier_id": "frontier-001",
             "action": "reuse",
-            "claim_ids": [claim_id],
+            "claim_ids": [claim_id, derived_id],
             "expected_evidence": ["Primary filing"],
             "baseline_loop_count": 1,
             "baseline_review_count": 1,
@@ -469,9 +769,9 @@ def make_populated_cycle():
     cycle["derived_claims"] = [
         {
             "claim_id": derived_id,
-            "origin": "accepted_worker_output",
+            "origin": "emergent",
             "statement": "Updated revenue evidence is decision-relevant.",
-            "derived_from": claim_id,
+            "derived_from": None,
             "accepted_from": {
                 "loop_id": "loop-001",
                 "dispatch_id": "dispatch-001",
@@ -492,11 +792,9 @@ def make_populated_cycle():
             "bound_frontier_ids": ["frontier-001"],
             "rationale": "The primary filing confirms the claim.",
             "missing_proof": None,
-            "attempted_loop_ids": ["loop-001"],
-            "attempted_search_refs": [
-                {"loop_id": "loop-001", "query": "issuer filing revenue"}
-            ],
-            "verdict_impact": "No action-class change.",
+            "attempted_loop_ids": [],
+            "attempted_search_refs": [],
+            "verdict_impact": None,
             "split_child_ids": [],
         },
         {
@@ -510,18 +808,22 @@ def make_populated_cycle():
             "bound_frontier_ids": ["frontier-001"],
             "rationale": "The accepted worker output is traceable.",
             "missing_proof": None,
-            "attempted_loop_ids": ["loop-001"],
+            "attempted_loop_ids": [],
             "attempted_search_refs": [],
-            "verdict_impact": "Supports the selected claim.",
+            "verdict_impact": None,
             "split_child_ids": [],
         },
     ]
     cycle["decision_assessment"] = {
         "new_action_class": "Watch with Trigger",
         "financial_bridge_affected": False,
-        "financial_bridge_rationale": None,
+        "financial_bridge_rationale": (
+            "No accepted claim changes the modeled revenue transmission."
+        ),
         "risk_class_changed": False,
-        "risk_class_rationale": None,
+        "risk_class_rationale": (
+            "The remaining gap does not change the selected risk class."
+        ),
         "supporting_claim_ids": [claim_id, derived_id],
         "verdict_rationale": "The new evidence confirms the prior posture.",
         "blocked_claim_ids": [],
@@ -545,6 +847,15 @@ def make_populated_cycle():
         "report_sha256": "f" * 64,
         "registered_at": timestamp,
     }
+    return attach_valid_audit(cycle)
+
+
+def make_populated_cycle_with_blocked_resolution():
+    cycle = make_populated_cycle()
+    cycle["claim_resolutions"][0] = make_blocked_resolution(
+        "RC-0001-CL-01", "frontier-001"
+    )
+    cycle["decision_assessment"] = None
     return attach_valid_audit(cycle)
 
 
@@ -3591,6 +3902,990 @@ class TestRevisitCycleAbortCli(unittest.TestCase):
             )
 
 
+class TestRevisitDerivedClaimMutation(unittest.TestCase):
+    @staticmethod
+    def write_request(root, name, request):
+        path = root / name
+        path.write_text(
+            json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_add_derived_claim_cli_grammar_and_model_surface_exist(self):
+        operation = getattr(revisit_contract, "add_derived_claim", None)
+        self.assertTrue(callable(operation), "add_derived_claim export is missing")
+        args = revisit_cycle_cli.build_parser().parse_args(
+            [
+                "workspace",
+                "add-derived-claim",
+                "RC-0001",
+                "--request-file",
+                "request.json",
+            ]
+        )
+        self.assertEqual("RC-0001", args.cycle)
+        self.assertEqual("request.json", args.request_file)
+        self.assertIs(revisit_cycle_cli.command_add_derived_claim, args.handler)
+
+    def test_emergent_claim_requires_exact_matching_delivered_dispatch_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            request = make_emergent_claim_request()
+            request["accepted_from"]["loop_id"] = "loop_11"
+            request_path = self.write_request(root, "emergent-claim.json", request)
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "add-derived-claim",
+                cycle_id,
+                "--request-file",
+                str(request_path),
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertRegex(result.stderr, r"dispatch.*loop_11|loop_11.*dispatch")
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_valid_emergent_claim_records_stable_id_pending_resolution_and_one_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            request = make_emergent_claim_request()
+            original_request = copy.deepcopy(request)
+            request_path = self.write_request(root, "emergent-claim.json", request)
+            before = revisit_contract.load_cycle(workspace, cycle_id)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "add-derived-claim",
+                cycle_id,
+                "--request-file",
+                str(request_path),
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("DERIVED CLAIM ADDED: RC-0001-DC-01", result.stdout)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(
+                {
+                    "claim_id": "RC-0001-DC-01",
+                    **original_request,
+                },
+                cycle["derived_claims"][0],
+            )
+            self.assertEqual(
+                {
+                    "claim_id": "RC-0001-DC-01",
+                    "status": "cycle-pending-validation",
+                    "revised_statement": None,
+                    "current_evidence_refs": [],
+                    "counter_evidence_refs": [],
+                    "current_grade": None,
+                    "current_confidence": None,
+                    "bound_frontier_ids": [],
+                    "rationale": None,
+                    "missing_proof": None,
+                    "attempted_loop_ids": [],
+                    "attempted_search_refs": [],
+                    "verdict_impact": None,
+                    "split_child_ids": [],
+                },
+                cycle["claim_resolutions"][1],
+            )
+            self.assertEqual(len(before["audit"]) + 1, len(cycle["audit"]))
+            self.assertEqual("add-derived-claim", cycle["audit"][-1]["command"])
+            self.assertEqual(
+                ["RC-0001-DC-01"], cycle["audit"][-1]["affected_ids"]
+            )
+            self.assertEqual(original_request, request)
+            self.assertIn(
+                "RC-0001-DC-01",
+                (workspace / "revisit_cycles" / "RC-0001.md").read_text(
+                    encoding="utf-8"
+                ),
+            )
+
+    def test_emergent_claim_rejects_unaccepted_provenance_with_zero_writes(self):
+        cases = (
+            ("undelivered", "dispatch", r"dispatch.*delivered"),
+            ("missing_delivery", "delivery", r"delivery.*(missing|file)"),
+            ("unknown_source", "source", r"source_id.*src-999"),
+            ("empty_rationale", "request", r"acceptance_rationale.*non-empty"),
+            ("duplicate_dispatch", "dispatch", r"dispatch.*(multiple|unique|duplicate)"),
+        )
+        for name, _authority, pattern in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                workspace, cycle_id = make_task5_mutation_workspace(root)
+                request = make_emergent_claim_request()
+                dispatch_path = workspace / "dispatch_log.jsonl"
+                if name == "undelivered":
+                    record = json.loads(dispatch_path.read_text(encoding="utf-8"))
+                    record["status"] = "queued"
+                    dispatch_path.write_text(
+                        json.dumps(record) + "\n", encoding="utf-8"
+                    )
+                elif name == "missing_delivery":
+                    (workspace / "scouts" / "loop_10_scout.md").unlink()
+                elif name == "unknown_source":
+                    request["accepted_from"]["evidence_refs"][0][
+                        "source_id"
+                    ] = "src-999"
+                elif name == "empty_rationale":
+                    request["acceptance_rationale"] = ""
+                else:
+                    dispatch_path.write_text(
+                        dispatch_path.read_text(encoding="utf-8") * 2,
+                        encoding="utf-8",
+                    )
+                request_path = self.write_request(
+                    root, f"{name}-claim.json", request
+                )
+                before = snapshot_tree(workspace)
+
+                result = run_revisit_cycle_cli(
+                    workspace,
+                    "add-derived-claim",
+                    cycle_id,
+                    "--request-file",
+                    str(request_path),
+                )
+
+                self.assertNotEqual(0, result.returncode)
+                self.assertRegex(result.stderr, pattern)
+                self.assertEqual(before, snapshot_tree(workspace))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    def test_emergent_dispatch_delivery_keeps_declared_lexical_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            delivery = workspace / "scouts" / "loop_10_scout.md"
+            first_target = workspace / "scouts" / "delivery-first.md"
+            second_target = workspace / "scouts" / "delivery-second.md"
+            payload = delivery.read_bytes()
+            delivery.replace(first_target)
+            second_target.write_bytes(payload)
+            delivery.symlink_to(first_target.name)
+            request = make_emergent_claim_request()
+            request_path = self.write_request(root, "emergent-claim.json", request)
+            json_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_json = json_path.read_bytes()
+            prior_mirror = mirror_path.read_bytes()
+            real_validate = revisit_cycle_cli._validate_evidence_references
+
+            def validate_then_retarget(*args, **kwargs):
+                result = real_validate(*args, **kwargs)
+                delivery.unlink()
+                delivery.symlink_to(second_target.name)
+                return result
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_validate_evidence_references",
+                    side_effect=validate_then_retarget,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "add-derived-claim",
+                        cycle_id,
+                        "--request-file",
+                        str(request_path),
+                    ]
+                )
+
+            self.assertEqual(2, result, stderr.getvalue())
+            self.assertRegex(stderr.getvalue(), "authority target changed")
+            self.assertEqual(second_target.resolve(), delivery.resolve())
+            self.assertEqual(prior_json, json_path.read_bytes())
+            self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    def test_split_children_are_copy_on_write_monotonic_and_non_recursive(self):
+        operation = getattr(revisit_contract, "add_derived_claim", None)
+        self.assertTrue(callable(operation), "add_derived_claim export is missing")
+        cycle = make_minimal_cycle()
+        existing_request = {
+            "origin": "split_child",
+            "statement": "Existing customer B child.",
+            "derived_from": "RC-0001-CL-01",
+            "accepted_from": None,
+            "acceptance_rationale": "The selected proposition combined customers.",
+        }
+        cycle["derived_claims"].append(
+            {"claim_id": "RC-0001-DC-02", **copy.deepcopy(existing_request)}
+        )
+        cycle["claim_resolutions"].append(
+            {
+                "claim_id": "RC-0001-DC-02",
+                "status": "cycle-pending-validation",
+                "revised_statement": None,
+                "current_evidence_refs": [],
+                "counter_evidence_refs": [],
+                "current_grade": None,
+                "current_confidence": None,
+                "bound_frontier_ids": [],
+                "rationale": None,
+                "missing_proof": None,
+                "attempted_loop_ids": [],
+                "attempted_search_refs": [],
+                "verdict_impact": None,
+                "split_child_ids": [],
+            }
+        )
+        attach_valid_audit(cycle)
+        request = {
+            "origin": "split_child",
+            "statement": "Qualification completes for customer A inside the revised window.",
+            "derived_from": "RC-0001-CL-01",
+            "accepted_from": None,
+            "acceptance_rationale": (
+                "The inherited proposition combined two independently testable customers."
+            ),
+        }
+        original_cycle = copy.deepcopy(cycle)
+        original_request = copy.deepcopy(request)
+
+        updated = operation(cycle, request)
+
+        self.assertEqual(2, len(updated["derived_claims"]))
+        self.assertEqual("RC-0001-DC-03", updated["derived_claims"][-1]["claim_id"])
+        self.assertEqual(
+            "inherited-pending-reverification",
+            updated["claim_resolutions"][0]["status"],
+        )
+        self.assertEqual(original_cycle, cycle)
+        self.assertEqual(original_request, request)
+
+        recursive = copy.deepcopy(request)
+        recursive["derived_from"] = "RC-0001-DC-02"
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "selected inherited claim",
+        ):
+            operation(cycle, recursive)
+
+    def test_persisted_derived_claim_number_zero_is_rejected(self):
+        cycle = make_minimal_cycle()
+        cycle["derived_claims"] = [
+            {
+                "claim_id": "RC-0001-DC-00",
+                "origin": "split_child",
+                "statement": "An invalid zero-numbered child.",
+                "derived_from": "RC-0001-CL-01",
+                "accepted_from": None,
+                "acceptance_rationale": "The invalid ID must not become canonical.",
+            }
+        ]
+        cycle["claim_resolutions"].append(
+            {
+                "claim_id": "RC-0001-DC-00",
+                "status": "cycle-pending-validation",
+                "revised_statement": None,
+                "current_evidence_refs": [],
+                "counter_evidence_refs": [],
+                "current_grade": None,
+                "current_confidence": None,
+                "bound_frontier_ids": [],
+                "rationale": None,
+                "missing_proof": None,
+                "attempted_loop_ids": [],
+                "attempted_search_refs": [],
+                "verdict_impact": None,
+                "split_child_ids": [],
+            }
+        )
+        attach_valid_audit(cycle)
+
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            r"derived_claims\[0\]\.claim_id.*01.*99",
+        ):
+            revisit_contract.validate_cycle(cycle)
+
+
+class TestRevisitClaimResolutionMutation(unittest.TestCase):
+    def test_resolve_claim_cli_grammar_and_model_surface_exist(self):
+        operation = getattr(revisit_contract, "resolve_claim", None)
+        self.assertTrue(callable(operation), "resolve_claim export is missing")
+        args = revisit_cycle_cli.build_parser().parse_args(
+            [
+                "workspace",
+                "resolve-claim",
+                "RC-0001",
+                "RC-0001-CL-01",
+                "--resolution-file",
+                "resolution.json",
+            ]
+        )
+        self.assertEqual("RC-0001", args.cycle)
+        self.assertEqual("RC-0001-CL-01", args.claim)
+        self.assertEqual("resolution.json", args.resolution_file)
+        self.assertIs(revisit_cycle_cli.command_resolve_claim, args.handler)
+
+    def test_confirmed_resolution_is_copy_on_write_audited_and_persisted_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            bind_selected_claim_for_task5(workspace, cycle_id)
+            outcome = make_confirmed_resolution_request()
+            outcome_path = root / "confirmed-resolution.json"
+            outcome_path.write_text(
+                json.dumps(outcome, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            before = revisit_contract.load_cycle(workspace, cycle_id)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "resolve-claim",
+                cycle_id,
+                f"{cycle_id}-CL-01",
+                "--resolution-file",
+                str(outcome_path),
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("CLAIM RESOLVED: RC-0001-CL-01 (confirmed)", result.stdout)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(
+                {"claim_id": "RC-0001-CL-01", **outcome},
+                cycle["claim_resolutions"][0],
+            )
+            self.assertEqual(len(before["audit"]) + 1, len(cycle["audit"]))
+            self.assertEqual("resolve-claim", cycle["audit"][-1]["command"])
+            self.assertEqual(
+                ["RC-0001-CL-01"], cycle["audit"][-1]["affected_ids"]
+            )
+
+    def test_blocked_resolution_rejects_current_grade_and_confidence_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            bind_selected_claim_for_task5(workspace, cycle_id)
+            outcome = {
+                "status": "blocked",
+                "revised_statement": None,
+                "current_evidence_refs": [],
+                "counter_evidence_refs": [],
+                "current_grade": "B",
+                "current_confidence": "medium",
+                "bound_frontier_ids": ["F1"],
+                "rationale": "The required public proof remains unavailable.",
+                "missing_proof": "A named customer acceptance filing.",
+                "attempted_loop_ids": ["loop_10"],
+                "attempted_search_refs": [
+                    {"loop_id": "loop_10", "query": "customer acceptance filing"}
+                ],
+                "verdict_impact": "The action class cannot be upgraded.",
+                "split_child_ids": [],
+            }
+            outcome_path = root / "blocked-resolution.json"
+            outcome_path.write_text(
+                json.dumps(outcome, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "resolve-claim",
+                cycle_id,
+                f"{cycle_id}-CL-01",
+                "--resolution-file",
+                str(outcome_path),
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertRegex(
+                result.stderr,
+                r"blocked.*(current_grade|current_confidence)|"
+                r"(current_grade|current_confidence).*blocked",
+            )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_exact_stale_or_unknown_inherited_ref_cannot_be_current_support(self):
+        for freshness in ("stale", "unknown"):
+            with self.subTest(freshness=freshness), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                workspace, cycle_id = make_task5_mutation_workspace(root)
+                bind_selected_claim_for_task5(workspace, cycle_id)
+                cycle = revisit_contract.load_cycle(workspace, cycle_id)
+                inherited = cycle["intake"]["selected_claims"][0][
+                    "inherited_evidence"
+                ][0]
+                inherited["freshness"] = freshness
+                cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                attach_valid_audit(cycle)
+                revisit_contract.persist_cycle(
+                    workspace,
+                    cycle,
+                    expected_sha256=revisit_contract.sha256_file(
+                        workspace / "revisit_cycles" / f"{cycle_id}.json"
+                    ),
+                )
+                outcome = make_confirmed_resolution_request()
+                outcome["current_evidence_refs"] = [
+                    copy.deepcopy(inherited["ref"])
+                ]
+                outcome_path = root / f"{freshness}-inherited-resolution.json"
+                outcome_path.write_text(
+                    json.dumps(outcome, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                before = snapshot_tree(workspace)
+
+                result = run_revisit_cycle_cli(
+                    workspace,
+                    "resolve-claim",
+                    cycle_id,
+                    f"{cycle_id}-CL-01",
+                    "--resolution-file",
+                    str(outcome_path),
+                )
+
+                self.assertNotEqual(0, result.returncode)
+                self.assertRegex(result.stderr, rf"{freshness}.*current|current.*{freshness}")
+                self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_new_checked_at_can_reaccept_the_same_source_as_current_support(self):
+        cycle = make_bound_model_cycle()
+        cycle["intake"]["selected_claims"][0]["inherited_evidence"] = [
+            {
+                "ref": {
+                    "kind": "source",
+                    "source_id": "src-002",
+                    "checked_at": "2026-07-14T10:00:00Z",
+                },
+                "freshness": "stale",
+                "checked_at": "2026-07-14T10:00:00Z",
+                "reason": "The source predates the current acceptance check.",
+            }
+        ]
+        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        attach_valid_audit(cycle)
+        outcome = make_confirmed_resolution_request()
+        outcome["current_evidence_refs"][0]["checked_at"] = "2026-07-14T12:00:00Z"
+
+        proposed = revisit_contract.resolve_claim(
+            cycle, "RC-0001-CL-01", outcome
+        )
+
+        self.assertEqual("confirmed", proposed["claim_resolutions"][0]["status"])
+
+    def test_terminal_outcome_matrix_accepts_only_its_named_fields(self):
+        operation = revisit_contract.resolve_claim
+        base = make_confirmed_resolution_request()
+        weakened = copy.deepcopy(base)
+        weakened.update(
+            {
+                "status": "weakened",
+                "revised_statement": (
+                    "Qualification completes for customer A inside the revised window."
+                ),
+                "counter_evidence_refs": [
+                    {
+                        "kind": "source",
+                        "source_id": "src-001",
+                        "checked_at": "2026-07-14T12:00:00Z",
+                    }
+                ],
+            }
+        )
+        refuted = copy.deepcopy(base)
+        refuted.update(
+            {
+                "status": "refuted",
+                "current_evidence_refs": [],
+                "counter_evidence_refs": [
+                    {
+                        "kind": "source",
+                        "source_id": "src-001",
+                        "checked_at": "2026-07-14T12:00:00Z",
+                    }
+                ],
+                "current_grade": None,
+                "current_confidence": None,
+                "rationale": "Current counter-evidence defeats the proposition.",
+            }
+        )
+        blocked = copy.deepcopy(base)
+        blocked.update(
+            {
+                "status": "blocked",
+                "current_evidence_refs": [],
+                "current_grade": None,
+                "current_confidence": None,
+                "rationale": "The required public proof remains unavailable.",
+                "missing_proof": "A named customer acceptance filing.",
+                "attempted_loop_ids": ["loop_10"],
+                "attempted_search_refs": [
+                    {"loop_id": "loop_10", "query": "customer acceptance filing"}
+                ],
+                "verdict_impact": "The action class cannot be upgraded.",
+            }
+        )
+        for outcome in (base, weakened, refuted, blocked):
+            with self.subTest(status=outcome["status"]):
+                cycle = make_bound_model_cycle()
+                original = copy.deepcopy(cycle)
+                updated = operation(cycle, "RC-0001-CL-01", outcome)
+                self.assertEqual(
+                    outcome["status"], updated["claim_resolutions"][0]["status"]
+                )
+                self.assertEqual(original, cycle)
+
+        invalid_cases = (
+            (
+                "confirmed counter",
+                lambda outcome: outcome.update(
+                    {"counter_evidence_refs": copy.deepcopy(refuted["counter_evidence_refs"])}
+                ),
+                "confirmed.*counter_evidence_refs",
+            ),
+            (
+                "weakened revision",
+                lambda outcome: outcome.update(
+                    {"status": "weakened", "revised_statement": None,
+                     "counter_evidence_refs": copy.deepcopy(refuted["counter_evidence_refs"])}
+                ),
+                "weakened.*revised_statement",
+            ),
+            (
+                "refuted grade",
+                lambda outcome: outcome.update(
+                    {"status": "refuted", "current_evidence_refs": [],
+                     "counter_evidence_refs": copy.deepcopy(refuted["counter_evidence_refs"])}
+                ),
+                "refuted.*current_grade",
+            ),
+            (
+                "undeclared frontier",
+                lambda outcome: outcome.update({"bound_frontier_ids": ["F2"]}),
+                "F2.*declared|declared.*F2",
+            ),
+            (
+                "no current evidence",
+                lambda outcome: outcome.update({"current_evidence_refs": []}),
+                "confirmed.*current_evidence_refs",
+            ),
+        )
+        for name, mutate, pattern in invalid_cases:
+            with self.subTest(invalid=name):
+                outcome = make_confirmed_resolution_request()
+                mutate(outcome)
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError, pattern
+                ):
+                    operation(make_bound_model_cycle(), "RC-0001-CL-01", outcome)
+
+    def test_split_requires_two_registered_siblings_and_terminal_rows_are_one_time(self):
+        cycle = make_bound_model_cycle()
+        for number, statement in ((1, "Customer A qualifies."), (2, "Customer B qualifies.")):
+            claim_id = f"RC-0001-DC-{number:02d}"
+            cycle["derived_claims"].append(
+                {
+                    "claim_id": claim_id,
+                    "origin": "split_child",
+                    "statement": statement,
+                    "derived_from": "RC-0001-CL-01",
+                    "accepted_from": None,
+                    "acceptance_rationale": "The parent combined two customers.",
+                }
+            )
+            cycle["claim_resolutions"].append(
+                {
+                    "claim_id": claim_id,
+                    "status": "cycle-pending-validation",
+                    "revised_statement": None,
+                    "current_evidence_refs": [],
+                    "counter_evidence_refs": [],
+                    "current_grade": None,
+                    "current_confidence": None,
+                    "bound_frontier_ids": [],
+                    "rationale": None,
+                    "missing_proof": None,
+                    "attempted_loop_ids": [],
+                    "attempted_search_refs": [],
+                    "verdict_impact": None,
+                    "split_child_ids": [],
+                }
+            )
+        attach_valid_audit(cycle)
+        split = {
+            key: copy.deepcopy(value)
+            for key, value in make_confirmed_resolution_request().items()
+        }
+        split.update(
+            {
+                "status": "split",
+                "current_evidence_refs": [],
+                "current_grade": None,
+                "current_confidence": None,
+                "bound_frontier_ids": [],
+                "rationale": None,
+                "split_child_ids": ["RC-0001-DC-01", "RC-0001-DC-02"],
+            }
+        )
+
+        proposed = revisit_contract.resolve_claim(
+            cycle, "RC-0001-CL-01", split
+        )
+        self.assertEqual("split", proposed["claim_resolutions"][0]["status"])
+
+        one_child = copy.deepcopy(split)
+        one_child["split_child_ids"] = ["RC-0001-DC-01"]
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError, "split.*at least two"
+        ):
+            revisit_contract.resolve_claim(cycle, "RC-0001-CL-01", one_child)
+
+        terminal = revisit_model.with_audit(
+            cycle,
+            proposed,
+            "resolve-claim",
+            ["RC-0001-CL-01"],
+            "2026-07-15T00:20:00Z",
+        )
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError, "already terminal"
+        ):
+            revisit_contract.resolve_claim(
+                terminal, "RC-0001-CL-01", split
+            )
+
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError, "selected inherited claim"
+        ):
+            revisit_contract.resolve_claim(
+                cycle, "RC-0001-DC-01", split
+            )
+
+    def test_resolution_request_is_exact_and_only_terminal_states_are_allowed(self):
+        cycle = make_bound_model_cycle()
+        outcome = make_confirmed_resolution_request()
+        outcome["hidden"] = "authority"
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError, "unknown field.*hidden"
+        ):
+            revisit_contract.resolve_claim(cycle, "RC-0001-CL-01", outcome)
+
+        nonterminal = make_confirmed_resolution_request()
+        nonterminal["status"] = "cycle-pending-validation"
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError, "terminal claim state"
+        ):
+            revisit_contract.resolve_claim(
+                cycle, "RC-0001-CL-01", nonterminal
+            )
+
+
+class TestRevisitDecisionAssessmentMutation(unittest.TestCase):
+    def test_assessment_cli_grammar_and_model_surfaces_exist(self):
+        for name in (
+            "assess_decision",
+            "derive_change_class",
+            "derive_rerun_requirements",
+        ):
+            self.assertTrue(
+                callable(getattr(revisit_contract, name, None)),
+                f"{name} export is missing",
+            )
+        args = revisit_cycle_cli.build_parser().parse_args(
+            [
+                "workspace",
+                "assess-decision",
+                "RC-0001",
+                "--assessment-file",
+                "assessment.json",
+            ]
+        )
+        self.assertEqual("RC-0001", args.cycle)
+        self.assertEqual("assessment.json", args.assessment_file)
+        self.assertIs(revisit_cycle_cli.command_assess_decision, args.handler)
+
+    def test_valid_assessment_derives_evidence_only_rerun_and_one_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_assessment_workspace(root)
+            assessment = make_decision_assessment_request()
+            assessment_path = root / "assessment.json"
+            assessment_path.write_text(
+                json.dumps(assessment, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            before = revisit_contract.load_cycle(workspace, cycle_id)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "assess-decision",
+                cycle_id,
+                "--assessment-file",
+                str(assessment_path),
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("DECISION ASSESSED: RC-0001", result.stdout)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(
+                {
+                    **assessment,
+                    "change_class": "evidence_or_claim_only",
+                    "required_reruns": ["delta-frontier-review"],
+                },
+                cycle["decision_assessment"],
+            )
+            self.assertEqual(len(before["audit"]) + 1, len(cycle["audit"]))
+            self.assertEqual("assess-decision", cycle["audit"][-1]["command"])
+            self.assertEqual([cycle_id], cycle["audit"][-1]["affected_ids"])
+
+    def test_blocked_claim_cannot_be_used_as_positive_support_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            blocked = make_blocked_resolution("RC-0001-CL-01", "F1")
+            blocked.pop("claim_id")
+            workspace, cycle_id = make_assessment_workspace(
+                root, outcome=blocked
+            )
+            assessment = make_decision_assessment_request()
+            assessment["blocked_claim_ids"] = ["RC-0001-CL-01"]
+            assessment_path = root / "blocked-support-assessment.json"
+            assessment_path.write_text(
+                json.dumps(assessment, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "assess-decision",
+                cycle_id,
+                "--assessment-file",
+                str(assessment_path),
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertRegex(result.stderr, r"blocked.*positive|positive.*blocked")
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_positive_support_accepts_only_confirmed_or_weakened_claims(self):
+        cases = (
+            ("pending", make_bound_model_cycle()),
+            ("refuted", make_terminal_model_cycle("refuted")),
+            ("blocked", make_terminal_model_cycle("blocked")),
+            ("split", make_split_terminal_model_cycle()),
+        )
+        for status, cycle in cases:
+            with self.subTest(status=status):
+                assessment = make_decision_assessment_request()
+                if status == "blocked":
+                    assessment["blocked_claim_ids"] = ["RC-0001-CL-01"]
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    rf"{status}.*positive|positive.*{status}|all.*terminal",
+                ):
+                    revisit_contract.assess_decision(cycle, assessment)
+
+    def test_assessment_requires_all_terminal_claims_and_exact_blocked_set(self):
+        confirmed = make_terminal_model_cycle("confirmed")
+        pending_request = {
+            "origin": "emergent",
+            "statement": "A newly accepted packaging constraint matters.",
+            "derived_from": None,
+            "accepted_from": {
+                "loop_id": "loop_10",
+                "dispatch_id": "dispatch_0010_scout",
+                "evidence_refs": [
+                    {
+                        "kind": "source",
+                        "source_id": "src-002",
+                        "checked_at": "2026-07-14T12:00:00Z",
+                    }
+                ],
+            },
+            "acceptance_rationale": "The main thread accepted the cited constraint.",
+        }
+        pending = revisit_contract.add_derived_claim(confirmed, pending_request)
+        pending = revisit_model.with_audit(
+            confirmed,
+            pending,
+            "add-derived-claim",
+            ["RC-0001-DC-01"],
+            "2026-07-15T00:30:00Z",
+        )
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError, "all.*terminal|pending"
+        ):
+            revisit_contract.assess_decision(
+                pending, make_decision_assessment_request()
+            )
+
+        blocked = make_terminal_model_cycle("blocked")
+        omitted = make_decision_assessment_request()
+        omitted["supporting_claim_ids"] = []
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "blocked_claim_ids.*exact",
+        ):
+            revisit_contract.assess_decision(blocked, omitted)
+
+        exact = copy.deepcopy(omitted)
+        exact["blocked_claim_ids"] = ["RC-0001-CL-01"]
+        proposed = revisit_contract.assess_decision(blocked, exact)
+        self.assertEqual(["RC-0001-CL-01"], proposed["decision_assessment"]["blocked_claim_ids"])
+        audited = revisit_model.with_audit(
+            blocked,
+            proposed,
+            "assess-decision",
+            ["RC-0001"],
+            "2026-07-15T00:31:00Z",
+        )
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError, "already recorded"
+        ):
+            revisit_contract.assess_decision(audited, exact)
+
+    def test_assessment_support_may_be_a_subset_of_terminal_positive_claims(self):
+        cycle = make_populated_cycle()
+        cycle["decision_assessment"] = None
+        attach_valid_audit(cycle)
+
+        proposed = revisit_contract.assess_decision(
+            cycle, make_decision_assessment_request()
+        )
+
+        self.assertEqual(
+            ["RC-0001-CL-01"],
+            proposed["decision_assessment"]["supporting_claim_ids"],
+        )
+        self.assertEqual(
+            "confirmed",
+            next(
+                resolution["status"]
+                for resolution in proposed["claim_resolutions"]
+                if resolution["claim_id"] == "RC-0001-DC-01"
+            ),
+        )
+
+    def test_exact_derivation_rows_and_inconsistent_persisted_values_are_rejected(self):
+        rows = (
+            (
+                "evidence_or_claim_only",
+                {},
+                ("delta-frontier-review",),
+            ),
+            (
+                "financial_or_risk_change",
+                {"financial_bridge_affected": True},
+                ("delta-frontier-review", "affected-financial-bridge"),
+            ),
+            (
+                "action_class_change",
+                {"new_action_class": "Act"},
+                (
+                    "delta-frontier-review",
+                    "full-financial-bridge",
+                    "redteam-round-1",
+                    "redteam-defense-1",
+                    "redteam-round-2",
+                    "redteam-defense-2",
+                    "thesis-revision",
+                ),
+            ),
+        )
+        for expected_class, overrides, expected_reruns in rows:
+            with self.subTest(change_class=expected_class):
+                cycle = make_terminal_model_cycle("confirmed")
+                assessment = make_decision_assessment_request()
+                assessment.update(overrides)
+                proposed = revisit_contract.assess_decision(cycle, assessment)
+                self.assertEqual(
+                    expected_class,
+                    revisit_contract.derive_change_class(proposed),
+                )
+                self.assertEqual(
+                    expected_reruns,
+                    revisit_contract.derive_rerun_requirements(proposed),
+                )
+                self.assertEqual(
+                    list(expected_reruns),
+                    proposed["decision_assessment"]["required_reruns"],
+                )
+
+        supplied = make_decision_assessment_request()
+        for forbidden in ("change_class", "required_reruns"):
+            with self.subTest(forbidden=forbidden):
+                request = copy.deepcopy(supplied)
+                request[forbidden] = "user-supplied"
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    rf"unknown field.*{forbidden}",
+                ):
+                    revisit_contract.assess_decision(
+                        make_terminal_model_cycle("confirmed"), request
+                    )
+
+        valid = make_terminal_model_cycle("confirmed")
+        proposed = revisit_contract.assess_decision(
+            valid, make_decision_assessment_request()
+        )
+        audited = revisit_model.with_audit(
+            valid,
+            proposed,
+            "assess-decision",
+            ["RC-0001"],
+            "2026-07-15T00:32:00Z",
+        )
+        for field, replacement in (
+            ("change_class", "action_class_change"),
+            ("required_reruns", ["delta-frontier-review", "full-financial-bridge"]),
+        ):
+            with self.subTest(inconsistent=field):
+                drifted = copy.deepcopy(audited)
+                drifted["decision_assessment"][field] = replacement
+                attach_valid_audit(drifted)
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    rf"{field}.*derived|derived.*{field}",
+                ):
+                    revisit_contract.validate_cycle(drifted)
+
+    def test_assessment_scalars_are_strict_and_input_is_not_mutated(self):
+        cycle = make_terminal_model_cycle("confirmed")
+        assessment = make_decision_assessment_request()
+        original_cycle = copy.deepcopy(cycle)
+        original_assessment = copy.deepcopy(assessment)
+        revisit_contract.assess_decision(cycle, assessment)
+        self.assertEqual(original_cycle, cycle)
+        self.assertEqual(original_assessment, assessment)
+
+        cases = (
+            ("financial_bridge_affected", 1, "must be a boolean"),
+            ("risk_class_changed", 0, "must be a boolean"),
+            ("financial_bridge_rationale", "", "must be non-empty text"),
+            ("risk_class_rationale", "", "must be non-empty text"),
+            ("verdict_rationale", "", "must be non-empty text"),
+        )
+        for field, replacement, pattern in cases:
+            with self.subTest(field=field):
+                invalid = make_decision_assessment_request()
+                invalid[field] = replacement
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError, pattern
+                ):
+                    revisit_contract.assess_decision(cycle, invalid)
+
+
 class TestPointerSchema(unittest.TestCase):
     def assert_contract_error(self, operation, pattern):
         try:
@@ -4629,6 +5924,16 @@ class TestRevisitRender(unittest.TestCase):
         self.assertIn("### Claim Resolutions", first)
         self.assertIn("confirmed", first)
         self.assertIn("The primary filing confirms the claim.", first)
+        self.assertIn(
+            "| RC-0001-DC-01 | emergent | Updated revenue evidence is "
+            "decision-relevant.",
+            first,
+        )
+        self.assertIn("| RC-0001-DC-01 | confirmed |", first)
+        self.assertIn("| Change class | evidence_or_claim_only |", first)
+        self.assertIn(
+            '| Required reruns | ["delta-frontier-review"] |', first
+        )
         self.assertNotIn("Inferred verdict", first)
         self.assertTrue(first.endswith("\n"))
         self.assertFalse(first.endswith("\n\n"))
@@ -5760,7 +7065,11 @@ class TestCycleSchema(unittest.TestCase):
         )
         for path, error_path in cases:
             with self.subTest(path=error_path):
-                cycle = make_populated_cycle()
+                cycle = (
+                    make_populated_cycle_with_blocked_resolution()
+                    if "attempted_search_refs" in path
+                    else make_populated_cycle()
+                )
                 nested_value(cycle, path)["extra"] = "hidden"
                 if path[0] == "intake":
                     cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
@@ -5956,7 +7265,11 @@ class TestCycleSchema(unittest.TestCase):
         )
         for path, replacement, pattern in cases:
             with self.subTest(path=path):
-                cycle = make_populated_cycle()
+                cycle = (
+                    make_populated_cycle_with_blocked_resolution()
+                    if "attempted_search_refs" in path
+                    else make_populated_cycle()
+                )
                 set_nested_value(cycle, path, replacement)
                 if path[0] == "intake":
                     cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
@@ -6220,7 +7533,7 @@ class TestCycleSchema(unittest.TestCase):
             (
                 "derived_from",
                 "RC-0001-CL-99",
-                "derived_from must reference a known same-cycle claim ID",
+                "emergent request.derived_from must be null",
             ),
             (
                 "acceptance_rationale",
@@ -6352,7 +7665,7 @@ class TestCycleSchema(unittest.TestCase):
 
         for field in ("loop_id", "query"):
             with self.subTest(attempted_search=field):
-                cycle = make_populated_cycle()
+                cycle = make_populated_cycle_with_blocked_resolution()
                 cycle["claim_resolutions"][0]["attempted_search_refs"][0][field] = ""
                 self.assert_contract_error(
                     lambda: revisit_contract.validate_cycle(cycle),
@@ -6370,13 +7683,13 @@ class TestCycleSchema(unittest.TestCase):
             (
                 "financial_bridge_rationale",
                 [],
-                "financial_bridge_rationale must be non-empty text or null",
+                "financial_bridge_rationale must be non-empty text",
             ),
             ("risk_class_changed", 0, "risk_class_changed must be a boolean"),
             (
                 "risk_class_rationale",
                 [],
-                "risk_class_rationale must be non-empty text or null",
+                "risk_class_rationale must be non-empty text",
             ),
             (
                 "supporting_claim_ids",
@@ -6510,7 +7823,11 @@ class TestCycleSchema(unittest.TestCase):
         )
         for name, mutate, pattern, intake_changed in cases:
             with self.subTest(case=name):
-                cycle = make_populated_cycle()
+                cycle = (
+                    make_populated_cycle_with_blocked_resolution()
+                    if name == "attempted_loop_ids"
+                    else make_populated_cycle()
+                )
                 mutate(cycle)
                 if intake_changed:
                     cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
@@ -6642,6 +7959,11 @@ class TestCycleSchema(unittest.TestCase):
             "ARTIFACT_EVIDENCE_KEYS",
             "validate_evidence_ref",
             "validate_intake_request",
+            "add_derived_claim",
+            "resolve_claim",
+            "assess_decision",
+            "derive_change_class",
+            "derive_rerun_requirements",
             "allocate_cycle_and_revision_ids",
             "evaluate_history",
             "create_cycle",
@@ -6770,23 +8092,7 @@ class TestCycleSchema(unittest.TestCase):
                 self.assertEqual(original, cycle)
 
     def test_locked_nullable_values_and_trigger_timestamp_variant_are_valid(self):
-        cycle = make_populated_cycle()
-        resolution = cycle["claim_resolutions"][0]
-        for field in (
-            "revised_statement",
-            "rationale",
-            "missing_proof",
-            "verdict_impact",
-            "current_grade",
-            "current_confidence",
-        ):
-            resolution[field] = None
-        cycle["derived_claims"][0]["derived_from"] = None
-        cycle["derived_claims"][0]["accepted_from"] = None
-        cycle["decision_assessment"] = None
-        cycle["rerun_artifacts"][0]["scope"] = None
-        cycle["rerun_artifacts"][0]["round"] = None
-        cycle["report_candidate"] = None
+        cycle = make_minimal_cycle()
         cycle["intake"]["triggers"][0]["observed_at"] = "2026-07-15T00:30:00Z"
         cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
         attach_valid_audit(cycle)

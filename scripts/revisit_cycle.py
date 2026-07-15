@@ -17,7 +17,9 @@ from revisit_contract import (
     ACTION_CLASSES,
     POINTER_FILENAME,
     RevisitContractError,
+    add_derived_claim,
     allocate_cycle_and_revision_ids,
+    assess_decision,
     create_cycle,
     cycle_directory,
     cycle_json_path,
@@ -28,7 +30,9 @@ from revisit_contract import (
     load_pointer,
     persist_cycle,
     persist_pointer,
+    resolve_claim,
     sha256_file,
+    validate_evidence_ref,
     workspace_transaction,
 )
 from revisit_contract.model import with_audit
@@ -276,6 +280,220 @@ def _validate_workspace_artifact_generation(
     return owner_relative, generation
 
 
+def _load_json_object(path: str | Path, label: str) -> dict:
+    request_path = Path(path)
+    try:
+        payload = request_path.read_bytes()
+    except FileNotFoundError as exc:
+        raise RevisitContractError(f"{label} is missing: {request_path}") from exc
+    try:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RevisitContractError(f"{label} must be valid UTF-8 JSON") from exc
+    if not isinstance(raw, dict):
+        raise RevisitContractError(f"{label} must contain an object")
+    return raw
+
+
+def _validate_source_ids(
+    workspace: Path, requested_source_ids: set[str]
+) -> tuple[set[str], tuple[PreparedAuthoritySnapshot, ...]]:
+    if not requested_source_ids:
+        return set(), ()
+    source_index_path = workspace / "sources_index.jsonl"
+    source_index_generation = _read_authority_generation(
+        workspace,
+        source_index_path,
+    )
+    preliminary = evaluate_index(workspace)
+    _require_authority_generation(
+        source_index_generation,
+        "after preliminary source cache validation",
+    )
+    if preliminary.issues:
+        details = "; ".join(
+            f"{issue.code} at {issue.location}: {issue.message}"
+            for issue in preliminary.issues
+        )
+        raise RevisitContractError(f"source cache failed validation: {details}")
+    preliminary_by_id = {
+        str(record["source_id"]): copy.deepcopy(record)
+        for record in preliminary.records
+    }
+    missing = sorted(requested_source_ids - set(preliminary_by_id))
+    if missing:
+        raise RevisitContractError(f"source_id is not registered: {missing[0]}")
+
+    snapshots = [source_index_generation.snapshot]
+    excerpt_generations: list[_AuthorityGeneration] = []
+    for source_id in sorted(requested_source_ids):
+        excerpt_relative = normalize_workspace_relative_path(
+            preliminary_by_id[source_id]["excerpt_path"]
+        )
+        excerpt_generation = _read_authority_generation(
+            workspace,
+            workspace / excerpt_relative,
+        )
+        resolved_excerpt = resolve_workspace_path(
+            workspace,
+            excerpt_relative,
+            parent="sources",
+        )
+        if (
+            resolved_excerpt != excerpt_generation.snapshot.resolved_target
+            or not resolved_excerpt.is_file()
+        ):
+            raise RevisitContractError(f"source excerpt is not a file: {source_id}")
+        excerpt_generations.append(excerpt_generation)
+        snapshots.append(excerpt_generation.snapshot)
+
+    evaluation = evaluate_index(workspace)
+    _require_authority_generation(
+        source_index_generation,
+        "after source cache validation",
+    )
+    for generation in excerpt_generations:
+        _require_authority_generation(
+            generation,
+            "after source cache validation",
+        )
+    if evaluation.issues:
+        details = "; ".join(
+            f"{issue.code} at {issue.location}: {issue.message}"
+            for issue in evaluation.issues
+        )
+        raise RevisitContractError(f"source cache failed validation: {details}")
+    final_by_id = {
+        str(record["source_id"]): record for record in evaluation.records
+    }
+    for source_id in sorted(requested_source_ids):
+        if final_by_id.get(source_id) != preliminary_by_id[source_id]:
+            raise RevisitContractError(
+                f"source record changed during validation: {source_id}"
+            )
+    return set(final_by_id), tuple(snapshots)
+
+
+def _validate_evidence_references(
+    workspace: Path,
+    references: list[dict],
+    path: str,
+) -> tuple[list[dict], tuple[PreparedAuthoritySnapshot, ...]]:
+    canonical = copy.deepcopy(references)
+    for index, reference in enumerate(canonical):
+        validate_evidence_ref(reference, f"{path}[{index}]")
+    requested_source_ids = {
+        reference["source_id"]
+        for reference in canonical
+        if reference["kind"] == "source"
+    }
+    registered_source_ids, source_snapshots = _validate_source_ids(
+        workspace, requested_source_ids
+    )
+    snapshots = list(source_snapshots)
+    for reference in canonical:
+        if reference["kind"] == "source":
+            if reference["source_id"] not in registered_source_ids:
+                raise RevisitContractError(
+                    f"source_id is not registered: {reference['source_id']}"
+                )
+            continue
+        relative, generation = _validate_workspace_artifact_generation(
+            workspace,
+            reference["path"],
+            reference["sha256"],
+        )
+        reference["path"] = relative
+        snapshots.append(generation.snapshot)
+    return canonical, tuple(snapshots)
+
+
+def _validate_emergent_dispatch(
+    workspace: Path, accepted_from: dict
+) -> tuple[PreparedAuthoritySnapshot, PreparedAuthoritySnapshot]:
+    dispatch_generation = _read_authority_generation(
+        workspace,
+        workspace / "dispatch_log.jsonl",
+    )
+    try:
+        text = dispatch_generation.payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RevisitContractError(
+            "dispatch_log.jsonl must be valid UTF-8 JSONL"
+        ) from exc
+    records = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RevisitContractError(
+                f"dispatch_log.jsonl line {line_number} must be valid JSON"
+            ) from exc
+        if not isinstance(record, dict):
+            raise RevisitContractError(
+                f"dispatch_log.jsonl line {line_number} must contain an object"
+            )
+        records.append(record)
+    _require_authority_generation(
+        dispatch_generation,
+        "after dispatch log validation",
+    )
+    loop_id = accepted_from["loop_id"]
+    dispatch_id = accepted_from["dispatch_id"]
+    matching = [
+        record
+        for record in records
+        if record.get("loop_id") == loop_id
+        and record.get("dispatch_id") == dispatch_id
+    ]
+    if not matching:
+        raise RevisitContractError(
+            f"dispatch {dispatch_id} has no exact matching record for {loop_id}"
+        )
+    if len(matching) != 1:
+        raise RevisitContractError(
+            f"dispatch {dispatch_id} has multiple matching records for {loop_id}"
+        )
+    record = matching[0]
+    if record.get("status") != "delivered":
+        raise RevisitContractError(
+            f"dispatch {dispatch_id} must have status delivered"
+        )
+    raw_delivery = record.get("delivery_path")
+    if (
+        not isinstance(raw_delivery, str)
+        or not raw_delivery
+        or any(unicodedata.category(character) == "Cc" for character in raw_delivery)
+    ):
+        raise RevisitContractError(
+            f"dispatch {dispatch_id} delivery_path must be non-empty text"
+        )
+    candidate = Path(raw_delivery)
+    lexical_delivery = candidate if candidate.is_absolute() else workspace / candidate
+    resolved = (
+        candidate.resolve(strict=False)
+        if candidate.is_absolute()
+        else (workspace / candidate).resolve(strict=False)
+    )
+    try:
+        relative = resolved.relative_to(workspace.resolve()).as_posix()
+    except ValueError as exc:
+        raise RevisitContractError(
+            f"dispatch {dispatch_id} delivery path escapes workspace"
+        ) from exc
+    if not resolved.is_file():
+        raise RevisitContractError(
+            f"dispatch {dispatch_id} delivery path is missing or not a file: {relative}"
+        )
+    delivery_generation = _read_authority_generation(
+        workspace,
+        lexical_delivery,
+    )
+    return dispatch_generation.snapshot, delivery_generation.snapshot
+
+
 def _validate_request_references(
     workspace: Path, request: dict
 ) -> tuple[dict, tuple[PreparedAuthoritySnapshot, ...]]:
@@ -293,82 +511,10 @@ def _validate_request_references(
             if ref["kind"] == "source":
                 requested_source_ids.add(ref["source_id"])
 
-    registered_source_ids: set[str] = set()
-    if requested_source_ids:
-        source_index_path = workspace / "sources_index.jsonl"
-        source_index_generation = _read_authority_generation(
-            workspace,
-            source_index_path,
-        )
-        preliminary = evaluate_index(workspace)
-        _require_authority_generation(
-            source_index_generation,
-            "after preliminary source cache validation",
-        )
-        if preliminary.issues:
-            details = "; ".join(
-                f"{issue.code} at {issue.location}: {issue.message}"
-                for issue in preliminary.issues
-            )
-            raise RevisitContractError(f"source cache failed validation: {details}")
-        preliminary_by_id = {
-            str(record["source_id"]): copy.deepcopy(record)
-            for record in preliminary.records
-        }
-        missing = sorted(requested_source_ids - set(preliminary_by_id))
-        if missing:
-            raise RevisitContractError(f"source_id is not registered: {missing[0]}")
-
-        artifact_snapshots.append(source_index_generation.snapshot)
-        excerpt_generations: list[_AuthorityGeneration] = []
-        for source_id in sorted(requested_source_ids):
-            excerpt_relative = normalize_workspace_relative_path(
-                preliminary_by_id[source_id]["excerpt_path"]
-            )
-            excerpt_generation = _read_authority_generation(
-                workspace,
-                workspace / excerpt_relative,
-            )
-            resolved_excerpt = resolve_workspace_path(
-                workspace,
-                excerpt_relative,
-                parent="sources",
-            )
-            if (
-                resolved_excerpt != excerpt_generation.snapshot.resolved_target
-                or not resolved_excerpt.is_file()
-            ):
-                raise RevisitContractError(
-                    f"source excerpt is not a file: {source_id}"
-                )
-            excerpt_generations.append(excerpt_generation)
-            artifact_snapshots.append(excerpt_generation.snapshot)
-
-        evaluation = evaluate_index(workspace)
-        _require_authority_generation(
-            source_index_generation,
-            "after source cache validation",
-        )
-        for generation in excerpt_generations:
-            _require_authority_generation(
-                generation,
-                "after source cache validation",
-            )
-        if evaluation.issues:
-            details = "; ".join(
-                f"{issue.code} at {issue.location}: {issue.message}"
-                for issue in evaluation.issues
-            )
-            raise RevisitContractError(f"source cache failed validation: {details}")
-        final_by_id = {
-            str(record["source_id"]): record for record in evaluation.records
-        }
-        for source_id in sorted(requested_source_ids):
-            if final_by_id.get(source_id) != preliminary_by_id[source_id]:
-                raise RevisitContractError(
-                    f"source record changed during validation: {source_id}"
-                )
-        registered_source_ids = set(final_by_id)
+    registered_source_ids, source_snapshots = _validate_source_ids(
+        workspace, requested_source_ids
+    )
+    artifact_snapshots.extend(source_snapshots)
 
     def validate_reference(ref: dict) -> None:
         if ref["kind"] == "source":
@@ -702,6 +848,182 @@ def command_abort(args: argparse.Namespace) -> int:
         return _command_abort_in_transaction(args, workspace)
 
 
+def _load_active_cycle_mutation_context(
+    workspace: Path,
+    cycle_id: str,
+    operation: str,
+) -> tuple[
+    dict,
+    str,
+    tuple[PreparedAuthoritySnapshot, PreparedAuthoritySnapshot],
+]:
+    _load_ticker_state(workspace, operation)
+    pointer_generation = _read_authority_generation(
+        workspace,
+        workspace / POINTER_FILENAME,
+    )
+    pointer = load_pointer(workspace)
+    _require_authority_generation(
+        pointer_generation,
+        "after pointer validation",
+    )
+    current, _, _, report_authority = _require_current_report(workspace, pointer)
+    json_path = cycle_json_path(workspace, cycle_id)
+    expected_cycle_sha256 = sha256_file(json_path)
+    cycle = load_cycle(workspace, cycle_id)
+    if cycle["status"] != "active":
+        raise RevisitContractError(
+            f"{operation} requires active cycle {cycle_id}; "
+            f"current status is {cycle['status']}"
+        )
+    expected_base = {
+        "revision_id": current["revision_id"],
+        "report_path": current["report_path"],
+        "report_sha256": current["report_sha256"],
+        "action_class": current["action_class"],
+    }
+    if cycle["intake"]["base_revision"] != expected_base:
+        raise RevisitContractError(
+            f"cycle {cycle_id} base revision does not match current pointer"
+        )
+    return (
+        cycle,
+        expected_cycle_sha256,
+        (pointer_generation.snapshot, report_authority),
+    )
+
+
+def _command_add_derived_claim_in_transaction(
+    args: argparse.Namespace, workspace: Path
+) -> int:
+    request = _load_json_object(args.request_file, "derived claim request")
+    previous, expected_cycle_sha256, base_authorities = (
+        _load_active_cycle_mutation_context(
+            workspace,
+            args.cycle,
+            "add-derived-claim",
+        )
+    )
+    proposed = add_derived_claim(previous, request)
+    external_authorities: tuple[PreparedAuthoritySnapshot, ...] = ()
+    if request["origin"] == "emergent":
+        dispatch_authorities = _validate_emergent_dispatch(
+            workspace,
+            request["accepted_from"],
+        )
+        canonical_refs, evidence_authorities = _validate_evidence_references(
+            workspace,
+            request["accepted_from"]["evidence_refs"],
+            "request.accepted_from.evidence_refs",
+        )
+        canonical_request = copy.deepcopy(request)
+        canonical_request["accepted_from"]["evidence_refs"] = canonical_refs
+        proposed = add_derived_claim(previous, canonical_request)
+        external_authorities = (*dispatch_authorities, *evidence_authorities)
+    claim_id = proposed["derived_claims"][-1]["claim_id"]
+    updated = with_audit(
+        previous,
+        proposed,
+        "add-derived-claim",
+        [claim_id],
+        _utc_now_seconds(),
+    )
+    persist_cycle(
+        workspace,
+        updated,
+        expected_sha256=expected_cycle_sha256,
+        authority_snapshots=(*base_authorities, *external_authorities),
+    )
+    print(f"DERIVED CLAIM ADDED: {claim_id}")
+    return 0
+
+
+def command_add_derived_claim(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        return _command_add_derived_claim_in_transaction(args, workspace)
+
+
+def _command_resolve_claim_in_transaction(
+    args: argparse.Namespace, workspace: Path
+) -> int:
+    outcome = _load_json_object(args.resolution_file, "claim resolution")
+    previous, expected_cycle_sha256, base_authorities = (
+        _load_active_cycle_mutation_context(
+            workspace,
+            args.cycle,
+            "resolve-claim",
+        )
+    )
+    resolve_claim(previous, args.claim, outcome)
+    current_refs = outcome.get("current_evidence_refs", [])
+    counter_refs = outcome.get("counter_evidence_refs", [])
+    combined_refs = [*current_refs, *counter_refs]
+    canonical_refs, evidence_authorities = _validate_evidence_references(
+        workspace,
+        combined_refs,
+        "outcome.evidence_refs",
+    )
+    canonical_outcome = copy.deepcopy(outcome)
+    current_count = len(current_refs)
+    canonical_outcome["current_evidence_refs"] = canonical_refs[:current_count]
+    canonical_outcome["counter_evidence_refs"] = canonical_refs[current_count:]
+    proposed = resolve_claim(previous, args.claim, canonical_outcome)
+    updated = with_audit(
+        previous,
+        proposed,
+        "resolve-claim",
+        [args.claim],
+        _utc_now_seconds(),
+    )
+    persist_cycle(
+        workspace,
+        updated,
+        expected_sha256=expected_cycle_sha256,
+        authority_snapshots=(*base_authorities, *evidence_authorities),
+    )
+    print(f"CLAIM RESOLVED: {args.claim} ({canonical_outcome['status']})")
+    return 0
+
+
+def command_resolve_claim(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        return _command_resolve_claim_in_transaction(args, workspace)
+
+
+def _command_assess_decision_in_transaction(
+    args: argparse.Namespace, workspace: Path
+) -> int:
+    assessment = _load_json_object(args.assessment_file, "decision assessment")
+    previous, expected_cycle_sha256, base_authorities = (
+        _load_active_cycle_mutation_context(
+            workspace,
+            args.cycle,
+            "assess-decision",
+        )
+    )
+    proposed = assess_decision(previous, assessment)
+    updated = with_audit(
+        previous,
+        proposed,
+        "assess-decision",
+        [args.cycle],
+        _utc_now_seconds(),
+    )
+    persist_cycle(
+        workspace,
+        updated,
+        expected_sha256=expected_cycle_sha256,
+        authority_snapshots=base_authorities,
+    )
+    print(f"DECISION ASSESSED: {args.cycle}")
+    return 0
+
+
+def command_assess_decision(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        return _command_assess_decision_in_transaction(args, workspace)
+
+
 def _command_register_current_in_transaction(
     args: argparse.Namespace, workspace: Path
 ) -> int:
@@ -838,6 +1160,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="non-empty explicit reason for stopping the cycle",
     )
     abort.set_defaults(handler=command_abort)
+    derived = subparsers.add_parser(
+        "add-derived-claim",
+        help="add a split-child or accepted emergent cycle claim",
+    )
+    derived.add_argument("cycle", help="active revisit cycle ID")
+    derived.add_argument(
+        "--request-file",
+        required=True,
+        help="JSON split-child or emergent claim request",
+    )
+    derived.set_defaults(handler=command_add_derived_claim)
+    resolve = subparsers.add_parser(
+        "resolve-claim",
+        help="record one terminal main-thread claim outcome",
+    )
+    resolve.add_argument("cycle", help="active revisit cycle ID")
+    resolve.add_argument("claim", help="selected or derived cycle claim ID")
+    resolve.add_argument(
+        "--resolution-file",
+        required=True,
+        help="JSON terminal claim resolution",
+    )
+    resolve.set_defaults(handler=command_resolve_claim)
+    assess = subparsers.add_parser(
+        "assess-decision",
+        help="record one main-thread decision assessment and derive rerun duties",
+    )
+    assess.add_argument("cycle", help="active revisit cycle ID")
+    assess.add_argument(
+        "--assessment-file",
+        required=True,
+        help="JSON main-thread decision assessment",
+    )
+    assess.set_defaults(handler=command_assess_decision)
     return parser
 
 

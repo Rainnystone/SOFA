@@ -1604,6 +1604,10 @@ def write_matching_completed_cycle(
     action_class: str = "Watch with Trigger",
     status: str = "completed",
 ) -> None:
+    import copy
+
+    from revisit_contract.model import with_audit
+
     created_at = "2026-07-15T00:30:00Z"
     source_ref = {
         "kind": "source",
@@ -1664,43 +1668,101 @@ def write_matching_completed_cycle(
         },
         timestamp=created_at,
     )
+
+    proposed = copy.deepcopy(cycle)
+    proposed["frontier_bindings"] = [
+        {
+            "frontier_id": "F1",
+            "action": "added",
+            "claim_ids": ["RC-0001-CL-01"],
+            "expected_evidence": ["Current source evidence"],
+            "baseline_loop_count": 0,
+            "baseline_review_count": 0,
+            "registry_sha256": "c" * 64,
+            "bound_at": "2026-07-15T00:35:00Z",
+        }
+    ]
+    cycle = with_audit(
+        cycle,
+        proposed,
+        "bind-frontier",
+        ["F1", "RC-0001-CL-01"],
+        "2026-07-15T00:35:00Z",
+    )
+
+    proposed = revisit_contract.resolve_claim(
+        cycle,
+        "RC-0001-CL-01",
+        {
+            "status": "confirmed",
+            "revised_statement": None,
+            "current_evidence_refs": [source_ref],
+            "counter_evidence_refs": [],
+            "current_grade": "B",
+            "current_confidence": "medium",
+            "bound_frontier_ids": ["F1"],
+            "rationale": "Current evidence confirms the selected claim.",
+            "missing_proof": None,
+            "attempted_loop_ids": [],
+            "attempted_search_refs": [],
+            "verdict_impact": None,
+            "split_child_ids": [],
+        },
+    )
+    cycle = with_audit(
+        cycle,
+        proposed,
+        "resolve-claim",
+        ["RC-0001-CL-01"],
+        "2026-07-15T00:40:00Z",
+    )
+
+    proposed = revisit_contract.assess_decision(
+        cycle,
+        {
+            "new_action_class": action_class,
+            "financial_bridge_affected": False,
+            "financial_bridge_rationale": (
+                "The accepted claim does not change the modeled financial bridge."
+            ),
+            "risk_class_changed": False,
+            "risk_class_rationale": (
+                "The accepted claim does not change the selected risk class."
+            ),
+            "supporting_claim_ids": ["RC-0001-CL-01"],
+            "verdict_rationale": "The cycle supports the candidate report.",
+            "blocked_claim_ids": [],
+        },
+    )
+    cycle = with_audit(
+        cycle,
+        proposed,
+        "assess-decision",
+        ["RC-0001"],
+        "2026-07-15T00:50:00Z",
+    )
+
+    proposed = copy.deepcopy(cycle)
     if status == "completed":
-        cycle["status"] = "completed"
-        cycle["completed_at"] = "2026-07-15T00:59:00Z"
-    cycle["decision_assessment"] = {
-        "new_action_class": action_class,
-        "financial_bridge_affected": False,
-        "financial_bridge_rationale": None,
-        "risk_class_changed": False,
-        "risk_class_rationale": None,
-        "supporting_claim_ids": [],
-        "verdict_rationale": "The cycle supports the candidate report.",
-        "blocked_claim_ids": [],
-        "change_class": "evidence_or_claim_only",
-        "required_reruns": [],
-    }
-    cycle["report_candidate"] = {
+        proposed["status"] = "completed"
+        proposed["completed_at"] = "2026-07-15T00:59:00Z"
+    proposed["report_candidate"] = {
         "revision_id": revision["revision_id"],
         "revision_of": revision["revision_of"],
         "report_path": revision["report_path"],
         "report_sha256": revision["report_sha256"],
         "registered_at": "2026-07-15T00:58:00Z",
     }
-    cycle["audit"].append(
-        {
-            "sequence": 2,
-            "timestamp": (
-                cycle["completed_at"]
-                if status == "completed"
-                else "2026-07-15T00:58:00Z"
-            ),
-            "command": (
-                "complete" if status == "completed" else "record-report-candidate"
-            ),
-            "affected_ids": ["RC-0001", revision["revision_id"]],
-            "pre_state_sha256": cycle["audit"][-1]["post_state_sha256"],
-            "post_state_sha256": revisit_contract.cycle_state_sha256(cycle),
-        }
+    cycle = with_audit(
+        cycle,
+        proposed,
+        "complete" if status == "completed" else "record-report-candidate",
+        ["RC-0001", revision["revision_id"]],
+        (
+            proposed["completed_at"]
+            if status == "completed"
+            else "2026-07-15T00:58:00Z"
+        ),
     )
     revisit_contract.persist_cycle(workspace, cycle, expected_sha256=None)
 

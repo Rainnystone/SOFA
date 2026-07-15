@@ -107,8 +107,42 @@ _CLAIM_SOURCE_REF_KEYS = {"path", "sha256", "locator", "historical_claim_id"}
 _INHERITED_EVIDENCE_KEYS = {"ref", "freshness", "checked_at", "reason"}
 _CLAIM_RESOLUTION_STATES = (
     "inherited-pending-reverification",
+    "cycle-pending-validation",
     *CLAIM_TERMINAL_STATES,
 )
+_DERIVED_CLAIM_REQUEST_KEYS = {
+    "origin",
+    "statement",
+    "derived_from",
+    "accepted_from",
+    "acceptance_rationale",
+}
+_DERIVED_CLAIM_KEYS = {"claim_id", *_DERIVED_CLAIM_REQUEST_KEYS}
+_RESOLUTION_OUTCOME_KEYS = {
+    "status",
+    "revised_statement",
+    "current_evidence_refs",
+    "counter_evidence_refs",
+    "current_grade",
+    "current_confidence",
+    "bound_frontier_ids",
+    "rationale",
+    "missing_proof",
+    "attempted_loop_ids",
+    "attempted_search_refs",
+    "verdict_impact",
+    "split_child_ids",
+}
+_ASSESSMENT_REQUEST_KEYS = {
+    "new_action_class",
+    "financial_bridge_affected",
+    "financial_bridge_rationale",
+    "risk_class_changed",
+    "risk_class_rationale",
+    "supporting_claim_ids",
+    "verdict_rationale",
+    "blocked_claim_ids",
+}
 
 
 @dataclass(frozen=True)
@@ -204,6 +238,8 @@ def _require_derived_claim_id(value: Any, path: str, cycle_id: str) -> str:
         raise RevisitContractError(f"{path} must match RC-NNNN-DC-NN")
     if match.group("cycle") != cycle_id:
         raise RevisitContractError(f"{path} must belong to cycle {cycle_id}")
+    if match.group("number") == "00":
+        raise RevisitContractError(f"{path} number must be between 01 and 99")
     return value
 
 
@@ -728,6 +764,155 @@ def create_cycle(
     return cycle
 
 
+def add_derived_claim(
+    cycle: dict[str, Any], request: dict[str, Any]
+) -> dict[str, Any]:
+    validate_cycle(cycle)
+    if cycle["status"] != "active":
+        raise RevisitContractError(
+            "derived claims may be added only to an active cycle"
+        )
+    if cycle["decision_assessment"] is not None:
+        raise RevisitContractError(
+            "derived claims cannot be added after decision assessment"
+        )
+    selected_claim_ids = {
+        claim["claim_id"] for claim in cycle["intake"]["selected_claims"]
+    }
+    _validate_derived_claim_request(
+        request,
+        cycle_id=cycle["cycle_id"],
+        selected_claim_ids=selected_claim_ids,
+    )
+    if request["origin"] == "split_child":
+        parent_resolution = next(
+            resolution
+            for resolution in cycle["claim_resolutions"]
+            if resolution["claim_id"] == request["derived_from"]
+        )
+        if parent_resolution["status"] != "inherited-pending-reverification":
+            raise RevisitContractError(
+                "split_child parent must remain pending until its children are registered"
+            )
+
+    maximum = max(
+        (
+            int(DERIVED_CLAIM_ID_RE.fullmatch(claim["claim_id"]).group("number"))
+            for claim in cycle["derived_claims"]
+        ),
+        default=0,
+    )
+    if maximum >= 99:
+        raise RevisitContractError("derived claim ID space is exhausted")
+    claim_id = f"{cycle['cycle_id']}-DC-{maximum + 1:02d}"
+    updated = copy.deepcopy(cycle)
+    updated["derived_claims"].append(
+        {"claim_id": claim_id, **copy.deepcopy(request)}
+    )
+    updated["claim_resolutions"].append(
+        _pending_resolution(claim_id, "cycle-pending-validation")
+    )
+    _validate_claims(updated)
+    return updated
+
+
+def resolve_claim(
+    cycle: dict[str, Any], claim_id: str, outcome: dict[str, Any]
+) -> dict[str, Any]:
+    validate_cycle(cycle)
+    if cycle["status"] != "active":
+        raise RevisitContractError("claims may be resolved only on an active cycle")
+    claim_id = _require_any_claim_id(claim_id, "claim_id", cycle["cycle_id"])
+    resolutions = {
+        resolution["claim_id"]: resolution
+        for resolution in cycle["claim_resolutions"]
+    }
+    if claim_id not in resolutions:
+        raise RevisitContractError(f"claim_id is not registered: {claim_id}")
+    if resolutions[claim_id]["status"] not in {
+        "inherited-pending-reverification",
+        "cycle-pending-validation",
+    }:
+        raise RevisitContractError(
+            f"claim resolution is already terminal: {claim_id}"
+        )
+    raw_outcome = _require_object(outcome, "outcome")
+    _require_exact_keys(raw_outcome, _RESOLUTION_OUTCOME_KEYS, "outcome")
+    if raw_outcome["status"] not in CLAIM_TERMINAL_STATES:
+        raise RevisitContractError("outcome.status must be a terminal claim state")
+    updated = copy.deepcopy(cycle)
+    for index, resolution in enumerate(updated["claim_resolutions"]):
+        if resolution["claim_id"] == claim_id:
+            updated["claim_resolutions"][index] = {
+                "claim_id": claim_id,
+                **copy.deepcopy(raw_outcome),
+            }
+            break
+    _validate_claims(updated)
+    return updated
+
+
+def assess_decision(
+    cycle: dict[str, Any], assessment: dict[str, Any]
+) -> dict[str, Any]:
+    validate_cycle(cycle)
+    if cycle["status"] != "active":
+        raise RevisitContractError(
+            "decision may be assessed only on an active cycle"
+        )
+    if cycle["decision_assessment"] is not None:
+        raise RevisitContractError("decision assessment is already recorded")
+    raw_assessment = _require_object(assessment, "assessment")
+    _require_exact_keys(
+        raw_assessment, _ASSESSMENT_REQUEST_KEYS, "assessment"
+    )
+    for field in (
+        "financial_bridge_rationale",
+        "risk_class_rationale",
+        "verdict_rationale",
+    ):
+        _require_non_empty_text(raw_assessment[field], f"assessment.{field}")
+    updated = copy.deepcopy(cycle)
+    updated["decision_assessment"] = {
+        **copy.deepcopy(raw_assessment),
+        "change_class": "evidence_or_claim_only",
+        "required_reruns": [],
+    }
+    updated["decision_assessment"]["change_class"] = derive_change_class(updated)
+    updated["decision_assessment"]["required_reruns"] = list(
+        derive_rerun_requirements(updated)
+    )
+    _validate_decision_and_reruns(updated)
+    return updated
+
+
+def derive_change_class(cycle: dict[str, Any]) -> str:
+    assessment = cycle["decision_assessment"]
+    base = cycle["intake"]["base_revision"]["action_class"]
+    if assessment["new_action_class"] != base:
+        return "action_class_change"
+    if assessment["financial_bridge_affected"] or assessment["risk_class_changed"]:
+        return "financial_or_risk_change"
+    return "evidence_or_claim_only"
+
+
+def derive_rerun_requirements(cycle: dict[str, Any]) -> tuple[str, ...]:
+    change_class = derive_change_class(cycle)
+    if change_class == "action_class_change":
+        return (
+            "delta-frontier-review",
+            "full-financial-bridge",
+            "redteam-round-1",
+            "redteam-defense-1",
+            "redteam-round-2",
+            "redteam-defense-2",
+            "thesis-revision",
+        )
+    if change_class == "financial_or_risk_change":
+        return ("delta-frontier-review", "affected-financial-bridge")
+    return ("delta-frontier-review",)
+
+
 def _require_object(value: Any, path: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RevisitContractError(f"{path} must be an object")
@@ -743,6 +928,94 @@ def _require_list(value: Any, path: str) -> list[Any]:
 def _require_unique(values: list[str], path: str, label: str = "IDs") -> None:
     if len(values) != len(set(values)):
         raise RevisitContractError(f"{path} must not contain duplicate {label}")
+
+
+def _validate_derived_claim_request(
+    request: Any,
+    *,
+    cycle_id: str,
+    selected_claim_ids: set[str],
+    path: str = "request",
+) -> dict[str, Any]:
+    raw = _require_object(request, path)
+    _require_exact_keys(raw, _DERIVED_CLAIM_REQUEST_KEYS, path)
+    origin = _require_non_empty_text(raw["origin"], f"{path}.origin")
+    if origin not in {"split_child", "emergent"}:
+        raise RevisitContractError(
+            "request.origin must be split_child or emergent"
+        )
+    _require_non_empty_text(raw["statement"], f"{path}.statement")
+    _require_non_empty_text(
+        raw["acceptance_rationale"], f"{path}.acceptance_rationale"
+    )
+    if origin == "split_child":
+        if raw["derived_from"] is None:
+            raise RevisitContractError(
+                "split_child request.derived_from must name a selected inherited claim"
+            )
+        if (
+            isinstance(raw["derived_from"], str)
+            and DERIVED_CLAIM_ID_RE.fullmatch(raw["derived_from"]) is not None
+        ):
+            raise RevisitContractError(
+                "split_child request.derived_from must name a selected inherited claim"
+            )
+        parent_id = _require_claim_id(
+            raw["derived_from"], f"{path}.derived_from", cycle_id
+        )
+        if parent_id not in selected_claim_ids:
+            raise RevisitContractError(
+                "split_child request.derived_from must name a selected inherited claim"
+            )
+        if raw["accepted_from"] is not None:
+            raise RevisitContractError(
+                "split_child request.accepted_from must be null"
+            )
+        return raw
+
+    if raw["derived_from"] is not None:
+        raise RevisitContractError("emergent request.derived_from must be null")
+    accepted_path = f"{path}.accepted_from"
+    if not isinstance(raw["accepted_from"], dict):
+        raise RevisitContractError(f"{accepted_path} must be an object or null")
+    accepted = raw["accepted_from"]
+    _require_exact_keys(
+        accepted,
+        {"loop_id", "dispatch_id", "evidence_refs"},
+        accepted_path,
+    )
+    _require_non_empty_text(accepted["loop_id"], f"{accepted_path}.loop_id")
+    _require_non_empty_text(
+        accepted["dispatch_id"], f"{accepted_path}.dispatch_id"
+    )
+    evidence_path = f"{accepted_path}.evidence_refs"
+    evidence_refs = _require_list(accepted["evidence_refs"], evidence_path)
+    if not evidence_refs:
+        raise RevisitContractError(
+            "emergent request.accepted_from.evidence_refs must not be empty"
+        )
+    for index, evidence in enumerate(evidence_refs):
+        validate_evidence_ref(evidence, f"{evidence_path}[{index}]")
+    return raw
+
+
+def _pending_resolution(claim_id: str, status: str) -> dict[str, Any]:
+    return {
+        "claim_id": claim_id,
+        "status": status,
+        "revised_statement": None,
+        "current_evidence_refs": [],
+        "counter_evidence_refs": [],
+        "current_grade": None,
+        "current_confidence": None,
+        "bound_frontier_ids": [],
+        "rationale": None,
+        "missing_proof": None,
+        "attempted_loop_ids": [],
+        "attempted_search_refs": [],
+        "verdict_impact": None,
+        "split_child_ids": [],
+    }
 
 
 def validate_evidence_ref(ref: Any, path: str) -> dict[str, Any]:
@@ -1120,6 +1393,19 @@ def _validate_intake(value: Any, cycle_id: str) -> None:
 def _validate_bindings(raw: dict[str, Any]) -> None:
     bindings_path = "cycle.frontier_bindings"
     bindings = _require_list(raw["frontier_bindings"], bindings_path)
+    known_claim_ids = {
+        claim["claim_id"] for claim in raw["intake"]["selected_claims"]
+    }
+    derived_values = _require_list(raw["derived_claims"], "cycle.derived_claims")
+    for index, claim_value in enumerate(derived_values):
+        path = f"cycle.derived_claims[{index}]"
+        claim = _require_object(claim_value, path)
+        _require_exact_keys(claim, _DERIVED_CLAIM_KEYS, path)
+        known_claim_ids.add(
+            _require_derived_claim_id(
+                claim["claim_id"], f"{path}.claim_id", raw["cycle_id"]
+            )
+        )
     for index, binding_value in enumerate(bindings):
         path = f"{bindings_path}[{index}]"
         binding = _require_object(binding_value, path)
@@ -1141,7 +1427,11 @@ def _validate_bindings(raw: dict[str, Any]) -> None:
         _require_non_empty_text(binding["action"], f"{path}.action")
         claim_ids = _require_list(binding["claim_ids"], f"{path}.claim_ids")
         for claim_id in claim_ids:
-            _require_claim_id(claim_id, f"{path}.claim_ids", raw["cycle_id"])
+            _require_any_claim_id(claim_id, f"{path}.claim_ids", raw["cycle_id"])
+            if claim_id not in known_claim_ids:
+                raise RevisitContractError(
+                    f"{path}.claim_ids must reference known same-cycle claims"
+                )
         _require_unique(claim_ids, f"{path}.claim_ids")
         for expected in _require_list(
             binding["expected_evidence"], f"{path}.expected_evidence"
@@ -1159,6 +1449,142 @@ def _validate_bindings(raw: dict[str, Any]) -> None:
         raise RevisitContractError(
             "cycle.frontier_bindings contains duplicate frontier_id"
         )
+
+
+def _validate_resolution_matrix(
+    raw: dict[str, Any],
+    resolution: dict[str, Any],
+    path: str,
+) -> None:
+    claim_id = resolution["claim_id"]
+    selected_claim_ids = {
+        claim["claim_id"] for claim in raw["intake"]["selected_claims"]
+    }
+    derived_by_id = {
+        claim["claim_id"]: claim for claim in raw["derived_claims"]
+    }
+    status = resolution["status"]
+    if status in {
+        "inherited-pending-reverification",
+        "cycle-pending-validation",
+    }:
+        expected_status = (
+            "inherited-pending-reverification"
+            if claim_id in selected_claim_ids
+            else "cycle-pending-validation"
+        )
+        expected = _pending_resolution(claim_id, expected_status)
+        for field, expected_value in expected.items():
+            if resolution[field] != expected_value:
+                raise RevisitContractError(
+                    f"{expected_status} resolution {field} must remain canonical"
+                )
+        return
+
+    required_by_status = {
+        "confirmed": {
+            "current_evidence_refs",
+            "current_grade",
+            "current_confidence",
+            "bound_frontier_ids",
+            "rationale",
+        },
+        "weakened": {
+            "revised_statement",
+            "current_evidence_refs",
+            "counter_evidence_refs",
+            "current_grade",
+            "current_confidence",
+            "bound_frontier_ids",
+            "rationale",
+        },
+        "refuted": {
+            "counter_evidence_refs",
+            "bound_frontier_ids",
+            "rationale",
+        },
+        "split": {"split_child_ids"},
+        "blocked": {
+            "bound_frontier_ids",
+            "rationale",
+            "missing_proof",
+            "attempted_loop_ids",
+            "attempted_search_refs",
+            "verdict_impact",
+        },
+    }
+    required = required_by_status[status]
+    canonical_empty = {
+        "revised_statement": None,
+        "current_evidence_refs": [],
+        "counter_evidence_refs": [],
+        "current_grade": None,
+        "current_confidence": None,
+        "bound_frontier_ids": [],
+        "rationale": None,
+        "missing_proof": None,
+        "attempted_loop_ids": [],
+        "attempted_search_refs": [],
+        "verdict_impact": None,
+        "split_child_ids": [],
+    }
+    for field in required:
+        value = resolution[field]
+        if value is None or value == []:
+            raise RevisitContractError(
+                f"{status} resolution requires non-empty {field}"
+            )
+    for field, expected in canonical_empty.items():
+        if field not in required and resolution[field] != expected:
+            raise RevisitContractError(
+                f"{status} resolution {field} must remain canonical"
+            )
+
+    selected_by_id = {
+        claim["claim_id"]: claim for claim in raw["intake"]["selected_claims"]
+    }
+    selected_claim = selected_by_id.get(claim_id)
+    if selected_claim is not None:
+        for inherited in selected_claim["inherited_evidence"]:
+            if inherited["freshness"] not in {"stale", "unknown"}:
+                continue
+            if inherited["ref"] in resolution["current_evidence_refs"]:
+                raise RevisitContractError(
+                    f"{inherited['freshness']} inherited evidence cannot be "
+                    "reused unchanged as current support"
+                )
+
+    bindings_by_frontier = {
+        binding["frontier_id"]: binding for binding in raw["frontier_bindings"]
+    }
+    for frontier_id in resolution["bound_frontier_ids"]:
+        binding = bindings_by_frontier.get(frontier_id)
+        if binding is None or claim_id not in binding["claim_ids"]:
+            raise RevisitContractError(
+                f"frontier {frontier_id} is not declared for claim {claim_id}"
+            )
+
+    if status != "split":
+        return
+    if claim_id not in selected_claim_ids:
+        raise RevisitContractError(
+            "split resolution applies only to a selected inherited claim"
+        )
+    child_ids = resolution["split_child_ids"]
+    if len(child_ids) < 2:
+        raise RevisitContractError(
+            "split resolution requires at least two registered sibling child IDs"
+        )
+    for child_id in child_ids:
+        child = derived_by_id.get(child_id)
+        if (
+            child is None
+            or child["origin"] != "split_child"
+            or child["derived_from"] != claim_id
+        ):
+            raise RevisitContractError(
+                f"split child {child_id} is not a registered sibling of {claim_id}"
+            )
 
 
 def _validate_claims(raw: dict[str, Any]) -> None:
@@ -1179,54 +1605,17 @@ def _validate_claims(raw: dict[str, Any]) -> None:
     for index, claim_value in enumerate(derived_values):
         path = f"{derived_path}[{index}]"
         claim = _require_object(claim_value, path)
-        _require_exact_keys(
-            claim,
-            {
-                "claim_id",
-                "origin",
-                "statement",
-                "derived_from",
-                "accepted_from",
-                "acceptance_rationale",
-            },
-            path,
-        )
+        _require_exact_keys(claim, _DERIVED_CLAIM_KEYS, path)
         _require_derived_claim_id(
             claim["claim_id"], f"{path}.claim_id", raw["cycle_id"]
         )
-        _require_non_empty_text(claim["origin"], f"{path}.origin")
-        _require_non_empty_text(claim["statement"], f"{path}.statement")
-        if claim["derived_from"] is not None:
-            _require_any_claim_id(
-                claim["derived_from"], f"{path}.derived_from", raw["cycle_id"]
-            )
-            if claim["derived_from"] not in known_claim_ids:
-                raise RevisitContractError(
-                    f"{path}.derived_from must reference a known same-cycle claim ID"
-                )
-        accepted = claim["accepted_from"]
-        if accepted is not None:
-            accepted_path = f"{path}.accepted_from"
-            if not isinstance(accepted, dict):
-                raise RevisitContractError(
-                    f"{accepted_path} must be an object or null"
-                )
-            _require_exact_keys(
-                accepted,
-                {"loop_id", "dispatch_id", "evidence_refs"},
-                accepted_path,
-            )
-            _require_non_empty_text(accepted["loop_id"], f"{accepted_path}.loop_id")
-            _require_non_empty_text(
-                accepted["dispatch_id"], f"{accepted_path}.dispatch_id"
-            )
-            evidence_path = f"{accepted_path}.evidence_refs"
-            for evidence_index, evidence in enumerate(
-                _require_list(accepted["evidence_refs"], evidence_path)
-            ):
-                _validate_evidence_ref(evidence, f"{evidence_path}[{evidence_index}]")
-        _require_non_empty_text(
-            claim["acceptance_rationale"], f"{path}.acceptance_rationale"
+        _validate_derived_claim_request(
+            {key: claim[key] for key in _DERIVED_CLAIM_REQUEST_KEYS},
+            cycle_id=raw["cycle_id"],
+            selected_claim_ids={
+                item["claim_id"] for item in raw["intake"]["selected_claims"]
+            },
+            path=path,
         )
     if len({claim["claim_id"] for claim in derived_values}) != len(derived_values):
         raise RevisitContractError(
@@ -1313,6 +1702,7 @@ def _validate_claims(raw: dict[str, Any]) -> None:
             _require_exact_keys(search, {"loop_id", "query"}, search_path)
             _require_non_empty_text(search["loop_id"], f"{search_path}.loop_id")
             _require_non_empty_text(search["query"], f"{search_path}.query")
+        _validate_resolution_matrix(raw, resolution, path)
     if len({resolution["claim_id"] for resolution in resolutions}) != len(
         resolutions
     ):
@@ -1353,12 +1743,12 @@ def _validate_decision_and_reruns(raw: dict[str, Any]) -> None:
             assessment["financial_bridge_affected"],
             f"{path}.financial_bridge_affected",
         )
-        _require_nullable_text(
+        _require_non_empty_text(
             assessment["financial_bridge_rationale"],
             f"{path}.financial_bridge_rationale",
         )
         _require_bool(assessment["risk_class_changed"], f"{path}.risk_class_changed")
-        _require_nullable_text(
+        _require_non_empty_text(
             assessment["risk_class_rationale"], f"{path}.risk_class_rationale"
         )
         known_claim_ids = {
@@ -1390,6 +1780,50 @@ def _validate_decision_and_reruns(raw: dict[str, Any]) -> None:
         if len(required_reruns) != len(set(required_reruns)):
             raise RevisitContractError(
                 f"{path}.required_reruns must not contain duplicates"
+            )
+
+        resolution_statuses = {
+            resolution["claim_id"]: resolution["status"]
+            for resolution in raw["claim_resolutions"]
+        }
+        pending_claim_ids = [
+            claim_id
+            for claim_id, status in resolution_statuses.items()
+            if status not in CLAIM_TERMINAL_STATES
+        ]
+        if pending_claim_ids:
+            raise RevisitContractError(
+                "all selected and derived claims must be terminal before "
+                f"decision assessment; pending claims: {pending_claim_ids}"
+            )
+
+        for claim_id in assessment["supporting_claim_ids"]:
+            status = resolution_statuses[claim_id]
+            if status not in {"confirmed", "weakened"}:
+                raise RevisitContractError(
+                    f"claim {claim_id} with status {status} cannot be used "
+                    "as positive support"
+                )
+
+        blocked_claim_ids = {
+            claim_id
+            for claim_id, status in resolution_statuses.items()
+            if status == "blocked"
+        }
+        if set(assessment["blocked_claim_ids"]) != blocked_claim_ids:
+            raise RevisitContractError(
+                f"{path}.blocked_claim_ids must exactly equal all blocked claim IDs"
+            )
+
+        expected_change_class = derive_change_class(raw)
+        if assessment["change_class"] != expected_change_class:
+            raise RevisitContractError(
+                f"{path}.change_class must equal the derived change_class"
+            )
+        expected_reruns = list(derive_rerun_requirements(raw))
+        if assessment["required_reruns"] != expected_reruns:
+            raise RevisitContractError(
+                f"{path}.required_reruns must equal the derived required_reruns"
             )
 
     reruns_path = "cycle.rerun_artifacts"
