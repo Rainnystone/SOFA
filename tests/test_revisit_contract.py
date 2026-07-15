@@ -504,6 +504,63 @@ class TestPointerSchema(unittest.TestCase):
 
 
 class TestRevisitStorePaths(unittest.TestCase):
+    def assert_internal_symlink_target_rejected(
+        self, target_parent, target_name, pattern
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            reports = workspace / "reports"
+            target_directory = workspace / target_parent
+            reports.mkdir(parents=True)
+            target_directory.mkdir(parents=True, exist_ok=True)
+            target = target_directory / target_name
+            target.write_bytes(b"authority bytes")
+            (reports / "final.md").symlink_to(target)
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, pattern
+            ):
+                revisit_contract.resolve_workspace_path(
+                    workspace,
+                    "reports/final.md",
+                    parent="reports",
+                    suffix=".md",
+                )
+
+    def test_resolve_workspace_path_rejects_internal_symlink_parent_and_suffix_change(
+        self,
+    ):
+        self.assert_internal_symlink_target_rejected(
+            "other", "authority.json", "resolved path must be under reports/"
+        )
+
+    def test_resolve_workspace_path_rejects_internal_symlink_parent_change(self):
+        self.assert_internal_symlink_target_rejected(
+            "other", "authority.md", "resolved path must be under reports/"
+        )
+
+    def test_resolve_workspace_path_rejects_internal_symlink_suffix_change(self):
+        self.assert_internal_symlink_target_rejected(
+            "reports", "authority.json", "resolved path must end with .md"
+        )
+
+    def test_resolve_workspace_path_accepts_real_matching_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            report = workspace / "reports" / "final.md"
+            report.parent.mkdir(parents=True)
+            report.write_bytes(b"ordinary report")
+
+            self.assertEqual(
+                report.resolve(),
+                revisit_contract.resolve_workspace_path(
+                    workspace,
+                    "reports/final.md",
+                    parent="reports",
+                    suffix=".md",
+                ),
+            )
+
     def test_resolve_workspace_path_rejects_c1_control_character(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -876,6 +933,42 @@ class TestRevisitPersistence(unittest.TestCase):
                 markdown_path.read_bytes(),
             )
             self.assertEqual(cycle, revisit_contract.load_cycle(workspace, "RC-0001"))
+
+    def test_persist_cycle_rejects_path_alias_before_render_and_preserves_bytes(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        original = make_minimal_cycle()
+        updated = make_minimal_cycle()
+        updated["status"] = "aborted"
+        updated["aborted_at"] = "2026-07-15T02:00:00Z"
+        updated["abort_reason"] = "\ud800"
+        original_json = revisit_contract.canonical_document_bytes(original)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            directory = workspace / revisit_contract.CYCLES_DIRNAME
+            directory.mkdir()
+            json_path = directory / "RC-0001.json"
+            markdown_path = directory / "RC-0001.md"
+            json_path.write_bytes(original_json)
+
+            try:
+                with mock.patch(
+                    "scripts.revisit_contract.store.cycle_markdown_path",
+                    return_value=json_path.resolve(),
+                ):
+                    persist_cycle(
+                        workspace,
+                        updated,
+                        expected_sha256=hashlib.sha256(original_json).hexdigest(),
+                    )
+            except Exception as error:
+                self.assertIsInstance(error, revisit_contract.RevisitContractError)
+                self.assertRegex(str(error), "authority targets must be distinct")
+            else:
+                self.fail("aliased cycle authority targets were not rejected")
+
+            self.assertEqual(original_json, json_path.read_bytes())
+            self.assertFalse(markdown_path.exists())
 
     def test_json_replace_failure_restores_exact_existing_mirror_bytes(self):
         persist_cycle = self.required_callable("persist_cycle")

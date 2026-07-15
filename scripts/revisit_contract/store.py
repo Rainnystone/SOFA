@@ -90,6 +90,18 @@ def resolve_workspace_path(
         resolved.relative_to(root)
     except ValueError as exc:
         raise RevisitContractError(f"path escapes workspace: {relative}") from exc
+    if parent is not None:
+        unresolved_parent = root / parent.rstrip("/")
+        try:
+            resolved.relative_to(unresolved_parent)
+        except ValueError as exc:
+            raise RevisitContractError(
+                f"resolved path must be under {parent}/: {relative}"
+            ) from exc
+    if suffix is not None and resolved.suffix != suffix:
+        raise RevisitContractError(
+            f"resolved path must end with {suffix}: {relative}"
+        )
     return resolved
 
 
@@ -239,6 +251,10 @@ def persist_cycle(
     validate_cycle(cycle)
     json_path = cycle_json_path(workspace, cycle["cycle_id"])
     markdown_path = cycle_markdown_path(workspace, cycle["cycle_id"])
+    if json_path == markdown_path:
+        raise RevisitContractError(
+            "cycle JSON and Markdown authority targets must be distinct"
+        )
     _require_expected_bytes(json_path, expected_sha256)
     prior_markdown = markdown_path.read_bytes() if markdown_path.exists() else None
     markdown_payload = render_cycle_markdown(cycle).encode("utf-8")
