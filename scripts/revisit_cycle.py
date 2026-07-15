@@ -34,8 +34,10 @@ from revisit_contract import (
 )
 from revisit_contract.model import with_audit
 from revisit_contract.store import (
+    PreparedAuthoritySnapshot,
     load_intake_request,
     normalize_workspace_relative_path,
+    prepare_authority_snapshot,
     resolve_workspace_path,
     verify_workspace_artifact,
 )
@@ -87,7 +89,7 @@ def _utc_now_seconds() -> str:
 
 def _require_current_report(
     workspace: Path, pointer: dict
-) -> tuple[dict, Path, str]:
+) -> tuple[dict, Path, str, PreparedAuthoritySnapshot]:
     current = pointer["current_revision"]
     if current is None:
         raise RevisitContractError(
@@ -119,10 +121,17 @@ def _require_current_report(
     report_path = workspace / relative
     if sha256_file(report_path) != report_sha256:
         raise RevisitContractError("current report changed during validation")
-    return current, report_path, report_sha256
+    authority_snapshot = prepare_authority_snapshot(
+        workspace,
+        report_path,
+        report_sha256,
+    )
+    return current, report_path, report_sha256, authority_snapshot
 
 
-def _load_revisit_framing(workspace: Path) -> tuple[dict, Path, str]:
+def _load_revisit_framing(
+    workspace: Path,
+) -> tuple[dict, Path, str, PreparedAuthoritySnapshot]:
     path = workspace / "framing_contract.json"
     payload = path.read_bytes()
     try:
@@ -155,12 +164,27 @@ def _load_revisit_framing(workspace: Path) -> tuple[dict, Path, str]:
         "report_language": contract["report_language"],
         "budget_appetite": contract["budget_appetite"],
     }
-    return snapshot, path, sha256_bytes(payload)
+    digest = sha256_bytes(payload)
+    return (
+        snapshot,
+        path,
+        digest,
+        prepare_authority_snapshot(workspace, path, digest),
+    )
 
 
 def _load_workspace_boundary(
     workspace: Path,
-) -> tuple[dict, Path, str, Path, str, int]:
+) -> tuple[
+    dict,
+    Path,
+    str,
+    Path,
+    str,
+    int,
+    PreparedAuthoritySnapshot,
+    PreparedAuthoritySnapshot,
+]:
     registry, registry_payload = read_registry_snapshot(workspace)
     if registry.get("mode") != "ticker":
         raise RevisitContractError("frontier registry mode must be ticker")
@@ -178,21 +202,34 @@ def _load_workspace_boundary(
             if match is None:
                 raise RevisitContractError(f"malformed loop header: {line}")
             max_loop_number = max(max_loop_number, int(match.group("loop")))
+    registry_path = workspace / "frontier_registry.json"
+    registry_sha256 = sha256_bytes(registry_payload)
+    ledger_sha256 = sha256_bytes(ledger_payload)
     return (
         registry,
-        workspace / "frontier_registry.json",
-        sha256_bytes(registry_payload),
+        registry_path,
+        registry_sha256,
         ledger_path,
-        sha256_bytes(ledger_payload),
+        ledger_sha256,
         max_loop_number,
+        prepare_authority_snapshot(
+            workspace,
+            registry_path,
+            registry_sha256,
+        ),
+        prepare_authority_snapshot(
+            workspace,
+            ledger_path,
+            ledger_sha256,
+        ),
     )
 
 
 def _validate_request_references(
     workspace: Path, request: dict
-) -> tuple[dict, dict[Path, str]]:
+) -> tuple[dict, tuple[PreparedAuthoritySnapshot, ...]]:
     canonical = copy.deepcopy(request)
-    artifact_snapshots: dict[Path, str] = {}
+    artifact_snapshots: list[PreparedAuthoritySnapshot] = []
 
     requested_source_ids: set[str] = set()
     for trigger in canonical["triggers"]:
@@ -227,7 +264,14 @@ def _validate_request_references(
             source_index_payload = source_index_path.read_bytes()
         except FileNotFoundError as exc:
             raise RevisitContractError("sources_index.jsonl is required") from exc
-        artifact_snapshots[source_index_path] = sha256_bytes(source_index_payload)
+        source_index_sha256 = sha256_bytes(source_index_payload)
+        artifact_snapshots.append(
+            prepare_authority_snapshot(
+                workspace,
+                source_index_path,
+                source_index_sha256,
+            )
+        )
         for source_id in sorted(requested_source_ids):
             excerpt_relative = normalize_workspace_relative_path(
                 preliminary_by_id[source_id]["excerpt_path"]
@@ -241,8 +285,13 @@ def _validate_request_references(
                 raise RevisitContractError(
                     f"source excerpt is not a file: {source_id}"
                 )
-            artifact_snapshots[workspace / excerpt_relative] = sha256_bytes(
-                excerpt_path.read_bytes()
+            excerpt_sha256 = sha256_bytes(excerpt_path.read_bytes())
+            artifact_snapshots.append(
+                prepare_authority_snapshot(
+                    workspace,
+                    workspace / excerpt_relative,
+                    excerpt_sha256,
+                )
             )
 
         evaluation = evaluate_index(workspace)
@@ -261,7 +310,6 @@ def _validate_request_references(
                     f"source record changed during validation: {source_id}"
                 )
         registered_source_ids = set(final_by_id)
-        _require_unchanged_authorities(artifact_snapshots)
 
     def validate_reference(ref: dict) -> None:
         if ref["kind"] == "source":
@@ -274,7 +322,13 @@ def _validate_request_references(
             workspace, ref["path"], ref["sha256"]
         )
         ref["path"] = relative
-        artifact_snapshots[workspace / relative] = sha256_bytes(payload)
+        artifact_snapshots.append(
+            prepare_authority_snapshot(
+                workspace,
+                workspace / relative,
+                sha256_bytes(payload),
+            )
+        )
 
     for trigger in canonical["triggers"]:
         for ref in trigger["evidence_refs"]:
@@ -285,24 +339,16 @@ def _validate_request_references(
             workspace, source_ref["path"], source_ref["sha256"]
         )
         source_ref["path"] = relative
-        artifact_snapshots[workspace / relative] = sha256_bytes(payload)
+        artifact_snapshots.append(
+            prepare_authority_snapshot(
+                workspace,
+                workspace / relative,
+                sha256_bytes(payload),
+            )
+        )
         for inherited in claim["inherited_evidence"]:
             validate_reference(inherited["ref"])
-    return canonical, artifact_snapshots
-
-
-def _require_unchanged_authorities(snapshots: dict[Path, str]) -> None:
-    for path, expected_sha256 in snapshots.items():
-        try:
-            current_sha256 = sha256_file(path)
-        except FileNotFoundError as exc:
-            raise RevisitContractError(
-                f"authority disappeared before cycle persistence: {path.name}"
-            ) from exc
-        if current_sha256 != expected_sha256:
-            raise RevisitContractError(
-                f"authority changed before cycle persistence: {path.name}"
-            )
+    return canonical, tuple(artifact_snapshots)
 
 
 def _command_start_in_transaction(args: argparse.Namespace, workspace: Path) -> int:
@@ -312,8 +358,13 @@ def _command_start_in_transaction(args: argparse.Namespace, workspace: Path) -> 
 
     current_pointer_path = workspace / POINTER_FILENAME
     expected_pointer_sha256 = sha256_file(current_pointer_path)
+    pointer_authority = prepare_authority_snapshot(
+        workspace,
+        current_pointer_path,
+        expected_pointer_sha256,
+    )
     pointer = load_pointer(workspace)
-    current, report_path, report_sha256 = _require_current_report(
+    current, _, _, report_authority = _require_current_report(
         workspace, pointer
     )
 
@@ -334,16 +385,21 @@ def _command_start_in_transaction(args: argparse.Namespace, workspace: Path) -> 
             "is completed-unpublished"
         )
 
-    framing_snapshot, framing_path, framing_sha256 = _load_revisit_framing(
-        workspace
-    )
+    (
+        framing_snapshot,
+        _,
+        framing_sha256,
+        framing_authority,
+    ) = _load_revisit_framing(workspace)
     (
         _,
-        registry_path,
+        _,
         registry_sha256,
-        ledger_path,
-        ledger_sha256,
+        _,
+        _,
         max_loop_number,
+        registry_authority,
+        ledger_authority,
     ) = _load_workspace_boundary(workspace)
     cycle_id, candidate_revision_id = allocate_cycle_and_revision_ids(
         pointer, cycles
@@ -360,15 +416,14 @@ def _command_start_in_transaction(args: argparse.Namespace, workspace: Path) -> 
         timestamp=_utc_now_seconds(),
     )
 
-    snapshots = {
-        current_pointer_path: expected_pointer_sha256,
-        report_path: report_sha256,
-        framing_path: framing_sha256,
-        registry_path: registry_sha256,
-        ledger_path: ledger_sha256,
-        **artifact_snapshots,
-    }
-    _require_unchanged_authorities(snapshots)
+    snapshots = (
+        pointer_authority,
+        report_authority,
+        framing_authority,
+        registry_authority,
+        ledger_authority,
+        *artifact_snapshots,
+    )
     persist_cycle(
         workspace,
         cycle,
@@ -537,8 +592,13 @@ def _command_abort_in_transaction(args: argparse.Namespace, workspace: Path) -> 
     _load_ticker_state(workspace, "abort")
     current_pointer_path = workspace / POINTER_FILENAME
     expected_pointer_sha256 = sha256_file(current_pointer_path)
+    pointer_authority = prepare_authority_snapshot(
+        workspace,
+        current_pointer_path,
+        expected_pointer_sha256,
+    )
     pointer = load_pointer(workspace)
-    current, report_path, report_sha256 = _require_current_report(
+    current, _, _, report_authority = _require_current_report(
         workspace, pointer
     )
 
@@ -572,20 +632,11 @@ def _command_abort_in_transaction(args: argparse.Namespace, workspace: Path) -> 
         [args.cycle],
         timestamp,
     )
-    _require_unchanged_authorities(
-        {
-            current_pointer_path: expected_pointer_sha256,
-            report_path: report_sha256,
-        }
-    )
     persist_cycle(
         workspace,
         aborted,
         expected_sha256=expected_cycle_sha256,
-        authority_snapshots={
-            current_pointer_path: expected_pointer_sha256,
-            report_path: report_sha256,
-        },
+        authority_snapshots=(pointer_authority, report_authority),
     )
     print(f"REVISIT CYCLE ABORTED: {args.cycle}")
     return 0
@@ -630,6 +681,11 @@ def _command_register_current_in_transaction(
         for issue in report_result.failures:
             print(issue.display(), file=sys.stderr)
         return 1
+    report_authority = prepare_authority_snapshot(
+        workspace,
+        workspace / relative,
+        report_sha256,
+    )
 
     pointer["current_revision"] = {
         "revision_id": "REV-0001",
@@ -654,7 +710,7 @@ def _command_register_current_in_transaction(
             workspace,
             pointer,
             expected_sha256=expected_pointer_sha256,
-            authority_snapshots={workspace / relative: report_sha256},
+            authority_snapshots=(report_authority,),
         )
     except Exception:
         if created_cycles:

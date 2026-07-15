@@ -672,6 +672,51 @@ class TestRevisitCycleCliBootstrap(unittest.TestCase):
 
 
 class TestRevisitCycleRegisterCurrentCli(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    def test_register_current_rejects_equal_byte_report_retarget_after_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, report = make_registration_workspace(Path(temp_dir))
+            first_target = report.with_name("first.md")
+            second_target = report.with_name("second.md")
+            report_bytes = report.read_bytes()
+            second_target.write_bytes(report_bytes)
+            real_persist_pointer = revisit_cycle_cli.persist_pointer
+
+            def retarget_then_persist(*args, **kwargs):
+                report.replace(first_target)
+                report.symlink_to(second_target.name)
+                return real_persist_pointer(*args, **kwargs)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "persist_pointer",
+                    side_effect=retarget_then_persist,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "register-current",
+                        "--report",
+                        "reports/final.md",
+                        "--action-class",
+                        "Watch with Trigger",
+                    ]
+                )
+
+            self.assertNotEqual(0, result, stdout.getvalue())
+            self.assertNotIn("CURRENT REPORT REGISTERED", stdout.getvalue())
+            self.assertEqual(second_target.resolve(), report.resolve())
+            self.assertEqual(report_bytes, first_target.read_bytes())
+            self.assertEqual(report_bytes, second_target.read_bytes())
+            self.assertFalse((workspace / revisit_contract.POINTER_FILENAME).exists())
+            self.assertFalse((workspace / revisit_contract.CYCLES_DIRNAME).exists())
+
     def test_register_current_rejects_existing_cycle_history_without_writes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, report = make_registration_workspace(Path(temp_dir))
@@ -1257,9 +1302,12 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                 return payload
 
             with mock.patch.object(Path, "read_bytes", new=read_then_drift):
-                snapshot, returned_path, digest = revisit_cycle_cli._load_revisit_framing(
-                    workspace
-                )
+                (
+                    snapshot,
+                    returned_path,
+                    digest,
+                    _,
+                ) = revisit_cycle_cli._load_revisit_framing(workspace)
 
             self.assertEqual(framing_path, returned_path)
             self.assertEqual(hashlib.sha256(original_bytes).hexdigest(), digest)
@@ -1826,8 +1874,141 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                 workspace, request
             )
 
-            self.assertIn(lexical_excerpt, snapshots)
-            self.assertNotIn(resolved_excerpt, snapshots)
+            lexical_paths = {snapshot.lexical_path for snapshot in snapshots}
+            canonical_workspace = workspace.resolve()
+            self.assertIn(
+                canonical_workspace / "sources" / "src-001.md",
+                lexical_paths,
+            )
+            self.assertNotIn(
+                canonical_workspace / "sources" / "src-001-target.md",
+                lexical_paths,
+            )
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    def test_start_rejects_equal_byte_source_retarget_after_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            lexical_excerpt = workspace / "sources" / "src-001.md"
+            first_target = workspace / "sources" / "src-001-first.md"
+            second_target = workspace / "sources" / "src-001-second.md"
+            excerpt_bytes = lexical_excerpt.read_bytes()
+            first_target.write_bytes(excerpt_bytes)
+            second_target.write_bytes(excerpt_bytes)
+            lexical_excerpt.unlink()
+            lexical_excerpt.symlink_to(first_target.name)
+            source_index = workspace / "sources_index.jsonl"
+            pointer = workspace / revisit_contract.POINTER_FILENAME
+            source_index_before = source_index.read_bytes()
+            pointer_before = pointer.read_bytes()
+            real_create_cycle = revisit_cycle_cli.create_cycle
+
+            def create_then_retarget(**kwargs):
+                cycle = real_create_cycle(**kwargs)
+                lexical_excerpt.unlink()
+                lexical_excerpt.symlink_to(second_target.name)
+                return cycle
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "create_cycle",
+                    side_effect=create_then_retarget,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "start",
+                        "--intake-file",
+                        str(request_path),
+                    ]
+                )
+
+            self.assertNotEqual(0, result, stdout.getvalue())
+            self.assertNotIn("REVISIT CYCLE STARTED", stdout.getvalue())
+            self.assertEqual(second_target.resolve(), lexical_excerpt.resolve())
+            self.assertEqual(excerpt_bytes, first_target.read_bytes())
+            self.assertEqual(excerpt_bytes, second_target.read_bytes())
+            self.assertEqual(source_index_before, source_index.read_bytes())
+            self.assertEqual(pointer_before, pointer.read_bytes())
+            self.assertFalse(
+                (workspace / "revisit_cycles" / "RC-0001.json").exists()
+            )
+            self.assertFalse(
+                (workspace / "revisit_cycles" / "RC-0001.md").exists()
+            )
+
+    def test_start_prepares_all_authorities_at_validation_boundaries(self):
+        prepare_snapshot = getattr(
+            revisit_cycle_cli,
+            "prepare_authority_snapshot",
+            None,
+        )
+        self.assertTrue(
+            callable(prepare_snapshot),
+            "authority snapshot preparation seam is missing",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            prepared_paths = []
+            pointer_events = []
+            real_load_pointer = revisit_cycle_cli.load_pointer
+
+            def record_prepared_path(snapshot_workspace, path, digest):
+                relative = Path(path).relative_to(snapshot_workspace).as_posix()
+                prepared_paths.append(relative)
+                if relative == revisit_contract.POINTER_FILENAME:
+                    pointer_events.append("prepare")
+                return prepare_snapshot(snapshot_workspace, path, digest)
+
+            def record_pointer_load(*args, **kwargs):
+                pointer_events.append("load")
+                return real_load_pointer(*args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "prepare_authority_snapshot",
+                    side_effect=record_prepared_path,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "load_pointer",
+                    side_effect=record_pointer_load,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", io.StringIO()),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "start",
+                        "--intake-file",
+                        str(request_path),
+                    ]
+                )
+
+            self.assertEqual(0, result)
+            self.assertEqual(
+                {
+                    "revisit_contract.json",
+                    "reports/final.md",
+                    "framing_contract.json",
+                    "frontier_registry.json",
+                    "evidence_ledger.md",
+                    "sources_index.jsonl",
+                    "sources/src-001.md",
+                    "claim_ledger.md",
+                },
+                set(prepared_paths),
+            )
+            self.assertEqual(["prepare", "load"], pointer_events)
 
     def test_start_binds_source_index_and_excerpt_after_cycle_persistence(self):
         for target_name in ("sources_index.jsonl", "sources/src-001.md"):
@@ -2921,6 +3102,66 @@ class TestRevisitCycleAbortCli(unittest.TestCase):
             transitioned,
             expected_sha256=hashlib.sha256(cycle_path.read_bytes()).hexdigest(),
         )
+
+    def test_abort_prepares_pointer_and_current_report_authorities(self):
+        prepare_snapshot = getattr(
+            revisit_cycle_cli,
+            "prepare_authority_snapshot",
+            None,
+        )
+        self.assertTrue(
+            callable(prepare_snapshot),
+            "authority snapshot preparation seam is missing",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _ = self.start_cycle(Path(temp_dir))
+            prepared_paths = []
+            pointer_events = []
+            real_load_pointer = revisit_cycle_cli.load_pointer
+
+            def record_prepared_path(snapshot_workspace, path, digest):
+                relative = Path(path).relative_to(snapshot_workspace).as_posix()
+                prepared_paths.append(relative)
+                if relative == revisit_contract.POINTER_FILENAME:
+                    pointer_events.append("prepare")
+                return prepare_snapshot(snapshot_workspace, path, digest)
+
+            def record_pointer_load(*args, **kwargs):
+                pointer_events.append("load")
+                return real_load_pointer(*args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "prepare_authority_snapshot",
+                    side_effect=record_prepared_path,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "load_pointer",
+                    side_effect=record_pointer_load,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", io.StringIO()),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "abort",
+                        "RC-0001",
+                        "--reason",
+                        "The prepared authority coverage test stopped this cycle.",
+                    ]
+                )
+
+            self.assertEqual(0, result)
+            self.assertEqual(
+                {
+                    "revisit_contract.json",
+                    "reports/final.md",
+                },
+                set(prepared_paths),
+            )
+            self.assertEqual(["prepare", "load"], pointer_events)
 
     def test_abort_accepts_active_and_ready_with_copy_on_write_audit(self):
         for starting_status in ("active", "ready_for_report"):
@@ -4230,6 +4471,124 @@ class TestRevisitPersistence(unittest.TestCase):
                 markdown_path.read_bytes(),
             )
             self.assertEqual(cycle, revisit_contract.load_cycle(workspace, "RC-0001"))
+
+    def test_relative_workspace_accepts_cwd_prefixed_relative_snapshot_key(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        cycle = make_minimal_cycle()
+        authority_bytes = b"validated relative authority\n"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            absolute_workspace = root / "workspace"
+            absolute_workspace.mkdir()
+            authority = absolute_workspace / "authority.md"
+            authority.write_bytes(authority_bytes)
+            workspace = Path("workspace")
+            snapshot_key = workspace / "authority.md"
+            expected_sha256 = hashlib.sha256(authority_bytes).hexdigest()
+            original_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                try:
+                    json_path, markdown_path = persist_cycle(
+                        workspace,
+                        cycle,
+                        expected_sha256=None,
+                        authority_snapshots={snapshot_key: expected_sha256},
+                    )
+                except revisit_contract.RevisitContractError as error:
+                    self.fail(
+                        "cwd-prefixed relative snapshot key was rejected: "
+                        f"{error}"
+                    )
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertTrue(json_path.is_file())
+            self.assertTrue(markdown_path.is_file())
+            self.assertEqual(authority_bytes, authority.read_bytes())
+
+    def test_relative_workspace_rejects_actual_outside_relative_snapshot_key(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        cycle = make_minimal_cycle()
+        authority_bytes = b"same inside and outside authority bytes\n"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            absolute_workspace = root / "workspace"
+            absolute_workspace.mkdir()
+            inside = absolute_workspace / "outside.md"
+            outside = root / "outside.md"
+            inside.write_bytes(authority_bytes)
+            outside.write_bytes(authority_bytes)
+            expected_sha256 = hashlib.sha256(authority_bytes).hexdigest()
+            original_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    "snapshot authority escapes workspace",
+                ):
+                    persist_cycle(
+                        Path("workspace"),
+                        cycle,
+                        expected_sha256=None,
+                        authority_snapshots={
+                            Path("outside.md"): expected_sha256,
+                        },
+                    )
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertEqual(authority_bytes, inside.read_bytes())
+            self.assertEqual(authority_bytes, outside.read_bytes())
+            self.assertFalse(
+                (
+                    absolute_workspace
+                    / revisit_contract.CYCLES_DIRNAME
+                    / "RC-0001.json"
+                ).exists()
+            )
+            self.assertFalse(
+                (
+                    absolute_workspace
+                    / revisit_contract.CYCLES_DIRNAME
+                    / "RC-0001.md"
+                ).exists()
+            )
+
+    def test_prepared_snapshot_rejects_non_text_digest_as_contract_error(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        cycle = make_minimal_cycle()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir).resolve()
+            authority = workspace / "authority.md"
+            authority.write_bytes(b"validated authority\n")
+            snapshot = revisit_store.PreparedAuthoritySnapshot(
+                workspace=workspace,
+                lexical_path=authority,
+                resolved_target=authority,
+                expected_sha256=42,
+            )
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "snapshot digest must be a lowercase SHA-256",
+            ):
+                persist_cycle(
+                    workspace,
+                    cycle,
+                    expected_sha256=None,
+                    authority_snapshots=(snapshot,),
+                )
+
+            self.assertFalse(
+                (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.json").exists()
+            )
+            self.assertFalse(
+                (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md").exists()
+            )
 
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
     def test_snapshot_rejects_same_byte_target_change_before_cycle_persistence(self):

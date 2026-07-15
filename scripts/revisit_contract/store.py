@@ -44,11 +44,16 @@ class RevisitPersistenceRollbackError(RevisitContractError):
 
 
 @dataclass(frozen=True)
-class _AuthoritySnapshot:
+class PreparedAuthoritySnapshot:
     workspace: Path
     lexical_path: Path
     resolved_target: Path
     expected_sha256: str
+
+
+_AuthoritySnapshots = (
+    dict[Path, str] | tuple[PreparedAuthoritySnapshot, ...] | None
+)
 
 
 def canonical_value_bytes(value: Any) -> bytes:
@@ -382,64 +387,135 @@ def _require_expected_bytes(path: Path, expected_sha256: str | None) -> bytes | 
     return original
 
 
-def _normalize_authority_snapshots(
+def _prepare_authority_snapshot(
     workspace: Path,
-    snapshots: dict[Path, str] | None,
+    raw_path: Path,
+    expected_sha256: str,
     *,
     lexical_workspace: Path | None = None,
-) -> dict[Path, _AuthoritySnapshot]:
-    normalized: dict[Path, _AuthoritySnapshot] = {}
+) -> PreparedAuthoritySnapshot:
     input_root = Path(
         os.path.abspath(os.fspath(lexical_workspace or workspace))
     )
-    for raw_path, expected_sha256 in (snapshots or {}).items():
-        raw = Path(raw_path)
-        raw_absolute = Path(
-            os.path.abspath(os.fspath(raw if raw.is_absolute() else input_root / raw))
-        )
-        relative = None
-        for candidate_root in (input_root, workspace):
-            try:
-                relative = raw_absolute.relative_to(candidate_root)
-                break
-            except ValueError:
-                continue
-        if relative is None:
-            raise RevisitContractError(
-                f"snapshot authority escapes workspace: {raw_path}"
-            )
-        lexical_path = workspace / relative
-        resolved_target = lexical_path.resolve(strict=False)
+    raw = Path(raw_path)
+    raw_absolute = Path(os.path.abspath(os.fspath(raw)))
+    relative = None
+    for candidate_root in (input_root, workspace):
         try:
-            resolved_target.relative_to(workspace)
-        except ValueError as exc:
-            raise RevisitContractError(
-                f"snapshot authority escapes workspace: {raw_path}"
-            ) from exc
-        if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(
-            expected_sha256
-        ) is None:
-            raise RevisitContractError(
-                "snapshot digest must be a lowercase SHA-256: "
-                f"{lexical_path.name}"
-            )
-        snapshot = _AuthoritySnapshot(
-            workspace=workspace,
-            lexical_path=lexical_path,
-            resolved_target=resolved_target,
-            expected_sha256=expected_sha256,
+            relative = raw_absolute.relative_to(candidate_root)
+            break
+        except ValueError:
+            continue
+    if relative is None:
+        raise RevisitContractError(
+            f"snapshot authority escapes workspace: {raw_path}"
         )
-        existing = normalized.get(lexical_path)
+    lexical_path = workspace / relative
+    resolved_target = lexical_path.resolve(strict=False)
+    try:
+        resolved_target.relative_to(workspace)
+    except ValueError as exc:
+        raise RevisitContractError(
+            f"snapshot authority escapes workspace: {raw_path}"
+        ) from exc
+    if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(
+        expected_sha256
+    ) is None:
+        raise RevisitContractError(
+            "snapshot digest must be a lowercase SHA-256: "
+            f"{lexical_path.name}"
+        )
+    return PreparedAuthoritySnapshot(
+        workspace=workspace,
+        lexical_path=lexical_path,
+        resolved_target=resolved_target,
+        expected_sha256=expected_sha256,
+    )
+
+
+def prepare_authority_snapshot(
+    workspace: str | Path,
+    lexical_path: Path,
+    expected_sha256: str,
+) -> PreparedAuthoritySnapshot:
+    resolved_workspace = Path(workspace).resolve()
+    return _prepare_authority_snapshot(
+        resolved_workspace,
+        lexical_path,
+        expected_sha256,
+        lexical_workspace=Path(workspace),
+    )
+
+
+def _validate_prepared_authority_snapshot(
+    workspace: Path,
+    snapshot: PreparedAuthoritySnapshot,
+) -> PreparedAuthoritySnapshot:
+    if snapshot.workspace != workspace:
+        raise RevisitContractError(
+            "prepared snapshot belongs to a different workspace: "
+            f"{snapshot.lexical_path.name}"
+        )
+    try:
+        snapshot.lexical_path.relative_to(workspace)
+        snapshot.resolved_target.relative_to(workspace)
+    except ValueError as exc:
+        raise RevisitContractError(
+            "prepared snapshot authority escapes workspace: "
+            f"{snapshot.lexical_path.name}"
+        ) from exc
+    if not isinstance(snapshot.expected_sha256, str) or SHA256_RE.fullmatch(
+        snapshot.expected_sha256
+    ) is None:
+        raise RevisitContractError(
+            "snapshot digest must be a lowercase SHA-256: "
+            f"{snapshot.lexical_path.name}"
+        )
+    return snapshot
+
+
+def _normalize_authority_snapshots(
+    workspace: Path,
+    snapshots: _AuthoritySnapshots,
+    *,
+    lexical_workspace: Path | None = None,
+) -> dict[Path, PreparedAuthoritySnapshot]:
+    normalized: dict[Path, PreparedAuthoritySnapshot] = {}
+    if isinstance(snapshots, dict):
+        prepared = tuple(
+            _prepare_authority_snapshot(
+                workspace,
+                raw_path,
+                expected_sha256,
+                lexical_workspace=lexical_workspace,
+            )
+            for raw_path, expected_sha256 in snapshots.items()
+        )
+    elif snapshots is None:
+        prepared = ()
+    elif isinstance(snapshots, tuple):
+        prepared = snapshots
+    else:
+        raise RevisitContractError(
+            "authority_snapshots must be a path-digest dict or prepared tuple"
+        )
+    for value in prepared:
+        if not isinstance(value, PreparedAuthoritySnapshot):
+            raise RevisitContractError(
+                "prepared authority snapshot has an unsupported value"
+            )
+        snapshot = _validate_prepared_authority_snapshot(workspace, value)
+        existing = normalized.get(snapshot.lexical_path)
         if existing is not None and existing != snapshot:
             raise RevisitContractError(
-                f"conflicting snapshot authority: {lexical_path.name}"
+                f"conflicting snapshot authority: {snapshot.lexical_path.name}"
             )
-        normalized[lexical_path] = snapshot
+        normalized[snapshot.lexical_path] = snapshot
     return normalized
 
 
 def _require_snapshot_generations(
-    snapshots: dict[Path, _AuthoritySnapshot], boundary: str
+    snapshots: dict[Path, PreparedAuthoritySnapshot], boundary: str
 ) -> None:
     for snapshot in snapshots.values():
         path = snapshot.lexical_path
@@ -539,7 +615,7 @@ def persist_pointer(
     pointer: dict[str, Any],
     expected_sha256: str | None,
     *,
-    authority_snapshots: dict[Path, str] | None = None,
+    authority_snapshots: _AuthoritySnapshots = None,
 ) -> Path:
     lexical_workspace = Path(workspace)
     with workspace_transaction(workspace) as locked_workspace:
@@ -572,7 +648,7 @@ def persist_cycle(
     cycle: dict[str, Any],
     expected_sha256: str | None,
     *,
-    authority_snapshots: dict[Path, str] | None = None,
+    authority_snapshots: _AuthoritySnapshots = None,
 ) -> tuple[Path, Path]:
     lexical_workspace = Path(workspace)
     with workspace_transaction(workspace) as locked_workspace:
