@@ -8,12 +8,14 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import scripts.revisit_contract as revisit_contract
 import scripts.revisit_contract.model as revisit_model
+import scripts.revisit_contract.store as revisit_store
 import scripts.revisit_cycle as revisit_cycle_cli
 from scripts.frontier_lifecycle import create_frontier, make_registry
 
@@ -282,7 +284,17 @@ def test_semantic_sha256(value):
     return hashlib.sha256(payload).hexdigest()
 
 
-def make_minimal_cycle():
+def make_minimal_cycle(
+    cycle_id="RC-0001", candidate_revision_id="REV-0002"
+):
+    timestamp = "2026-07-15T00:00:00Z"
+    trigger_id = f"{cycle_id}-TRG-01"
+    claim_id = f"{cycle_id}-CL-01"
+    source_ref = {
+        "kind": "source",
+        "source_id": "src-001",
+        "checked_at": timestamp,
+    }
     intake = {
         "base_revision": {
             "revision_id": "REV-0001",
@@ -295,7 +307,7 @@ def make_minimal_cycle():
             "sha256": "b" * 64,
             "snapshot": {
                 "subject_resolution": {},
-                "research_posture": "decision_support",
+                "research_posture": "revisit",
                 "time_horizon": "long_term",
                 "market_scope": "global",
                 "risk_appetite": "moderate",
@@ -308,28 +320,84 @@ def make_minimal_cycle():
             "frontier_registry_sha256": "c" * 64,
             "max_existing_loop_number": 0,
         },
-        "triggers": [],
-        "selected_claims": [],
+        "triggers": [
+            {
+                "trigger_id": trigger_id,
+                "kind": "upgrade",
+                "statement": "A named milestone changed.",
+                "observed_at": "2026-07-15",
+                "evidence_refs": [copy.deepcopy(source_ref)],
+            }
+        ],
+        "selected_claims": [
+            {
+                "claim_id": claim_id,
+                "statement": "The prior milestone remains decision-relevant.",
+                "source_ref": {
+                    "path": "reports/initial.md",
+                    "sha256": "a" * 64,
+                    "locator": "Claim 1",
+                    "historical_claim_id": None,
+                },
+                "importance": "critical",
+                "selection_reasons": ["trigger_affected"],
+                "trigger_ids": [trigger_id],
+                "inherited_grade": "A",
+                "inherited_confidence": "high",
+                "inherited_evidence": [],
+            }
+        ],
     }
-    return {
+    cycle = {
         "schema_version": 1,
-        "cycle_id": "RC-0001",
-        "candidate_revision_id": "REV-0002",
+        "cycle_id": cycle_id,
+        "candidate_revision_id": candidate_revision_id,
         "status": "active",
-        "created_at": "2026-07-15T00:00:00Z",
+        "created_at": timestamp,
         "completed_at": None,
         "aborted_at": None,
         "abort_reason": None,
         "intake_sha256": test_semantic_sha256(intake),
         "intake": intake,
         "frontier_bindings": [],
-        "claim_resolutions": [],
+        "claim_resolutions": [
+            {
+                "claim_id": claim_id,
+                "status": "inherited-pending-reverification",
+                "revised_statement": None,
+                "current_evidence_refs": [],
+                "counter_evidence_refs": [],
+                "current_grade": None,
+                "current_confidence": None,
+                "bound_frontier_ids": [],
+                "rationale": None,
+                "missing_proof": None,
+                "attempted_loop_ids": [],
+                "attempted_search_refs": [],
+                "verdict_impact": None,
+                "split_child_ids": [],
+            }
+        ],
         "derived_claims": [],
         "decision_assessment": None,
         "rerun_artifacts": [],
         "report_candidate": None,
         "audit": [],
     }
+    return attach_valid_audit(cycle)
+
+
+def make_task1_skeleton_cycle():
+    cycle = make_minimal_cycle()
+    cycle["intake"]["framing"]["snapshot"][
+        "research_posture"
+    ] = "decision_support"
+    cycle["intake"]["triggers"] = []
+    cycle["intake"]["selected_claims"] = []
+    cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+    cycle["claim_resolutions"] = []
+    cycle["audit"] = []
+    return cycle
 
 
 def make_populated_cycle():
@@ -429,7 +497,23 @@ def make_populated_cycle():
             ],
             "verdict_impact": "No action-class change.",
             "split_child_ids": [],
-        }
+        },
+        {
+            "claim_id": derived_id,
+            "status": "confirmed",
+            "revised_statement": None,
+            "current_evidence_refs": [copy.deepcopy(artifact_ref)],
+            "counter_evidence_refs": [],
+            "current_grade": "A",
+            "current_confidence": "high",
+            "bound_frontier_ids": ["frontier-001"],
+            "rationale": "The accepted worker output is traceable.",
+            "missing_proof": None,
+            "attempted_loop_ids": ["loop-001"],
+            "attempted_search_refs": [],
+            "verdict_impact": "Supports the selected claim.",
+            "split_child_ids": [],
+        },
     ]
     cycle["decision_assessment"] = {
         "new_action_class": "Watch with Trigger",
@@ -460,7 +544,7 @@ def make_populated_cycle():
         "report_sha256": "f" * 64,
         "registered_at": timestamp,
     }
-    return cycle
+    return attach_valid_audit(cycle)
 
 
 def nested_value(value, path):
@@ -476,17 +560,48 @@ def set_nested_value(value, path, replacement):
 
 def attach_valid_audit(cycle):
     state = copy.deepcopy(cycle)
-    state.pop("audit")
+    state.pop("audit", None)
+    affected_ids = [
+        cycle["cycle_id"],
+        cycle["candidate_revision_id"],
+        *(trigger["trigger_id"] for trigger in cycle["intake"]["triggers"]),
+        *(claim["claim_id"] for claim in cycle["intake"]["selected_claims"]),
+    ]
     cycle["audit"] = [
         {
             "sequence": 1,
-            "timestamp": "2026-07-15T00:45:00Z",
-            "command": "revisit-start",
-            "affected_ids": [cycle["cycle_id"]],
-            "pre_state_sha256": "0" * 64,
+            "timestamp": cycle["created_at"],
+            "command": "start",
+            "affected_ids": affected_ids,
+            "pre_state_sha256": test_semantic_sha256(None),
             "post_state_sha256": test_semantic_sha256(state),
         }
     ]
+    return cycle
+
+
+def make_history_cycle(cycle_number, revision_number, status="aborted"):
+    cycle = make_minimal_cycle(
+        cycle_id=f"RC-{cycle_number:04d}",
+        candidate_revision_id=f"REV-{revision_number:04d}",
+    )
+    cycle["status"] = status
+    if status == "completed":
+        cycle["completed_at"] = "2026-07-15T02:00:00Z"
+    elif status == "aborted":
+        cycle["aborted_at"] = "2026-07-15T02:00:00Z"
+        cycle["abort_reason"] = "Historical test reservation."
+    attach_valid_audit(cycle)
+    return cycle
+
+
+def make_drifted_task4_cycle():
+    cycle = make_minimal_cycle()
+    cycle["intake"]["framing"]["snapshot"][
+        "research_posture"
+    ] = "decision_support"
+    cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+    attach_valid_audit(cycle)
     return cycle
 
 
@@ -652,6 +767,67 @@ class TestRevisitCycleRegisterCurrentCli(unittest.TestCase):
                             "action_class"
                         ],
                     )
+
+    def test_register_current_restores_pointer_when_report_drifts_after_commit(self):
+        for prior_pointer in (False, True):
+            with self.subTest(prior_pointer=prior_pointer):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, report = make_registration_workspace(Path(temp_dir))
+                    pointer_path = workspace / revisit_contract.POINTER_FILENAME
+                    cycles_path = workspace / revisit_contract.CYCLES_DIRNAME
+                    if prior_pointer:
+                        revisit_contract.persist_pointer(
+                            workspace,
+                            revisit_contract.empty_pointer(),
+                            expected_sha256=None,
+                        )
+                        cycles_path.mkdir()
+                        pointer_before = pointer_path.read_bytes()
+                    else:
+                        pointer_before = None
+                    drifted_report = report.read_bytes() + b"registration drift\n"
+                    cli_store = sys.modules[revisit_cycle_cli.persist_pointer.__module__]
+                    real_atomic_replace = cli_store._atomic_replace
+                    injected = False
+
+                    def replace_then_drift(path, payload):
+                        nonlocal injected
+                        real_atomic_replace(path, payload)
+                        if Path(path).name == revisit_contract.POINTER_FILENAME and not injected:
+                            injected = True
+                            report.write_bytes(drifted_report)
+
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            cli_store,
+                            "_atomic_replace",
+                            side_effect=replace_then_drift,
+                        ),
+                        mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                        mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                    ):
+                        result = revisit_cycle_cli.main(
+                            [
+                                str(workspace),
+                                "register-current",
+                                "--report",
+                                "reports/final.md",
+                                "--action-class",
+                                "Watch with Trigger",
+                            ]
+                        )
+
+                    self.assertEqual(2, result, stderr.getvalue())
+                    self.assertNotIn("CURRENT REPORT REGISTERED", stdout.getvalue())
+                    self.assertEqual(drifted_report, report.read_bytes())
+                    if pointer_before is None:
+                        self.assertFalse(pointer_path.exists())
+                        self.assertFalse(cycles_path.exists())
+                    else:
+                        self.assertEqual(pointer_before, pointer_path.read_bytes())
+                        self.assertEqual([], list(cycles_path.iterdir()))
 
     def test_register_current_rejects_non_exact_action_without_writes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1029,6 +1205,37 @@ class TestRevisitCycleStartCli(unittest.TestCase):
             )
             self.assertEqual(request_before, request_path.read_bytes())
 
+    def test_framing_semantics_and_hash_share_one_raw_generation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _ = make_revisit_start_workspace(Path(temp_dir))
+            framing_path = workspace / "framing_contract.json"
+            original_bytes = framing_path.read_bytes()
+            drifted = json.loads(original_bytes.decode("utf-8"))
+            drifted["time_horizon"] = "drifted horizon"
+            drifted_bytes = (
+                json.dumps(drifted, ensure_ascii=False, indent=2) + "\n"
+            ).encode("utf-8")
+            real_read_bytes = Path.read_bytes
+            injected = False
+
+            def read_then_drift(path):
+                nonlocal injected
+                payload = real_read_bytes(path)
+                if Path(path) == framing_path and not injected:
+                    injected = True
+                    framing_path.write_bytes(drifted_bytes)
+                return payload
+
+            with mock.patch.object(Path, "read_bytes", new=read_then_drift):
+                snapshot, returned_path, digest = revisit_cycle_cli._load_revisit_framing(
+                    workspace
+                )
+
+            self.assertEqual(framing_path, returned_path)
+            self.assertEqual(hashlib.sha256(original_bytes).hexdigest(), digest)
+            self.assertEqual("6-12 months", snapshot["time_horizon"])
+            self.assertEqual(drifted_bytes, framing_path.read_bytes())
+
     def test_start_preserves_request_order_and_validates_artifact_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1378,11 +1585,16 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                     self.assertEqual(workspace_before, snapshot_tree(workspace))
                     self.assertEqual(request_before, request_path.read_bytes())
 
-    def test_start_rejects_concurrent_report_framing_and_registry_hash_drift_before_persistence(self):
+    def test_start_rejects_each_authority_drift_before_persistence(self):
         target_names = (
+            "revisit_contract.json",
             "reports/final.md",
             "framing_contract.json",
             "frontier_registry.json",
+            "evidence_ledger.md",
+            "claim_ledger.md",
+            "sources_index.jsonl",
+            "sources/src-001.md",
         )
         real_create_cycle = revisit_cycle_cli.create_cycle
         for target_name in target_names:
@@ -1431,6 +1643,282 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                             continue
                         self.assertEqual(expected, after[relative], relative)
                     self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
+
+    def test_start_rolls_back_committed_pair_when_report_drifts_after_json_commit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            report_path = workspace / "reports" / "final.md"
+            report_before = report_path.read_bytes()
+            drifted_report = report_before + b"post-commit drift\n"
+            cli_store = sys.modules[revisit_cycle_cli.persist_cycle.__module__]
+            real_atomic_replace = cli_store._atomic_replace
+            injected = False
+
+            def replace_then_drift(path, payload):
+                nonlocal injected
+                real_atomic_replace(path, payload)
+                if Path(path).name == "RC-0001.json" and not injected:
+                    injected = True
+                    report_path.write_bytes(drifted_report)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    cli_store,
+                    "_atomic_replace",
+                    side_effect=replace_then_drift,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "start",
+                        "--intake-file",
+                        str(request_path),
+                    ]
+                )
+
+            self.assertEqual(2, result, stderr.getvalue())
+            self.assertNotIn("REVISIT CYCLE STARTED", stdout.getvalue())
+            self.assertEqual(drifted_report, report_path.read_bytes())
+            self.assertFalse((workspace / "revisit_cycles" / "RC-0001.json").exists())
+            self.assertFalse((workspace / "revisit_cycles" / "RC-0001.md").exists())
+
+    def test_start_rolls_back_committed_pair_when_other_authority_drifts_after_json_commit(self):
+        target_names = (
+            "revisit_contract.json",
+            "framing_contract.json",
+            "frontier_registry.json",
+            "evidence_ledger.md",
+            "claim_ledger.md",
+        )
+        for target_name in target_names:
+            with self.subTest(target=target_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    workspace, request_path = make_revisit_start_workspace(root)
+                    target = workspace / target_name
+                    drifted_bytes = target.read_bytes() + b"post-commit drift\n"
+                    cli_store = sys.modules[revisit_cycle_cli.persist_cycle.__module__]
+                    real_atomic_replace = cli_store._atomic_replace
+                    injected = False
+
+                    def replace_then_drift(path, payload):
+                        nonlocal injected
+                        real_atomic_replace(path, payload)
+                        if Path(path).name == "RC-0001.json" and not injected:
+                            injected = True
+                            target.write_bytes(drifted_bytes)
+
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            cli_store,
+                            "_atomic_replace",
+                            side_effect=replace_then_drift,
+                        ),
+                        mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                        mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                    ):
+                        result = revisit_cycle_cli.main(
+                            [
+                                str(workspace),
+                                "start",
+                                "--intake-file",
+                                str(request_path),
+                            ]
+                        )
+
+                    self.assertEqual(2, result, stderr.getvalue())
+                    self.assertNotIn("REVISIT CYCLE STARTED", stdout.getvalue())
+                    self.assertEqual(drifted_bytes, target.read_bytes())
+                    self.assertFalse((workspace / "revisit_cycles" / "RC-0001.json").exists())
+                    self.assertFalse((workspace / "revisit_cycles" / "RC-0001.md").exists())
+
+    def test_start_binds_source_index_and_excerpt_before_cycle_persistence(self):
+        for target_name in ("sources_index.jsonl", "sources/src-001.md"):
+            with self.subTest(target=target_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    workspace, request_path = make_revisit_start_workspace(root)
+                    target = workspace / target_name
+                    drifted_bytes = target.read_bytes() + b"source drift\n"
+                    real_create_cycle = revisit_cycle_cli.create_cycle
+
+                    def create_then_drift(**kwargs):
+                        cycle = real_create_cycle(**kwargs)
+                        target.write_bytes(drifted_bytes)
+                        return cycle
+
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            revisit_cycle_cli,
+                            "create_cycle",
+                            side_effect=create_then_drift,
+                        ),
+                        mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                        mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                    ):
+                        result = revisit_cycle_cli.main(
+                            [
+                                str(workspace),
+                                "start",
+                                "--intake-file",
+                                str(request_path),
+                            ]
+                        )
+
+                    self.assertEqual(2, result, stderr.getvalue())
+                    self.assertNotIn("REVISIT CYCLE STARTED", stdout.getvalue())
+                    self.assertEqual(drifted_bytes, target.read_bytes())
+                    self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
+
+    def test_start_binds_source_index_and_excerpt_after_cycle_persistence(self):
+        for target_name in ("sources_index.jsonl", "sources/src-001.md"):
+            with self.subTest(target=target_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    workspace, request_path = make_revisit_start_workspace(root)
+                    target = workspace / target_name
+                    drifted_bytes = target.read_bytes() + b"post-commit source drift\n"
+                    cli_store = sys.modules[revisit_cycle_cli.persist_cycle.__module__]
+                    real_atomic_replace = cli_store._atomic_replace
+                    injected = False
+
+                    def replace_then_drift(path, payload):
+                        nonlocal injected
+                        real_atomic_replace(path, payload)
+                        if Path(path).name == "RC-0001.json" and not injected:
+                            injected = True
+                            target.write_bytes(drifted_bytes)
+
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            cli_store,
+                            "_atomic_replace",
+                            side_effect=replace_then_drift,
+                        ),
+                        mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                        mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                    ):
+                        result = revisit_cycle_cli.main(
+                            [
+                                str(workspace),
+                                "start",
+                                "--intake-file",
+                                str(request_path),
+                            ]
+                        )
+
+                    self.assertEqual(2, result, stderr.getvalue())
+                    self.assertNotIn("REVISIT CYCLE STARTED", stdout.getvalue())
+                    self.assertEqual(drifted_bytes, target.read_bytes())
+                    self.assertFalse((workspace / "revisit_cycles" / "RC-0001.json").exists())
+                    self.assertFalse((workspace / "revisit_cycles" / "RC-0001.md").exists())
+
+    def test_source_evaluation_is_bound_to_the_snapshotted_raw_generation(self):
+        for target_name in ("sources_index.jsonl", "sources/src-001.md"):
+            with self.subTest(target=target_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    workspace, request_path = make_revisit_start_workspace(root)
+                    target = workspace / target_name
+                    drifted_bytes = target.read_bytes() + b"evaluation drift\n"
+                    real_evaluate_index = revisit_cycle_cli.evaluate_index
+                    calls = 0
+
+                    def evaluate_then_drift(*args, **kwargs):
+                        nonlocal calls
+                        evaluation = real_evaluate_index(*args, **kwargs)
+                        calls += 1
+                        if calls == 2:
+                            target.write_bytes(drifted_bytes)
+                        return evaluation
+
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            revisit_cycle_cli,
+                            "evaluate_index",
+                            side_effect=evaluate_then_drift,
+                        ),
+                        mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                        mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                    ):
+                        result = revisit_cycle_cli.main(
+                            [
+                                str(workspace),
+                                "start",
+                                "--intake-file",
+                                str(request_path),
+                            ]
+                        )
+
+                    self.assertEqual(2, calls)
+                    self.assertEqual(2, result, stderr.getvalue())
+                    self.assertNotIn("REVISIT CYCLE STARTED", stdout.getvalue())
+                    self.assertEqual(drifted_bytes, target.read_bytes())
+                    self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
+
+    def test_start_refuses_to_rollback_over_third_party_cycle_pair_bytes(self):
+        for authority_suffix in (".json", ".md"):
+            with self.subTest(authority_suffix=authority_suffix):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    workspace, request_path = make_revisit_start_workspace(root)
+                    report_path = workspace / "reports" / "final.md"
+                    drifted_report = report_path.read_bytes() + b"authority drift\n"
+                    third_party_bytes = b"third-party cycle authority\n"
+                    third_party_path = (
+                        workspace / "revisit_cycles" / f"RC-0001{authority_suffix}"
+                    )
+                    cli_store = sys.modules[revisit_cycle_cli.persist_cycle.__module__]
+                    real_atomic_replace = cli_store._atomic_replace
+                    injected = False
+
+                    def replace_then_drift(path, payload):
+                        nonlocal injected
+                        real_atomic_replace(path, payload)
+                        if Path(path).name == "RC-0001.json" and not injected:
+                            injected = True
+                            third_party_path.write_bytes(third_party_bytes)
+                            report_path.write_bytes(drifted_report)
+
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            cli_store,
+                            "_atomic_replace",
+                            side_effect=replace_then_drift,
+                        ),
+                        mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                        mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                    ):
+                        result = revisit_cycle_cli.main(
+                            [
+                                str(workspace),
+                                "start",
+                                "--intake-file",
+                                str(request_path),
+                            ]
+                        )
+
+                    self.assertEqual(2, result, stderr.getvalue())
+                    self.assertIn("rollback refused", stderr.getvalue())
+                    self.assertNotIn("REVISIT CYCLE STARTED", stdout.getvalue())
+                    self.assertEqual(third_party_bytes, third_party_path.read_bytes())
+                    self.assertEqual(drifted_report, report_path.read_bytes())
 
     def test_start_rejects_active_ready_and_completed_unpublished_cycle_conflicts_without_writes(self):
         for status in ("active", "ready_for_report", "completed"):
@@ -1492,6 +1980,220 @@ class TestRevisitCycleStartCli(unittest.TestCase):
         )
 
 
+class TestCanonicalAuthorityConsumers(unittest.TestCase):
+    def test_load_persist_status_and_abort_reject_task4_drift(self):
+        drifted = make_drifted_task4_cycle()
+        pattern = "framing.snapshot.research_posture must be revisit"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            before = snapshot_tree(workspace)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, pattern
+            ):
+                revisit_contract.persist_cycle(
+                    workspace, drifted, expected_sha256=None
+                )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, _ = make_revisit_start_workspace(root)
+            cycle_path = (
+                workspace
+                / revisit_contract.CYCLES_DIRNAME
+                / "RC-0001.json"
+            )
+            cycle_path.write_bytes(
+                revisit_contract.canonical_document_bytes(drifted)
+            )
+            before = snapshot_tree(workspace)
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, pattern
+            ):
+                revisit_contract.load_cycle(workspace, "RC-0001")
+            status = run_revisit_cycle_cli(workspace, "status", "--json")
+            abort = run_revisit_cycle_cli(
+                workspace,
+                "abort",
+                "RC-0001",
+                "--reason",
+                "Canonical authority drifted.",
+            )
+
+            self.assertEqual(2, status.returncode, status.stderr)
+            self.assertIn(pattern, status.stderr)
+            self.assertEqual(2, abort.returncode, abort.stderr)
+            self.assertIn(pattern, abort.stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+
+class TestRevisitHistoryValidation(unittest.TestCase):
+    @staticmethod
+    def initial_pointer():
+        pointer = revisit_contract.empty_pointer()
+        pointer["current_revision"] = make_initial_revision()
+        return pointer
+
+    @staticmethod
+    def published_pointer(revision_number=3, cycle_number=2):
+        pointer = revisit_contract.empty_pointer()
+        current = make_revisit_revision()
+        current.update(
+            {
+                "revision_id": f"REV-{revision_number:04d}",
+                "cycle_id": f"RC-{cycle_number:04d}",
+                "revision_of": f"REV-{revision_number - 1:04d}",
+            }
+        )
+        pointer["current_revision"] = current
+        return pointer
+
+    def required_evaluator(self):
+        evaluator = getattr(revisit_contract, "evaluate_history", None)
+        self.assertTrue(callable(evaluator), "evaluate_history seam is missing")
+        return evaluator
+
+    def test_history_fact_is_pure_and_classifies_lower_equal_future_and_aborted(self):
+        evaluator = self.required_evaluator()
+        pointer = self.published_pointer()
+        cycles = [
+            make_history_cycle(4, 5, "completed"),
+            make_history_cycle(2, 3, "completed"),
+            make_history_cycle(3, 4, "aborted"),
+            make_history_cycle(1, 2, "completed"),
+        ]
+        pointer_before = copy.deepcopy(pointer)
+        cycles_before = copy.deepcopy(cycles)
+
+        fact = evaluator(pointer, cycles)
+
+        self.assertEqual(3, fact.current_revision_number)
+        self.assertEqual(
+            ("RC-0001", "RC-0002", "RC-0003", "RC-0004"),
+            fact.ordered_cycle_ids,
+        )
+        self.assertEqual(4, fact.max_cycle_number)
+        self.assertEqual(5, fact.max_revision_number)
+        self.assertEqual((), fact.nonterminal_cycle_ids)
+        self.assertEqual(("RC-0004",), fact.completed_unpublished_cycle_ids)
+        self.assertEqual((), fact.issues)
+        self.assertEqual(pointer_before, pointer)
+        self.assertEqual(cycles_before, cycles)
+
+        initial = evaluator(self.initial_pointer(), [])
+        self.assertEqual(1, initial.current_revision_number)
+        self.assertEqual((), initial.issues)
+
+    def test_history_validator_and_allocator_reject_every_global_conflict(self):
+        invalid_histories = (
+            (
+                "duplicate candidate",
+                self.initial_pointer(),
+                [
+                    make_history_cycle(1, 2),
+                    make_history_cycle(2, 2),
+                ],
+                "duplicate_candidate_revision",
+                "candidate revision REV-0002 is reserved by multiple cycles",
+            ),
+            (
+                "candidate order",
+                self.initial_pointer(),
+                [
+                    make_history_cycle(1, 3),
+                    make_history_cycle(2, 2),
+                ],
+                "candidate_revision_order",
+                "candidate revisions must increase with cycle allocation order",
+            ),
+            (
+                "multiple nonterminal",
+                self.initial_pointer(),
+                [
+                    make_history_cycle(1, 2, "active"),
+                    make_history_cycle(2, 3, "ready_for_report"),
+                ],
+                "multiple_nonterminal_cycles",
+                "more than one active or ready cycle",
+            ),
+            (
+                "nonterminal and future",
+                self.initial_pointer(),
+                [
+                    make_history_cycle(1, 2, "active"),
+                    make_history_cycle(2, 3, "completed"),
+                ],
+                "nonterminal_with_unpublished",
+                "active or ready cycle cannot coexist with completed-unpublished",
+            ),
+            (
+                "multiple future",
+                self.initial_pointer(),
+                [
+                    make_history_cycle(1, 2, "completed"),
+                    make_history_cycle(2, 3, "completed"),
+                ],
+                "multiple_unpublished_cycles",
+                "more than one completed-unpublished cycle",
+            ),
+            (
+                "equal current conflict",
+                self.published_pointer(revision_number=2, cycle_number=2),
+                [make_history_cycle(1, 2, "completed")],
+                "current_candidate_cycle_conflict",
+                "completed current candidate conflicts with pointer cycle lineage",
+            ),
+            (
+                "missing current lineage",
+                self.published_pointer(revision_number=2, cycle_number=1),
+                [make_history_cycle(1, 2, "aborted")],
+                "current_lineage_missing",
+                "current pointer has no matching completed cycle",
+            ),
+        )
+        evaluator = self.required_evaluator()
+        for label, pointer, cycles, code, pattern in invalid_histories:
+            with self.subTest(case=label):
+                fact = evaluator(pointer, cycles)
+                self.assertTrue(fact.issues, "global conflict was accepted")
+                self.assertEqual(code, fact.issues[0].code)
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError, pattern
+                ):
+                    revisit_contract.allocate_cycle_and_revision_ids(
+                        pointer, cycles
+                    )
+
+    def test_start_rejects_shared_duplicate_reservation_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            for cycle in (
+                make_history_cycle(1, 2, "aborted"),
+                make_history_cycle(2, 2, "aborted"),
+            ):
+                revisit_contract.persist_cycle(
+                    workspace, cycle, expected_sha256=None
+                )
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "start",
+                "--intake-file",
+                str(request_path),
+            )
+
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertIn(
+                "candidate revision REV-0002 is reserved by multiple cycles",
+                result.stderr,
+            )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+
 class TestRevisitCycleAllocation(unittest.TestCase):
     def test_allocation_uses_maximum_reserved_ids_without_filling_gaps(self):
         pointer = revisit_contract.empty_pointer()
@@ -1509,15 +2211,18 @@ class TestRevisitCycleAllocation(unittest.TestCase):
         aborted["aborted_at"] = "2026-07-15T01:00:00Z"
         aborted["abort_reason"] = "Evidence access ended."
         aborted["candidate_revision_id"] = "REV-0002"
+        attach_valid_audit(aborted)
 
-        completed = make_minimal_cycle()
-        completed["cycle_id"] = "RC-0004"
-        completed["candidate_revision_id"] = "REV-0007"
+        completed = make_minimal_cycle(
+            cycle_id="RC-0004", candidate_revision_id="REV-0007"
+        )
         completed["status"] = "completed"
         completed["completed_at"] = "2026-07-15T02:00:00Z"
+        attach_valid_audit(completed)
+        published = make_history_cycle(3, 3, "completed")
 
         original_pointer = copy.deepcopy(pointer)
-        original_cycles = copy.deepcopy([aborted, completed])
+        original_cycles = copy.deepcopy([aborted, published, completed])
         allocate = getattr(
             revisit_contract, "allocate_cycle_and_revision_ids", None
         )
@@ -1525,10 +2230,10 @@ class TestRevisitCycleAllocation(unittest.TestCase):
 
         self.assertEqual(
             ("RC-0005", "REV-0008"),
-            allocate(pointer, [aborted, completed]),
+            allocate(pointer, [aborted, published, completed]),
         )
         self.assertEqual(original_pointer, pointer)
-        self.assertEqual(original_cycles, [aborted, completed])
+        self.assertEqual(original_cycles, [aborted, published, completed])
 
     def test_allocation_rejects_cycle_or_revision_overflow(self):
         allocate = getattr(
@@ -1536,10 +2241,9 @@ class TestRevisitCycleAllocation(unittest.TestCase):
         )
         self.assertTrue(callable(allocate), "allocation helper is missing")
         pointer = revisit_contract.empty_pointer()
-        pointer["current_revision"] = make_revisit_revision()
+        pointer["current_revision"] = make_initial_revision()
 
-        last_cycle = make_minimal_cycle()
-        last_cycle["cycle_id"] = "RC-9999"
+        last_cycle = make_minimal_cycle(cycle_id="RC-9999")
         with self.assertRaisesRegex(
             revisit_contract.RevisitContractError, "cycle ID space is exhausted"
         ):
@@ -1555,13 +2259,29 @@ class TestRevisitCycleAllocation(unittest.TestCase):
         with self.assertRaisesRegex(
             revisit_contract.RevisitContractError, "revision ID space is exhausted"
         ):
-            allocate(pointer, [])
+            allocate(pointer, [make_history_cycle(9998, 9999, "completed")])
 
 
 class TestRevisitCycleStatusCli(unittest.TestCase):
     def make_status_workspace(self, root, condition):
         workspace = root / "workspace"
         workspace.mkdir()
+        (workspace / "state.json").write_text(
+            json.dumps(
+                {
+                    "subject": "TEST",
+                    "mode": "ticker",
+                    "current_stage": "stage_5",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        report_payload = complete_ticker_report_bytes()
+        report_path = workspace / "reports" / "initial.md"
+        report_path.parent.mkdir()
+        report_path.write_bytes(report_payload)
         pointer = revisit_contract.empty_pointer()
         cycle = None
 
@@ -1586,6 +2306,12 @@ class TestRevisitCycleStatusCli(unittest.TestCase):
             cycle["completed_at"] = "2026-07-15T03:00:00Z"
         if condition == "published":
             pointer["current_revision"] = make_revisit_revision()
+        if pointer["current_revision"] is not None:
+            pointer["current_revision"]["report_sha256"] = hashlib.sha256(
+                report_payload
+            ).hexdigest()
+        if cycle is not None:
+            attach_valid_audit(cycle)
 
         (workspace / revisit_contract.POINTER_FILENAME).write_bytes(
             revisit_contract.canonical_document_bytes(pointer)
@@ -1747,6 +2473,170 @@ class TestRevisitCycleStatusCli(unittest.TestCase):
             self.assertIn("cycle authority is missing: RC-9999", missing.stderr)
             self.assertEqual(before, snapshot_tree(workspace))
 
+    def test_status_rejects_sector_mode_before_reading_revisit_authority(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self.make_status_workspace(Path(temp_dir), "registered")
+            state_path = workspace / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["mode"] = "sector"
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            (workspace / revisit_contract.POINTER_FILENAME).write_text(
+                "{broken", encoding="utf-8"
+            )
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(workspace, "status", "--json")
+
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertIn(
+                "status is unavailable for Sector workspaces",
+                result.stderr,
+            )
+            self.assertNotIn("malformed JSON", result.stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_status_reports_current_report_drift_and_withholds_next_action(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self.make_status_workspace(Path(temp_dir), "registered")
+            report_path = workspace / "reports" / "initial.md"
+            report_path.write_bytes(report_path.read_bytes() + b"drift\n")
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(workspace, "status", "--json")
+            text_result = run_revisit_cycle_cli(workspace, "status")
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(0, text_result.returncode, text_result.stderr)
+            summary = json.loads(result.stdout)
+            self.assertTrue(summary["issues"])
+            self.assertIn("current_report_invalid", summary["issues"][0])
+            self.assertIsNone(summary["next_legal_command"])
+            self.assertNotIn("start --intake-file REQUEST", result.stdout)
+            self.assertIn("ISSUE: current_report_invalid", text_result.stdout)
+            self.assertIn("NEXT LEGAL COMMAND: none", text_result.stdout)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_status_reports_global_history_conflicts_without_writes(self):
+        cases = (
+            (
+                "duplicate reservation",
+                (
+                    make_history_cycle(1, 2, "aborted"),
+                    make_history_cycle(2, 2, "aborted"),
+                ),
+                None,
+                "duplicate_candidate_revision",
+            ),
+            (
+                "multiple active",
+                (
+                    make_history_cycle(1, 2, "active"),
+                    make_history_cycle(2, 3, "ready_for_report"),
+                ),
+                None,
+                "multiple_nonterminal_cycles",
+            ),
+            (
+                "active and unpublished",
+                (
+                    make_history_cycle(1, 2, "active"),
+                    make_history_cycle(2, 3, "completed"),
+                ),
+                None,
+                "nonterminal_with_unpublished",
+            ),
+            (
+                "bad current lineage",
+                (make_history_cycle(1, 2, "completed"),),
+                {
+                    "revision_id": "REV-0002",
+                    "cycle_id": "RC-0002",
+                    "revision_of": "REV-0001",
+                },
+                "current_candidate_cycle_conflict",
+            ),
+        )
+        for label, cycles, pointer_update, expected_code in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace = self.make_status_workspace(
+                        Path(temp_dir), "registered"
+                    )
+                    for cycle in cycles:
+                        revisit_contract.persist_cycle(
+                            workspace, cycle, expected_sha256=None
+                        )
+                    if pointer_update is not None:
+                        pointer_path = workspace / revisit_contract.POINTER_FILENAME
+                        pointer = revisit_contract.load_pointer(workspace)
+                        pointer["current_revision"].update(pointer_update)
+                        pointer_path.write_bytes(
+                            revisit_contract.canonical_document_bytes(pointer)
+                        )
+                    before = snapshot_tree(workspace)
+
+                    result = run_revisit_cycle_cli(
+                        workspace, "status", "--json"
+                    )
+
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    summary = json.loads(result.stdout)
+                    self.assertTrue(
+                        any(expected_code in issue for issue in summary["issues"]),
+                        summary,
+                    )
+                    self.assertIsNone(summary["next_legal_command"])
+                    self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_status_filter_changes_display_only_and_clean_history_stays_actionable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self.make_status_workspace(Path(temp_dir), "registered")
+            for cycle in (
+                make_history_cycle(1, 2, "aborted"),
+                make_history_cycle(2, 2, "aborted"),
+            ):
+                revisit_contract.persist_cycle(
+                    workspace, cycle, expected_sha256=None
+                )
+            before = snapshot_tree(workspace)
+
+            filtered = run_revisit_cycle_cli(
+                workspace, "status", "RC-0001", "--json"
+            )
+
+            self.assertEqual(0, filtered.returncode, filtered.stderr)
+            filtered_summary = json.loads(filtered.stdout)
+            self.assertEqual(
+                ["RC-0001"],
+                [cycle["cycle_id"] for cycle in filtered_summary["cycles"]],
+            )
+            self.assertTrue(
+                any(
+                    "duplicate_candidate_revision" in issue
+                    for issue in filtered_summary["issues"]
+                )
+            )
+            self.assertIsNone(filtered_summary["next_legal_command"])
+            self.assertEqual(before, snapshot_tree(workspace))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self.make_status_workspace(Path(temp_dir), "published")
+            before = snapshot_tree(workspace)
+
+            clean = run_revisit_cycle_cli(workspace, "status", "--json")
+
+            self.assertEqual(0, clean.returncode, clean.stderr)
+            clean_summary = json.loads(clean.stdout)
+            self.assertEqual([], clean_summary["issues"])
+            self.assertEqual(
+                "start --intake-file REQUEST",
+                clean_summary["next_legal_command"],
+            )
+            self.assertEqual(before, snapshot_tree(workspace))
+
     def test_lower_completed_revision_is_published_history_and_does_not_block_later_start(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1768,11 +2658,13 @@ class TestRevisitCycleStatusCli(unittest.TestCase):
                 ("RC-0001", "REV-0002"),
                 ("RC-0002", "REV-0003"),
             ):
-                cycle = make_minimal_cycle()
-                cycle["cycle_id"] = cycle_id
-                cycle["candidate_revision_id"] = candidate_revision_id
+                cycle = make_minimal_cycle(
+                    cycle_id=cycle_id,
+                    candidate_revision_id=candidate_revision_id,
+                )
                 cycle["status"] = "completed"
                 cycle["completed_at"] = "2026-07-15T03:00:00Z"
+                attach_valid_audit(cycle)
                 revisit_contract.persist_cycle(
                     workspace, cycle, expected_sha256=None
                 )
@@ -1992,6 +2884,55 @@ class TestRevisitCycleAbortCli(unittest.TestCase):
                         result.stderr,
                     )
                     self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_abort_restores_exact_prior_pair_when_live_authority_drifts_after_commit(self):
+        for target_name in ("revisit_contract.json", "reports/final.md"):
+            with self.subTest(target=target_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, _ = self.start_cycle(Path(temp_dir))
+                    json_path = workspace / "revisit_cycles" / "RC-0001.json"
+                    markdown_path = workspace / "revisit_cycles" / "RC-0001.md"
+                    prior_json = json_path.read_bytes()
+                    prior_markdown = markdown_path.read_bytes()
+                    target = workspace / target_name
+                    drifted_bytes = target.read_bytes() + b"abort authority drift\n"
+                    cli_store = sys.modules[revisit_cycle_cli.persist_cycle.__module__]
+                    real_atomic_replace = cli_store._atomic_replace
+                    injected = False
+
+                    def replace_then_drift(path, payload):
+                        nonlocal injected
+                        real_atomic_replace(path, payload)
+                        if Path(path).name == "RC-0001.json" and not injected:
+                            injected = True
+                            target.write_bytes(drifted_bytes)
+
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            cli_store,
+                            "_atomic_replace",
+                            side_effect=replace_then_drift,
+                        ),
+                        mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                        mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                    ):
+                        result = revisit_cycle_cli.main(
+                            [
+                                str(workspace),
+                                "abort",
+                                "RC-0001",
+                                "--reason",
+                                "Abort with a drifting authority.",
+                            ]
+                        )
+
+                    self.assertEqual(2, result, stderr.getvalue())
+                    self.assertNotIn("REVISIT CYCLE ABORTED", stdout.getvalue())
+                    self.assertEqual(drifted_bytes, target.read_bytes())
+                    self.assertEqual(prior_json, json_path.read_bytes())
+                    self.assertEqual(prior_markdown, markdown_path.read_bytes())
 
     def test_aborted_cycle_reserves_cycle_and_revision_ids_without_cleanup(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2519,6 +3460,353 @@ class TestRevisitStoreBytes(unittest.TestCase):
         self.assertEqual(expected, sha256_bytes(payload))
 
 
+class TestRevisitWorkspaceTransaction(unittest.TestCase):
+    def start_barrier_cli(self, workspace, ready, release, *arguments):
+        child_code = "\n".join(
+            (
+                "import sys, time",
+                "from pathlib import Path",
+                "from scripts.revisit_cycle import main",
+                "ready, release = map(Path, sys.argv[1:3])",
+                "ready.write_text('ready', encoding='utf-8')",
+                "deadline = time.monotonic() + 10",
+                "while not release.exists():",
+                "    if time.monotonic() >= deadline:",
+                "        raise RuntimeError('barrier release timed out')",
+                "    time.sleep(0.01)",
+                "raise SystemExit(main(sys.argv[3:]))",
+            )
+        )
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                child_code,
+                str(ready),
+                str(release),
+                str(workspace),
+                *arguments,
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            encoding="utf-8",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.addCleanup(self.reap_child, child)
+        return child
+
+    @staticmethod
+    def reap_child(child):
+        if child.poll() is None:
+            child.kill()
+        child.communicate()
+
+    def wait_for_ready(self, ready_paths, children):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if all(path.exists() for path in ready_paths):
+                return
+            if any(child.poll() is not None for child in children):
+                break
+            time.sleep(0.01)
+        details = []
+        for child in children:
+            if child.poll() is not None:
+                stdout, stderr = child.communicate()
+                details.append(f"rc={child.returncode} stdout={stdout} stderr={stderr}")
+        self.fail(f"children did not reach barrier: {'; '.join(details)}")
+
+    def finish_children(self, children):
+        results = []
+        for child in children:
+            try:
+                stdout, stderr = child.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                stdout, stderr = child.communicate()
+                self.fail(f"concurrent CLI timed out: {stdout}{stderr}")
+            results.append((child.returncode, stdout, stderr))
+        return results
+
+    def test_transaction_blocks_a_real_process_and_direct_persistence_reenters(self):
+        transaction = getattr(revisit_contract, "workspace_transaction", None)
+        self.assertTrue(callable(transaction), "workspace_transaction export is missing")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ready = root / "child-ready"
+            acquired = root / "child-acquired"
+            child_code = "\n".join(
+                (
+                    "import sys",
+                    "from pathlib import Path",
+                    "from scripts import revisit_contract",
+                    "ready, acquired, workspace = map(Path, sys.argv[1:4])",
+                    "ready.write_text('ready', encoding='utf-8')",
+                    "with revisit_contract.workspace_transaction(workspace):",
+                    "    acquired.write_text('acquired', encoding='utf-8')",
+                )
+            )
+
+            with transaction(workspace):
+                revisit_contract.persist_pointer(
+                    workspace,
+                    revisit_contract.empty_pointer(),
+                    expected_sha256=None,
+                )
+                child = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-B",
+                        "-c",
+                        child_code,
+                        str(ready),
+                        str(acquired),
+                        str(workspace),
+                    ],
+                    cwd=REPO_ROOT,
+                    text=True,
+                    encoding="utf-8",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                self.addCleanup(
+                    lambda: (
+                        child.kill() if child.poll() is None else None,
+                        child.communicate(),
+                    )
+                )
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists(), "child did not reach the OS-lock boundary")
+                self.assertIsNone(child.poll(), "child crossed the held workspace lock")
+                self.assertFalse(acquired.exists(), "child acquired the held workspace lock")
+
+            try:
+                stdout, stderr = child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                stdout, stderr = child.communicate()
+                self.fail(f"child remained blocked after release: {stdout}{stderr}")
+            self.assertEqual(0, child.returncode, stderr)
+            self.assertEqual("acquired", acquired.read_text(encoding="utf-8"))
+
+    def test_status_enters_the_workspace_transaction_before_reading_authority(self):
+        transaction = revisit_contract.workspace_transaction
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _ = make_revisit_start_workspace(Path(temp_dir))
+            with transaction(workspace):
+                child = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(REVISIT_CYCLE_SCRIPT),
+                        str(workspace),
+                        "status",
+                        "--json",
+                    ],
+                    text=True,
+                    encoding="utf-8",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                self.addCleanup(
+                    lambda: (
+                        child.kill() if child.poll() is None else None,
+                        child.communicate(),
+                    )
+                )
+                with self.assertRaises(
+                    subprocess.TimeoutExpired,
+                    msg="status read authority outside the workspace transaction",
+                ):
+                    child.wait(timeout=1)
+
+            stdout, stderr = child.communicate(timeout=5)
+            self.assertEqual(0, child.returncode, stderr)
+            self.assertEqual("ticker", json.loads(stdout)["mode"])
+
+    def test_two_real_process_starts_serialize_to_one_cycle_winner(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            release = root / "release-starts"
+            ready_paths = [root / "start-one-ready", root / "start-two-ready"]
+            pointer_before = (workspace / revisit_contract.POINTER_FILENAME).read_bytes()
+            with revisit_contract.workspace_transaction(workspace):
+                children = [
+                    self.start_barrier_cli(
+                        workspace,
+                        ready,
+                        release,
+                        "start",
+                        "--intake-file",
+                        str(request_path),
+                    )
+                    for ready in ready_paths
+                ]
+                self.wait_for_ready(ready_paths, children)
+                release.write_text("release", encoding="utf-8")
+                time.sleep(0.1)
+                self.assertTrue(
+                    all(child.poll() is None for child in children),
+                    "a start crossed the already-held workspace transaction",
+                )
+
+            results = self.finish_children(children)
+            self.assertEqual([0, 2], sorted(result[0] for result in results))
+            self.assertEqual(1, sum("REVISIT CYCLE STARTED" in row[1] for row in results))
+            self.assertEqual(1, sum("cycle conflict: RC-0001 is active" in row[2] for row in results))
+            self.assertEqual(("RC-0001",), revisit_contract.list_cycle_ids(workspace))
+            self.assertEqual("active", revisit_contract.load_cycle(workspace, "RC-0001")["status"])
+            self.assertEqual(
+                pointer_before,
+                (workspace / revisit_contract.POINTER_FILENAME).read_bytes(),
+            )
+
+    def test_two_real_process_aborts_preserve_the_first_terminal_authority(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            started = run_revisit_cycle_cli(
+                workspace, "start", "--intake-file", str(request_path)
+            )
+            self.assertEqual(0, started.returncode, started.stderr)
+            release = root / "release-aborts"
+            ready_paths = [root / "abort-one-ready", root / "abort-two-ready"]
+            reasons = ("First concurrent reason.", "Second concurrent reason.")
+            with revisit_contract.workspace_transaction(workspace):
+                children = [
+                    self.start_barrier_cli(
+                        workspace,
+                        ready,
+                        release,
+                        "abort",
+                        "RC-0001",
+                        "--reason",
+                        reason,
+                    )
+                    for ready, reason in zip(ready_paths, reasons, strict=True)
+                ]
+                self.wait_for_ready(ready_paths, children)
+                release.write_text("release", encoding="utf-8")
+                time.sleep(0.1)
+                self.assertTrue(all(child.poll() is None for child in children))
+
+            results = self.finish_children(children)
+            self.assertEqual([0, 2], sorted(result[0] for result in results))
+            cycle = revisit_contract.load_cycle(workspace, "RC-0001")
+            self.assertEqual("aborted", cycle["status"])
+            self.assertIn(cycle["abort_reason"], reasons)
+            self.assertEqual(1, sum(row["command"] == "abort" for row in cycle["audit"]))
+            self.assertEqual(1, sum("REVISIT CYCLE ABORTED" in row[1] for row in results))
+            self.assertEqual(1, sum("cannot abort cycle RC-0001 with status aborted" in row[2] for row in results))
+
+    def test_real_process_start_and_abort_never_observe_torn_history(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            started = run_revisit_cycle_cli(
+                workspace, "start", "--intake-file", str(request_path)
+            )
+            self.assertEqual(0, started.returncode, started.stderr)
+            release = root / "release-start-abort"
+            ready_paths = [root / "later-start-ready", root / "abort-ready"]
+            with revisit_contract.workspace_transaction(workspace):
+                start_child = self.start_barrier_cli(
+                    workspace,
+                    ready_paths[0],
+                    release,
+                    "start",
+                    "--intake-file",
+                    str(request_path),
+                )
+                abort_child = self.start_barrier_cli(
+                    workspace,
+                    ready_paths[1],
+                    release,
+                    "abort",
+                    "RC-0001",
+                    "--reason",
+                    "Concurrent explicit abort.",
+                )
+                children = [start_child, abort_child]
+                self.wait_for_ready(ready_paths, children)
+                release.write_text("release", encoding="utf-8")
+                time.sleep(0.1)
+                self.assertTrue(all(child.poll() is None for child in children))
+
+            start_result, abort_result = self.finish_children(children)
+            self.assertEqual(0, abort_result[0], abort_result[2])
+            self.assertIn(start_result[0], {0, 2})
+            first = revisit_contract.load_cycle(workspace, "RC-0001")
+            self.assertEqual("aborted", first["status"])
+            if start_result[0] == 0:
+                self.assertEqual(("RC-0001", "RC-0002"), revisit_contract.list_cycle_ids(workspace))
+                second = revisit_contract.load_cycle(workspace, "RC-0002")
+                self.assertEqual("REV-0003", second["candidate_revision_id"])
+                self.assertEqual("active", second["status"])
+            else:
+                self.assertEqual(("RC-0001",), revisit_contract.list_cycle_ids(workspace))
+                self.assertIn("cycle conflict: RC-0001 is active", start_result[2])
+
+    def test_two_real_process_initial_registrations_preserve_one_winning_pointer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, first_report = make_registration_workspace(root)
+            second_report = workspace / "reports" / "second.md"
+            second_report.write_bytes(complete_ticker_report_bytes())
+            report_bytes = {
+                "reports/final.md": first_report.read_bytes(),
+                "reports/second.md": second_report.read_bytes(),
+            }
+            release = root / "release-register"
+            ready_paths = [root / "register-one-ready", root / "register-two-ready"]
+            registrations = (
+                ("reports/final.md", "Watch with Trigger"),
+                ("reports/second.md", "Reject"),
+            )
+            with revisit_contract.workspace_transaction(workspace):
+                children = [
+                    self.start_barrier_cli(
+                        workspace,
+                        ready,
+                        release,
+                        "register-current",
+                        "--report",
+                        report_path,
+                        "--action-class",
+                        action_class,
+                    )
+                    for ready, (report_path, action_class) in zip(
+                        ready_paths, registrations, strict=True
+                    )
+                ]
+                self.wait_for_ready(ready_paths, children)
+                release.write_text("release", encoding="utf-8")
+                time.sleep(0.1)
+                self.assertTrue(all(child.poll() is None for child in children))
+
+            results = self.finish_children(children)
+            self.assertEqual([0, 2], sorted(result[0] for result in results))
+            pointer = revisit_contract.load_pointer(workspace)["current_revision"]
+            winner_index = next(index for index, row in enumerate(results) if row[0] == 0)
+            winning_report, winning_action = registrations[winner_index]
+            self.assertEqual(winning_report, pointer["report_path"])
+            self.assertEqual(winning_action, pointer["action_class"])
+            self.assertEqual(
+                hashlib.sha256(report_bytes[winning_report]).hexdigest(),
+                pointer["report_sha256"],
+            )
+            self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
+            self.assertEqual(report_bytes["reports/final.md"], first_report.read_bytes())
+            self.assertEqual(report_bytes["reports/second.md"], second_report.read_bytes())
+
+
 class TestRevisitStoreReads(unittest.TestCase):
     def required_callable(self, name):
         operation = getattr(revisit_contract, name, None)
@@ -2608,9 +3896,9 @@ class TestRevisitStoreReads(unittest.TestCase):
         load_cycle = self.required_callable("load_cycle")
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
-            second = make_minimal_cycle()
-            second["cycle_id"] = "RC-0002"
-            second["candidate_revision_id"] = "REV-0003"
+            second = make_minimal_cycle(
+                cycle_id="RC-0002", candidate_revision_id="REV-0003"
+            )
             self.write_cycle(workspace, second)
             self.write_cycle(workspace, make_minimal_cycle())
             (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md").write_text(
@@ -2652,6 +3940,7 @@ class TestRevisitRender(unittest.TestCase):
         cycle = make_populated_cycle()
         cycle["intake"]["triggers"][0]["statement"] = "Revenue | baseline changed."
         cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        attach_valid_audit(cycle)
 
         first = render_cycle_markdown(cycle)
         second = render_cycle_markdown(copy.deepcopy(cycle))
@@ -2722,9 +4011,6 @@ class TestRevisitPersistence(unittest.TestCase):
         persist_cycle = self.required_callable("persist_cycle")
         original = make_minimal_cycle()
         updated = make_minimal_cycle()
-        updated["status"] = "aborted"
-        updated["aborted_at"] = "2026-07-15T02:00:00Z"
-        updated["abort_reason"] = "\ud800"
         original_json = revisit_contract.canonical_document_bytes(original)
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2739,6 +4025,9 @@ class TestRevisitPersistence(unittest.TestCase):
                 with mock.patch(
                     "scripts.revisit_contract.store.cycle_markdown_path",
                     return_value=json_path.resolve(),
+                ), mock.patch(
+                    "scripts.revisit_contract.store.render_cycle_markdown",
+                    side_effect=AssertionError("render must not be reached"),
                 ):
                     persist_cycle(
                         workspace,
@@ -2759,6 +4048,7 @@ class TestRevisitPersistence(unittest.TestCase):
         original = make_minimal_cycle()
         updated = make_minimal_cycle()
         updated["status"] = "ready_for_report"
+        attach_valid_audit(updated)
         original_json = revisit_contract.canonical_document_bytes(original)
         original_markdown = b"prior mirror\r\nwith exact CRLF bytes\r\n"
         real_replace = os.replace
@@ -2840,6 +4130,7 @@ class TestRevisitPersistence(unittest.TestCase):
         original = make_minimal_cycle()
         updated = make_minimal_cycle()
         updated["status"] = "ready_for_report"
+        attach_valid_audit(updated)
         original_json = revisit_contract.canonical_document_bytes(original)
         original_markdown = b"prior mirror\r\n"
         real_replace = os.replace
@@ -2897,15 +4188,19 @@ class TestRevisitPersistence(unittest.TestCase):
     def test_render_payload_failure_writes_neither_cycle_file(self):
         persist_cycle = self.required_callable("persist_cycle")
         cycle = make_minimal_cycle()
-        cycle["status"] = "aborted"
-        cycle["aborted_at"] = "2026-07-15T02:00:00Z"
-        cycle["abort_reason"] = "\ud800"
         self.assertIs(cycle, revisit_contract.validate_cycle(cycle))
 
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
-            with self.assertRaises(UnicodeEncodeError):
-                persist_cycle(workspace, cycle, expected_sha256=None)
+            render_error = UnicodeEncodeError(
+                "utf-8", "\ud800", 0, 1, "surrogates not allowed"
+            )
+            with mock.patch(
+                "scripts.revisit_contract.store.render_cycle_markdown",
+                side_effect=render_error,
+            ):
+                with self.assertRaises(UnicodeEncodeError):
+                    persist_cycle(workspace, cycle, expected_sha256=None)
             self.assertFalse(
                 (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md").exists()
             )
@@ -2918,6 +4213,7 @@ class TestRevisitPersistence(unittest.TestCase):
         original = make_minimal_cycle()
         updated = make_minimal_cycle()
         updated["status"] = "ready_for_report"
+        attach_valid_audit(updated)
         original_json = revisit_contract.canonical_document_bytes(original)
         original_markdown = b"prior mirror\r\nexact bytes\r\n"
 
@@ -3005,13 +4301,15 @@ class TestRevisitAuditMutation(unittest.TestCase):
         self.assertEqual(previous_before, previous)
         self.assertEqual(updated_before, updated)
         self.assertIsNot(result, updated)
-        self.assertEqual(1, result["audit"][0]["sequence"])
+        self.assertEqual(previous["audit"], result["audit"][:-1])
+        self.assertEqual(2, result["audit"][-1]["sequence"])
         self.assertEqual(
-            test_semantic_sha256(None), result["audit"][0]["pre_state_sha256"]
+            previous["audit"][-1]["post_state_sha256"],
+            result["audit"][-1]["pre_state_sha256"],
         )
         self.assertEqual(
             revisit_contract.cycle_state_sha256(updated),
-            result["audit"][0]["post_state_sha256"],
+            result["audit"][-1]["post_state_sha256"],
         )
         self.assertIs(result, revisit_contract.validate_cycle(result))
 
@@ -3019,13 +4317,7 @@ class TestRevisitAuditMutation(unittest.TestCase):
         with_audit = getattr(revisit_model, "with_audit", None)
         self.assertTrue(callable(with_audit), "with_audit helper is missing")
         base = make_minimal_cycle()
-        first = with_audit(
-            base,
-            base,
-            command="start",
-            affected_ids=["RC-0001"],
-            timestamp="2026-07-15T03:00:00Z",
-        )
+        first = base
         updated = copy.deepcopy(first)
         updated["status"] = "ready_for_report"
         tampered_audit_text = copy.deepcopy(updated)
@@ -3080,6 +4372,207 @@ class TestCycleSchema(unittest.TestCase):
             callable(getattr(revisit_contract, "validate_cycle", None)),
             "validate_cycle export is missing",
         )
+
+    def test_task4_rejects_the_temporary_empty_intake_and_audit_skeleton(self):
+        skeleton = make_task1_skeleton_cycle()
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "framing.snapshot.research_posture must be revisit",
+        ):
+            revisit_contract.validate_cycle(skeleton)
+
+    def test_task4_intake_cross_field_invariants_are_canonical(self):
+        def too_many_triggers(cycle):
+            template = cycle["intake"]["triggers"][0]
+            cycle["intake"]["triggers"] = []
+            for number in range(1, 101):
+                trigger = copy.deepcopy(template)
+                trigger["trigger_id"] = f"RC-0001-TRG-{number:02d}"
+                cycle["intake"]["triggers"].append(trigger)
+
+        def too_many_claims(cycle):
+            template = cycle["intake"]["selected_claims"][0]
+            cycle["intake"]["selected_claims"] = []
+            for number in range(1, 101):
+                claim = copy.deepcopy(template)
+                claim["claim_id"] = f"RC-0001-CL-{number:02d}"
+                cycle["intake"]["selected_claims"].append(claim)
+
+        def orphan_trigger(cycle):
+            trigger = copy.deepcopy(cycle["intake"]["triggers"][0])
+            trigger["trigger_id"] = "RC-0001-TRG-02"
+            cycle["intake"]["triggers"].append(trigger)
+
+        cases = (
+            (
+                "empty triggers",
+                lambda cycle: cycle["intake"].__setitem__("triggers", []),
+                "cycle.intake.triggers must not be empty",
+            ),
+            ("too many triggers", too_many_triggers, "cannot exceed 99"),
+            (
+                "empty selected claims",
+                lambda cycle: cycle["intake"].__setitem__("selected_claims", []),
+                "cycle.intake.selected_claims must not be empty",
+            ),
+            ("too many selected claims", too_many_claims, "cannot exceed 99"),
+            (
+                "empty trigger evidence",
+                lambda cycle: cycle["intake"]["triggers"][0].__setitem__(
+                    "evidence_refs", []
+                ),
+                "trigger evidence_refs must not be empty",
+            ),
+            (
+                "nonsequential trigger ID",
+                lambda cycle: (
+                    cycle["intake"]["triggers"][0].__setitem__(
+                        "trigger_id", "RC-0001-TRG-02"
+                    ),
+                    cycle["intake"]["selected_claims"][0].__setitem__(
+                        "trigger_ids", ["RC-0001-TRG-02"]
+                    ),
+                ),
+                "trigger IDs must be exact sequential request-order IDs",
+            ),
+            (
+                "nonsequential claim ID",
+                lambda cycle: (
+                    cycle["intake"]["selected_claims"][0].__setitem__(
+                        "claim_id", "RC-0001-CL-02"
+                    ),
+                    cycle["claim_resolutions"][0].__setitem__(
+                        "claim_id", "RC-0001-CL-02"
+                    ),
+                ),
+                "claim IDs must be exact sequential request-order IDs",
+            ),
+            (
+                "empty selection reasons",
+                lambda cycle: cycle["intake"]["selected_claims"][0].__setitem__(
+                    "selection_reasons", []
+                ),
+                "selection_reasons must not be empty",
+            ),
+            (
+                "duplicate selection reasons",
+                lambda cycle: cycle["intake"]["selected_claims"][0].__setitem__(
+                    "selection_reasons", ["trigger_affected", "trigger_affected"]
+                ),
+                "selection_reasons must not contain duplicate selection reasons",
+            ),
+            (
+                "unknown trigger reference",
+                lambda cycle: cycle["intake"]["selected_claims"][0].__setitem__(
+                    "trigger_ids", ["RC-0001-TRG-99"]
+                ),
+                "trigger_ids must reference known intake triggers",
+            ),
+            (
+                "trigger affected without IDs",
+                lambda cycle: cycle["intake"]["selected_claims"][0].__setitem__(
+                    "trigger_ids", []
+                ),
+                "trigger_affected requires non-empty trigger_ids",
+            ),
+            (
+                "orphan trigger",
+                orphan_trigger,
+                "every intake trigger must be referenced",
+            ),
+        )
+        for label, mutate, pattern in cases:
+            with self.subTest(case=label):
+                cycle = make_minimal_cycle()
+                mutate(cycle)
+                cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                attach_valid_audit(cycle)
+                self.assert_contract_error(
+                    lambda: revisit_contract.validate_cycle(cycle), pattern
+                )
+
+    def test_task4_resolution_and_start_audit_coverage_are_canonical(self):
+        resolution_cases = (
+            (
+                "missing selected resolution",
+                lambda cycle: cycle.__setitem__("claim_resolutions", []),
+                "claim_resolutions must cover every selected and derived claim exactly once",
+                make_minimal_cycle,
+            ),
+            (
+                "duplicate selected resolution",
+                lambda cycle: cycle["claim_resolutions"].append(
+                    copy.deepcopy(cycle["claim_resolutions"][0])
+                ),
+                "cycle.claim_resolutions contains duplicate claim_id",
+                make_minimal_cycle,
+            ),
+            (
+                "missing derived resolution",
+                lambda cycle: cycle["claim_resolutions"].pop(),
+                "claim_resolutions must cover every selected and derived claim exactly once",
+                make_populated_cycle,
+            ),
+            (
+                "unknown resolution",
+                lambda cycle: cycle["claim_resolutions"][0].__setitem__(
+                    "claim_id", "RC-0001-CL-99"
+                ),
+                "claim_id must reference a known same-cycle claim",
+                make_minimal_cycle,
+            ),
+        )
+        for label, mutate, pattern, factory in resolution_cases:
+            with self.subTest(case=label):
+                cycle = factory()
+                mutate(cycle)
+                attach_valid_audit(cycle)
+                self.assert_contract_error(
+                    lambda: revisit_contract.validate_cycle(cycle), pattern
+                )
+
+        expected_affected = [
+            "RC-0001",
+            "REV-0002",
+            "RC-0001-TRG-01",
+            "RC-0001-CL-01",
+        ]
+        audit_cases = (
+            ("empty audit", lambda cycle: cycle.__setitem__("audit", []), "audit must not be empty"),
+            (
+                "first command",
+                lambda cycle: cycle["audit"][0].__setitem__("command", "revisit-start"),
+                "audit entry 1 command must be start",
+            ),
+            (
+                "first timestamp",
+                lambda cycle: cycle["audit"][0].__setitem__(
+                    "timestamp", "2026-07-15T00:00:01Z"
+                ),
+                "audit entry 1 timestamp must match cycle.created_at",
+            ),
+            (
+                "first pre-state",
+                lambda cycle: cycle["audit"][0].__setitem__(
+                    "pre_state_sha256", "0" * 64
+                ),
+                "audit entry 1 pre_state_sha256 must be the canonical null hash",
+            ),
+            (
+                "first affected IDs",
+                lambda cycle: cycle["audit"][0].__setitem__(
+                    "affected_ids", list(reversed(expected_affected))
+                ),
+                "audit entry 1 affected_ids must name the reserved and initial intake IDs",
+            ),
+        )
+        for label, mutate, pattern in audit_cases:
+            with self.subTest(case=label):
+                cycle = make_minimal_cycle()
+                mutate(cycle)
+                self.assert_contract_error(
+                    lambda: revisit_contract.validate_cycle(cycle), pattern
+                )
 
     def test_cycle_rejects_persisted_completed_unpublished_status(self):
         cycle = make_minimal_cycle()
@@ -3811,6 +5304,7 @@ class TestCycleSchema(unittest.TestCase):
         ordinary_unicode = make_populated_cycle()
         ordinary_unicode["derived_claims"][0]["statement"] = "普通文本 café — Δ"
         ordinary_unicode["claim_resolutions"][0]["rationale"] = "证据审阅完成"
+        attach_valid_audit(ordinary_unicode)
         self.assertIs(
             ordinary_unicode,
             revisit_contract.validate_cycle(ordinary_unicode),
@@ -4158,12 +5652,14 @@ class TestCycleSchema(unittest.TestCase):
             "SHA256_RE",
             "CYCLE_KEYS",
             "RevisitIssue",
+            "RevisitHistoryFact",
             "RevisitContractError",
             "SOURCE_EVIDENCE_KEYS",
             "ARTIFACT_EVIDENCE_KEYS",
             "validate_evidence_ref",
             "validate_intake_request",
             "allocate_cycle_and_revision_ids",
+            "evaluate_history",
             "create_cycle",
             "empty_pointer",
             "validate_pointer",
@@ -4172,6 +5668,7 @@ class TestCycleSchema(unittest.TestCase):
             "canonical_document_bytes",
             "sha256_bytes",
             "sha256_file",
+            "workspace_transaction",
             "pointer_path",
             "cycle_directory",
             "cycle_json_path",
@@ -4261,25 +5758,26 @@ class TestCycleSchema(unittest.TestCase):
                     revisit_contract.cycle_state_sha256(changed),
                 )
 
-    def test_valid_skeleton_populated_terminal_and_audited_cycles_are_non_mutating(self):
+    def test_valid_task4_populated_and_terminal_cycles_are_non_mutating(self):
         cycles = [make_minimal_cycle(), make_populated_cycle()]
 
         ready = make_minimal_cycle()
         ready["status"] = "ready_for_report"
+        attach_valid_audit(ready)
         cycles.append(ready)
 
         completed = make_populated_cycle()
         completed["status"] = "completed"
         completed["completed_at"] = "2026-07-15T02:00:00Z"
+        attach_valid_audit(completed)
         cycles.append(completed)
 
         aborted = make_minimal_cycle()
         aborted["status"] = "aborted"
         aborted["aborted_at"] = "2026-07-15T02:00:00Z"
         aborted["abort_reason"] = "Primary evidence became unavailable."
+        attach_valid_audit(aborted)
         cycles.append(aborted)
-
-        cycles.append(attach_valid_audit(make_populated_cycle()))
 
         for cycle in cycles:
             with self.subTest(status=cycle["status"], audited=bool(cycle["audit"])):
@@ -4307,8 +5805,47 @@ class TestCycleSchema(unittest.TestCase):
         cycle["report_candidate"] = None
         cycle["intake"]["triggers"][0]["observed_at"] = "2026-07-15T00:30:00Z"
         cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        attach_valid_audit(cycle)
 
         self.assertIs(cycle, revisit_contract.validate_cycle(cycle))
+
+    def test_nullable_inherited_provenance_round_trips_request_cycle_and_mirror(self):
+        template = make_minimal_cycle()
+        trigger = copy.deepcopy(template["intake"]["triggers"][0])
+        trigger.pop("trigger_id")
+        claim = copy.deepcopy(template["intake"]["selected_claims"][0])
+        claim.pop("claim_id")
+        claim.pop("trigger_ids")
+        claim["trigger_indexes"] = [1]
+        claim["inherited_grade"] = None
+        claim["inherited_confidence"] = None
+        request = {"triggers": [trigger], "selected_claims": [claim]}
+
+        self.assertIs(request, revisit_contract.validate_intake_request(request))
+        cycle = revisit_contract.create_cycle(
+            cycle_id="RC-0001",
+            candidate_revision_id="REV-0002",
+            base_revision=make_initial_revision(),
+            framing_sha256="b" * 64,
+            framing_snapshot=copy.deepcopy(
+                template["intake"]["framing"]["snapshot"]
+            ),
+            frontier_registry_sha256="c" * 64,
+            max_existing_loop_number=0,
+            request=request,
+            timestamp="2026-07-15T00:00:00Z",
+        )
+
+        selected = cycle["intake"]["selected_claims"][0]
+        self.assertIsNone(selected["inherited_grade"])
+        self.assertIsNone(selected["inherited_confidence"])
+        self.assertIs(cycle, revisit_contract.validate_cycle(cycle))
+        claim_row = next(
+            line
+            for line in revisit_contract.render_cycle_markdown(cycle).splitlines()
+            if line.startswith("| RC-0001-CL-01 |")
+        )
+        self.assertIn("| — | — |", claim_row)
 
     def test_cycle_missing_required_field_is_rejected(self):
         cycle = make_minimal_cycle()

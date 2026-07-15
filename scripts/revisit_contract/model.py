@@ -119,6 +119,26 @@ class RevisitIssue:
     evidence: str = ""
 
 
+@dataclass(frozen=True)
+class RevisitHistoryFact:
+    current_revision_number: int | None
+    ordered_cycle_ids: tuple[str, ...]
+    max_cycle_number: int
+    max_revision_number: int
+    nonterminal_cycle_ids: tuple[str, ...]
+    completed_unpublished_cycle_ids: tuple[str, ...]
+    issues: tuple[RevisitIssue, ...]
+
+    def require_valid(self) -> None:
+        if not self.issues:
+            return
+        issue = self.issues[0]
+        detail = issue.message
+        if issue.evidence:
+            detail = f"{detail}: {issue.evidence}"
+        raise RevisitContractError(detail)
+
+
 class RevisitContractError(ValueError):
     pass
 
@@ -338,6 +358,201 @@ def cycle_state_sha256(cycle: dict[str, Any]) -> str:
     return semantic_sha256(state_without_audit(cycle))
 
 
+def evaluate_history(
+    pointer: dict[str, Any], cycles: list[dict[str, Any]]
+) -> RevisitHistoryFact:
+    validate_pointer(pointer)
+    if not isinstance(cycles, list):
+        raise RevisitContractError("cycles must be a list")
+    for cycle in cycles:
+        validate_cycle(cycle)
+    ordered = sorted(
+        cycles,
+        key=lambda cycle: int(
+            CYCLE_ID_RE.fullmatch(cycle["cycle_id"]).group("number")
+        ),
+    )
+    current = pointer["current_revision"]
+    current_revision_number = (
+        int(REVISION_ID_RE.fullmatch(current["revision_id"]).group("number"))
+        if current is not None
+        else None
+    )
+    max_cycle_number = max(
+        (
+            int(CYCLE_ID_RE.fullmatch(cycle["cycle_id"]).group("number"))
+            for cycle in ordered
+        ),
+        default=0,
+    )
+    max_revision_number = max(
+        (
+            int(
+                REVISION_ID_RE.fullmatch(
+                    cycle["candidate_revision_id"]
+                ).group("number")
+            )
+            for cycle in ordered
+        ),
+        default=current_revision_number or 0,
+    )
+    if current_revision_number is not None:
+        max_revision_number = max(max_revision_number, current_revision_number)
+    nonterminal_cycle_ids = tuple(
+        cycle["cycle_id"]
+        for cycle in ordered
+        if cycle["status"] in {"active", "ready_for_report"}
+    )
+    completed_unpublished_cycle_ids = tuple(
+        cycle["cycle_id"]
+        for cycle in ordered
+        if cycle["status"] == "completed"
+        and (
+            current_revision_number is None
+            or int(
+                REVISION_ID_RE.fullmatch(
+                    cycle["candidate_revision_id"]
+                ).group("number")
+            )
+            > current_revision_number
+        )
+    )
+    issues: list[RevisitIssue] = []
+    reservations: dict[str, list[str]] = {}
+    for cycle in ordered:
+        reservations.setdefault(cycle["candidate_revision_id"], []).append(
+            cycle["cycle_id"]
+        )
+    for revision_id in sorted(
+        reservations,
+        key=lambda value: int(
+            REVISION_ID_RE.fullmatch(value).group("number")
+        ),
+    ):
+        reserved_by = reservations[revision_id]
+        if len(reserved_by) > 1:
+            issues.append(
+                RevisitIssue(
+                    "duplicate_candidate_revision",
+                    "cycles.candidate_revision_id",
+                    f"candidate revision {revision_id} is reserved by multiple cycles",
+                    ", ".join(reserved_by),
+                )
+            )
+
+    prior_cycle = None
+    prior_revision_number = None
+    for cycle in ordered:
+        revision_number = int(
+            REVISION_ID_RE.fullmatch(
+                cycle["candidate_revision_id"]
+            ).group("number")
+        )
+        if (
+            prior_revision_number is not None
+            and revision_number < prior_revision_number
+        ):
+            issues.append(
+                RevisitIssue(
+                    "candidate_revision_order",
+                    "cycles.candidate_revision_id",
+                    "candidate revisions must increase with cycle allocation order",
+                    (
+                        f"{prior_cycle} -> {cycle['cycle_id']} "
+                        f"({prior_revision_number} -> {revision_number})"
+                    ),
+                )
+            )
+            break
+        prior_cycle = cycle["cycle_id"]
+        prior_revision_number = revision_number
+
+    if len(nonterminal_cycle_ids) > 1:
+        issues.append(
+            RevisitIssue(
+                "multiple_nonterminal_cycles",
+                "cycles.status",
+                "more than one active or ready cycle",
+                ", ".join(nonterminal_cycle_ids),
+            )
+        )
+    if nonterminal_cycle_ids and completed_unpublished_cycle_ids:
+        issues.append(
+            RevisitIssue(
+                "nonterminal_with_unpublished",
+                "cycles.status",
+                "active or ready cycle cannot coexist with completed-unpublished",
+                (
+                    f"nonterminal={','.join(nonterminal_cycle_ids)}; "
+                    f"unpublished={','.join(completed_unpublished_cycle_ids)}"
+                ),
+            )
+        )
+    if len(completed_unpublished_cycle_ids) > 1:
+        issues.append(
+            RevisitIssue(
+                "multiple_unpublished_cycles",
+                "cycles.status",
+                "more than one completed-unpublished cycle",
+                ", ".join(completed_unpublished_cycle_ids),
+            )
+        )
+
+    if current is not None:
+        equal_completed = tuple(
+            cycle
+            for cycle in ordered
+            if cycle["status"] == "completed"
+            and cycle["candidate_revision_id"] == current["revision_id"]
+        )
+        conflicting_equal = tuple(
+            cycle["cycle_id"]
+            for cycle in equal_completed
+            if cycle["cycle_id"] != current["cycle_id"]
+        )
+        if conflicting_equal:
+            issues.append(
+                RevisitIssue(
+                    "current_candidate_cycle_conflict",
+                    "pointer.current_revision.cycle_id",
+                    "completed current candidate conflicts with pointer cycle lineage",
+                    (
+                        f"pointer={current['cycle_id']}; "
+                        f"completed={','.join(conflicting_equal)}"
+                    ),
+                )
+            )
+        if current["cycle_id"] is not None:
+            matching_completed = any(
+                cycle["status"] == "completed"
+                and cycle["cycle_id"] == current["cycle_id"]
+                and cycle["candidate_revision_id"] == current["revision_id"]
+                for cycle in ordered
+            )
+            if not matching_completed:
+                issues.append(
+                    RevisitIssue(
+                        "current_lineage_missing",
+                        "pointer.current_revision",
+                        "current pointer has no matching completed cycle",
+                        (
+                            f"{current['cycle_id']} / "
+                            f"{current['revision_id']}"
+                        ),
+                    )
+                )
+
+    return RevisitHistoryFact(
+        current_revision_number=current_revision_number,
+        ordered_cycle_ids=tuple(cycle["cycle_id"] for cycle in ordered),
+        max_cycle_number=max_cycle_number,
+        max_revision_number=max_revision_number,
+        nonterminal_cycle_ids=nonterminal_cycle_ids,
+        completed_unpublished_cycle_ids=completed_unpublished_cycle_ids,
+        issues=tuple(issues),
+    )
+
+
 def with_audit(
     previous: dict[str, Any],
     updated: dict[str, Any],
@@ -375,29 +590,10 @@ def intake_sha256(intake: dict[str, Any]) -> str:
 def allocate_cycle_and_revision_ids(
     pointer: dict[str, Any], cycles: list[dict[str, Any]]
 ) -> tuple[str, str]:
-    validate_pointer(pointer)
-    max_cycle_number = 0
-    max_revision_number = 0
-    current = pointer["current_revision"]
-    if current is not None:
-        revision_match = REVISION_ID_RE.fullmatch(current["revision_id"])
-        if revision_match is None:
-            raise RevisitContractError("current revision ID is invalid")
-        max_revision_number = int(revision_match.group("number"))
-
-    for cycle in cycles:
-        validate_cycle(cycle)
-        cycle_match = CYCLE_ID_RE.fullmatch(cycle["cycle_id"])
-        revision_match = REVISION_ID_RE.fullmatch(cycle["candidate_revision_id"])
-        if cycle_match is None or revision_match is None:
-            raise RevisitContractError("cycle contains an invalid reserved ID")
-        max_cycle_number = max(max_cycle_number, int(cycle_match.group("number")))
-        max_revision_number = max(
-            max_revision_number, int(revision_match.group("number"))
-        )
-
-    next_cycle_number = max_cycle_number + 1
-    next_revision_number = max_revision_number + 1
+    history = evaluate_history(pointer, cycles)
+    history.require_valid()
+    next_cycle_number = history.max_cycle_number + 1
+    next_revision_number = history.max_revision_number + 1
     if next_cycle_number > 9999:
         raise RevisitContractError("cycle ID space is exhausted")
     if next_revision_number > 9999:
@@ -639,9 +835,15 @@ def validate_intake_request(raw: Any) -> dict[str, Any]:
             referenced_trigger_indexes.add(trigger_index)
         _require_unique(trigger_indexes, indexes_path, "trigger indexes")
 
-        if claim["inherited_grade"] not in CURRENT_GRADES:
+        if (
+            claim["inherited_grade"] is not None
+            and claim["inherited_grade"] not in CURRENT_GRADES
+        ):
             raise RevisitContractError(f"{claim_path}.inherited_grade is unsupported")
-        if claim["inherited_confidence"] not in CURRENT_CONFIDENCE:
+        if (
+            claim["inherited_confidence"] is not None
+            and claim["inherited_confidence"] not in CURRENT_CONFIDENCE
+        ):
             raise RevisitContractError(
                 f"{claim_path}.inherited_confidence is unsupported"
             )
@@ -734,6 +936,10 @@ def _validate_intake(value: Any, cycle_id: str) -> None:
         "budget_appetite",
     ):
         _require_non_empty_text(snapshot[field], f"{snapshot_path}.{field}")
+    if snapshot["research_posture"] != "revisit":
+        raise RevisitContractError(
+            "cycle.intake.framing.snapshot.research_posture must be revisit"
+        )
 
     boundary_path = f"{path}.workspace_boundary"
     boundary = _require_object(raw["workspace_boundary"], boundary_path)
@@ -753,6 +959,13 @@ def _validate_intake(value: Any, cycle_id: str) -> None:
 
     triggers_path = f"{path}.triggers"
     triggers = _require_list(raw["triggers"], triggers_path)
+    if not triggers:
+        raise RevisitContractError("cycle.intake.triggers must not be empty")
+    if len(triggers) > 99:
+        raise RevisitContractError("cycle.intake.triggers cannot exceed 99 entries")
+    expected_trigger_ids = [
+        f"{cycle_id}-TRG-{index:02d}" for index in range(1, len(triggers) + 1)
+    ]
     for index, trigger_value in enumerate(triggers):
         trigger_path = f"{triggers_path}[{index}]"
         trigger = _require_object(trigger_value, trigger_path)
@@ -769,17 +982,33 @@ def _validate_intake(value: Any, cycle_id: str) -> None:
         _require_non_empty_text(trigger["statement"], f"{trigger_path}.statement")
         _require_observed_at(trigger["observed_at"], f"{trigger_path}.observed_at")
         evidence_path = f"{trigger_path}.evidence_refs"
-        for evidence_index, evidence in enumerate(
-            _require_list(trigger["evidence_refs"], evidence_path)
-        ):
+        evidence_refs = _require_list(trigger["evidence_refs"], evidence_path)
+        if not evidence_refs:
+            raise RevisitContractError("trigger evidence_refs must not be empty")
+        for evidence_index, evidence in enumerate(evidence_refs):
             _validate_evidence_ref(evidence, f"{evidence_path}[{evidence_index}]")
     if len({trigger["trigger_id"] for trigger in triggers}) != len(triggers):
         raise RevisitContractError(
             "cycle.intake.triggers contains duplicate trigger_id"
         )
+    if [trigger["trigger_id"] for trigger in triggers] != expected_trigger_ids:
+        raise RevisitContractError(
+            "trigger IDs must be exact sequential request-order IDs"
+        )
 
     claims_path = f"{path}.selected_claims"
     claims = _require_list(raw["selected_claims"], claims_path)
+    if not claims:
+        raise RevisitContractError("cycle.intake.selected_claims must not be empty")
+    if len(claims) > 99:
+        raise RevisitContractError(
+            "cycle.intake.selected_claims cannot exceed 99 entries"
+        )
+    expected_claim_ids = [
+        f"{cycle_id}-CL-{index:02d}" for index in range(1, len(claims) + 1)
+    ]
+    known_trigger_ids = set(expected_trigger_ids)
+    referenced_trigger_ids: set[str] = set()
     for index, claim_value in enumerate(claims):
         claim_path = f"{claims_path}[{index}]"
         claim = _require_object(claim_value, claim_path)
@@ -815,22 +1044,40 @@ def _validate_intake(value: Any, cycle_id: str) -> None:
         )
         if claim["importance"] not in CLAIM_IMPORTANCE:
             raise RevisitContractError(f"{claim_path} claim importance is unsupported")
-        for reason in _require_list(
-            claim["selection_reasons"], f"{claim_path}.selection_reasons"
-        ):
+        reasons_path = f"{claim_path}.selection_reasons"
+        reasons = _require_list(claim["selection_reasons"], reasons_path)
+        if not reasons:
+            raise RevisitContractError(f"{reasons_path} must not be empty")
+        for reason in reasons:
             if reason not in SELECTION_REASONS:
                 raise RevisitContractError(
                     f"{claim_path}.selection_reasons selection reason is unsupported"
                 )
+        _require_unique(reasons, reasons_path, "selection reasons")
         trigger_ids = _require_list(claim["trigger_ids"], f"{claim_path}.trigger_ids")
         for trigger_id in trigger_ids:
             _require_trigger_id(
                 trigger_id, f"{claim_path}.trigger_ids", cycle_id
             )
         _require_unique(trigger_ids, f"{claim_path}.trigger_ids")
-        if claim["inherited_grade"] not in CURRENT_GRADES:
+        if "trigger_affected" in reasons and not trigger_ids:
+            raise RevisitContractError(
+                "trigger_affected requires non-empty trigger_ids"
+            )
+        if not set(trigger_ids).issubset(known_trigger_ids):
+            raise RevisitContractError(
+                f"{claim_path}.trigger_ids must reference known intake triggers"
+            )
+        referenced_trigger_ids.update(trigger_ids)
+        if (
+            claim["inherited_grade"] is not None
+            and claim["inherited_grade"] not in CURRENT_GRADES
+        ):
             raise RevisitContractError(f"{claim_path}.inherited_grade is unsupported")
-        if claim["inherited_confidence"] not in CURRENT_CONFIDENCE:
+        if (
+            claim["inherited_confidence"] is not None
+            and claim["inherited_confidence"] not in CURRENT_CONFIDENCE
+        ):
             raise RevisitContractError(
                 f"{claim_path}.inherited_confidence is unsupported"
             )
@@ -856,6 +1103,12 @@ def _validate_intake(value: Any, cycle_id: str) -> None:
         raise RevisitContractError(
             "cycle.intake.selected_claims contains duplicate claim_id"
         )
+    if [claim["claim_id"] for claim in claims] != expected_claim_ids:
+        raise RevisitContractError(
+            "claim IDs must be exact sequential request-order IDs"
+        )
+    if referenced_trigger_ids != known_trigger_ids:
+        raise RevisitContractError("every intake trigger must be referenced")
 
 
 def _validate_bindings(raw: dict[str, Any]) -> None:
@@ -1060,6 +1313,10 @@ def _validate_claims(raw: dict[str, Any]) -> None:
         raise RevisitContractError(
             "cycle.claim_resolutions contains duplicate claim_id"
         )
+    if {resolution["claim_id"] for resolution in resolutions} != known_claim_ids:
+        raise RevisitContractError(
+            "cycle.claim_resolutions must cover every selected and derived claim exactly once"
+        )
 
 
 def _validate_decision_and_reruns(raw: dict[str, Any]) -> None:
@@ -1172,6 +1429,8 @@ def _validate_report_candidate(raw: dict[str, Any]) -> None:
 def _validate_audit(raw: dict[str, Any]) -> None:
     audit_path = "cycle.audit"
     audit = _require_list(raw["audit"], audit_path)
+    if not audit:
+        raise RevisitContractError("cycle.audit must not be empty")
     previous_post = None
     for index, entry_value in enumerate(audit):
         path = f"{audit_path}[{index}]"
@@ -1208,7 +1467,28 @@ def _validate_audit(raw: dict[str, Any]) -> None:
         if previous_post is not None and entry["pre_state_sha256"] != previous_post:
             raise RevisitContractError("audit pre/post hash continuity is broken")
         previous_post = entry["post_state_sha256"]
-    if audit and previous_post != cycle_state_sha256(raw):
+    first = audit[0]
+    if first["command"] != "start":
+        raise RevisitContractError("audit entry 1 command must be start")
+    if first["timestamp"] != raw["created_at"]:
+        raise RevisitContractError(
+            "audit entry 1 timestamp must match cycle.created_at"
+        )
+    if first["pre_state_sha256"] != semantic_sha256(None):
+        raise RevisitContractError(
+            "audit entry 1 pre_state_sha256 must be the canonical null hash"
+        )
+    expected_affected_ids = [
+        raw["cycle_id"],
+        raw["candidate_revision_id"],
+        *(trigger["trigger_id"] for trigger in raw["intake"]["triggers"]),
+        *(claim["claim_id"] for claim in raw["intake"]["selected_claims"]),
+    ]
+    if first["affected_ids"] != expected_affected_ids:
+        raise RevisitContractError(
+            "audit entry 1 affected_ids must name the reserved and initial intake IDs"
+        )
+    if previous_post != cycle_state_sha256(raw):
         raise RevisitContractError(
             "last audit post_state_sha256 does not match current state"
         )

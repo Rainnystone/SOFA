@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import os
 import tempfile
+import threading
+import time
 import unicodedata
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -12,12 +17,17 @@ from .model import (
     CYCLES_DIRNAME,
     CYCLE_ID_RE,
     POINTER_FILENAME,
+    SHA256_RE,
     RevisitContractError,
     validate_cycle,
     validate_intake_request,
     validate_pointer,
 )
 from .render import render_cycle_markdown
+
+
+_LOCK_DIRECTORY_NAME = "sofa-revisit-workspace-locks-v1"
+_TRANSACTION_LOCAL = threading.local()
 
 
 class RevisitPersistenceRollbackError(RevisitContractError):
@@ -51,6 +61,100 @@ def sha256_bytes(payload: bytes) -> str:
 
 def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
+
+
+def _transaction_entries() -> dict[str, dict[str, Any]]:
+    entries = getattr(_TRANSACTION_LOCAL, "entries", None)
+    if entries is None:
+        entries = {}
+        _TRANSACTION_LOCAL.entries = entries
+    return entries
+
+
+def _workspace_transaction_key(workspace: Path) -> str:
+    normalized = os.path.normcase(os.path.realpath(os.fspath(workspace)))
+    return sha256_bytes(normalized.encode("utf-8"))
+
+
+def _workspace_lock_path(workspace: Path) -> Path:
+    directory = Path(tempfile.gettempdir()) / _LOCK_DIRECTORY_NAME
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return directory / f"{_workspace_transaction_key(workspace)}.lock"
+
+
+def _acquire_workspace_lock(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        retry_errnos = {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+        while True:
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if (
+                    exc.errno not in retry_errnos
+                    and getattr(exc, "winerror", None) not in {33, 36}
+                ):
+                    raise
+                time.sleep(0.05)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _release_workspace_lock(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def workspace_transaction(workspace: str | Path) -> Iterator[Path]:
+    resolved_workspace = Path(workspace).resolve()
+    key = _workspace_transaction_key(resolved_workspace)
+    entries = _transaction_entries()
+    existing = entries.get(key)
+    if existing is not None:
+        existing["depth"] += 1
+        try:
+            yield existing["workspace"]
+        finally:
+            existing["depth"] -= 1
+        return
+
+    handle = _workspace_lock_path(resolved_workspace).open("a+b", buffering=0)
+    try:
+        _acquire_workspace_lock(handle)
+    except Exception:
+        handle.close()
+        raise
+    entries[key] = {
+        "depth": 1,
+        "handle": handle,
+        "workspace": resolved_workspace,
+    }
+    try:
+        yield resolved_workspace
+    finally:
+        del entries[key]
+        try:
+            _release_workspace_lock(handle)
+        finally:
+            handle.close()
 
 
 def load_intake_request(path: str | Path) -> dict[str, Any]:
@@ -263,48 +367,176 @@ def _require_expected_bytes(path: Path, expected_sha256: str | None) -> bytes | 
     return original
 
 
+def _normalize_authority_snapshots(
+    workspace: Path,
+    snapshots: dict[Path, str] | None,
+) -> dict[Path, str]:
+    normalized: dict[Path, str] = {}
+    for raw_path, expected_sha256 in (snapshots or {}).items():
+        path = Path(raw_path).resolve(strict=False)
+        try:
+            path.relative_to(workspace)
+        except ValueError as exc:
+            raise RevisitContractError(
+                f"snapshot authority escapes workspace: {raw_path}"
+            ) from exc
+        if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(
+            expected_sha256
+        ) is None:
+            raise RevisitContractError(
+                f"snapshot digest must be a lowercase SHA-256: {path.name}"
+            )
+        normalized[path] = expected_sha256
+    return normalized
+
+
+def _require_snapshot_generations(
+    snapshots: dict[Path, str], boundary: str
+) -> None:
+    for path, expected_sha256 in snapshots.items():
+        try:
+            payload = path.read_bytes()
+        except FileNotFoundError as exc:
+            raise RevisitContractError(
+                f"authority disappeared {boundary}: {path.name}"
+            ) from exc
+        if sha256_bytes(payload) != expected_sha256:
+            raise RevisitContractError(
+                f"authority changed {boundary}: {path.name}"
+            )
+
+
+def _read_optional_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _restore_committed_cycle_pair(
+    *,
+    json_path: Path,
+    markdown_path: Path,
+    written_json: bytes,
+    written_markdown: bytes,
+    prior_json: bytes | None,
+    prior_markdown: bytes | None,
+) -> None:
+    if (
+        _read_optional_bytes(json_path) != written_json
+        or _read_optional_bytes(markdown_path) != written_markdown
+    ):
+        raise RevisitContractError(
+            "cycle pair changed after transaction write; rollback refused"
+        )
+    if prior_markdown is None:
+        markdown_path.unlink()
+    else:
+        _atomic_replace(markdown_path, prior_markdown)
+    if prior_json is None:
+        json_path.unlink()
+    else:
+        _atomic_replace(json_path, prior_json)
+
+
+def _restore_committed_pointer(
+    path: Path,
+    written_payload: bytes,
+    prior_payload: bytes | None,
+) -> None:
+    if _read_optional_bytes(path) != written_payload:
+        raise RevisitContractError(
+            "pointer changed after transaction write; rollback refused"
+        )
+    if prior_payload is None:
+        path.unlink()
+    else:
+        _atomic_replace(path, prior_payload)
+
+
 def persist_pointer(
     workspace: str | Path,
     pointer: dict[str, Any],
     expected_sha256: str | None,
+    *,
+    authority_snapshots: dict[Path, str] | None = None,
 ) -> Path:
-    validate_pointer(pointer)
-    path = pointer_path(workspace)
-    _require_expected_bytes(path, expected_sha256)
-    payload = canonical_document_bytes(pointer)
-    _atomic_replace(path, payload)
-    return path
+    with workspace_transaction(workspace) as locked_workspace:
+        validate_pointer(pointer)
+        path = pointer_path(locked_workspace)
+        snapshots = _normalize_authority_snapshots(
+            locked_workspace, authority_snapshots
+        )
+        prior_payload = _require_expected_bytes(path, expected_sha256)
+        payload = canonical_document_bytes(pointer)
+        _require_snapshot_generations(snapshots, "before pointer persistence")
+        _atomic_replace(path, payload)
+        try:
+            _require_snapshot_generations(snapshots, "after pointer persistence")
+        except Exception as original_error:
+            try:
+                _restore_committed_pointer(path, payload, prior_payload)
+            except Exception as rollback_error:
+                raise RevisitPersistenceRollbackError(
+                    original_error, rollback_error
+                ) from rollback_error
+            raise
+        return path
 
 
 def persist_cycle(
     workspace: str | Path,
     cycle: dict[str, Any],
     expected_sha256: str | None,
+    *,
+    authority_snapshots: dict[Path, str] | None = None,
 ) -> tuple[Path, Path]:
-    validate_cycle(cycle)
-    json_path = cycle_json_path(workspace, cycle["cycle_id"])
-    markdown_path = cycle_markdown_path(workspace, cycle["cycle_id"])
-    if json_path == markdown_path:
-        raise RevisitContractError(
-            "cycle JSON and Markdown authority targets must be distinct"
+    with workspace_transaction(workspace) as locked_workspace:
+        validate_cycle(cycle)
+        json_path = cycle_json_path(locked_workspace, cycle["cycle_id"])
+        markdown_path = cycle_markdown_path(locked_workspace, cycle["cycle_id"])
+        if json_path == markdown_path:
+            raise RevisitContractError(
+                "cycle JSON and Markdown authority targets must be distinct"
+            )
+        snapshots = _normalize_authority_snapshots(
+            locked_workspace, authority_snapshots
         )
-    _require_expected_bytes(json_path, expected_sha256)
-    prior_markdown = markdown_path.read_bytes() if markdown_path.exists() else None
-    markdown_payload = render_cycle_markdown(cycle).encode("utf-8")
-    json_payload = canonical_document_bytes(cycle)
-    _atomic_replace(markdown_path, markdown_payload)
-    try:
-        _atomic_replace(json_path, json_payload)
-    except Exception as original_error:
+        prior_json = _require_expected_bytes(json_path, expected_sha256)
+        prior_markdown = markdown_path.read_bytes() if markdown_path.exists() else None
+        markdown_payload = render_cycle_markdown(cycle).encode("utf-8")
+        json_payload = canonical_document_bytes(cycle)
+        _require_snapshot_generations(snapshots, "before cycle persistence")
+        _atomic_replace(markdown_path, markdown_payload)
         try:
-            if prior_markdown is None:
-                if markdown_path.exists():
-                    markdown_path.unlink()
-            else:
-                _atomic_replace(markdown_path, prior_markdown)
-        except Exception as rollback_error:
-            raise RevisitPersistenceRollbackError(
-                original_error, rollback_error
-            ) from rollback_error
-        raise
-    return json_path, markdown_path
+            _atomic_replace(json_path, json_payload)
+        except Exception as original_error:
+            try:
+                if prior_markdown is None:
+                    if markdown_path.exists():
+                        markdown_path.unlink()
+                else:
+                    _atomic_replace(markdown_path, prior_markdown)
+            except Exception as rollback_error:
+                raise RevisitPersistenceRollbackError(
+                    original_error, rollback_error
+                ) from rollback_error
+            raise
+        try:
+            _require_snapshot_generations(snapshots, "after cycle persistence")
+        except Exception as original_error:
+            try:
+                _restore_committed_cycle_pair(
+                    json_path=json_path,
+                    markdown_path=markdown_path,
+                    written_json=json_payload,
+                    written_markdown=markdown_payload,
+                    prior_json=prior_json,
+                    prior_markdown=prior_markdown,
+                )
+            except Exception as rollback_error:
+                raise RevisitPersistenceRollbackError(
+                    original_error, rollback_error
+                ) from rollback_error
+            raise
+        return json_path, markdown_path

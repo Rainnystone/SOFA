@@ -1604,70 +1604,104 @@ def write_matching_completed_cycle(
     action_class: str = "Watch with Trigger",
     status: str = "completed",
 ) -> None:
-    intake = {
-        "base_revision": {
+    created_at = "2026-07-15T00:30:00Z"
+    source_ref = {
+        "kind": "source",
+        "source_id": "src-001",
+        "checked_at": created_at,
+    }
+    cycle = revisit_contract.create_cycle(
+        cycle_id="RC-0001",
+        candidate_revision_id=revision["revision_id"],
+        base_revision={
             "revision_id": "REV-0001",
+            "cycle_id": None,
             "report_path": "reports/initial.md",
             "report_sha256": "a" * 64,
             "action_class": "Watch with Trigger",
+            "validated_at": "2026-07-15T00:00:00Z",
+            "revision_of": None,
         },
-        "framing": {
-            "path": "framing_contract.json",
-            "sha256": "b" * 64,
-            "snapshot": {
-                "subject_resolution": {},
-                "research_posture": "decision_support",
-                "time_horizon": "long_term",
-                "market_scope": "global",
-                "risk_appetite": "moderate",
-                "output_expectation": "ticker_dive",
-                "report_language": "en",
-                "budget_appetite": "standard",
-            },
+        framing_sha256="b" * 64,
+        framing_snapshot={
+            "subject_resolution": {},
+            "research_posture": "revisit",
+            "time_horizon": "long_term",
+            "market_scope": "global",
+            "risk_appetite": "moderate",
+            "output_expectation": "ticker_dive",
+            "report_language": "en",
+            "budget_appetite": "standard",
         },
-        "workspace_boundary": {
-            "frontier_registry_sha256": "c" * 64,
-            "max_existing_loop_number": 0,
+        frontier_registry_sha256="c" * 64,
+        max_existing_loop_number=0,
+        request={
+            "triggers": [
+                {
+                    "kind": "upgrade",
+                    "statement": "A report candidate is ready for lineage review.",
+                    "observed_at": "2026-07-15",
+                    "evidence_refs": [source_ref],
+                }
+            ],
+            "selected_claims": [
+                {
+                    "statement": "The candidate preserves the selected claim.",
+                    "source_ref": {
+                        "path": "reports/initial.md",
+                        "sha256": "a" * 64,
+                        "locator": "Selected claim",
+                        "historical_claim_id": None,
+                    },
+                    "importance": "critical",
+                    "selection_reasons": ["trigger_affected"],
+                    "trigger_indexes": [1],
+                    "inherited_grade": None,
+                    "inherited_confidence": None,
+                    "inherited_evidence": [],
+                }
+            ],
         },
-        "triggers": [],
-        "selected_claims": [],
+        timestamp=created_at,
+    )
+    if status == "completed":
+        cycle["status"] = "completed"
+        cycle["completed_at"] = "2026-07-15T00:59:00Z"
+    cycle["decision_assessment"] = {
+        "new_action_class": action_class,
+        "financial_bridge_affected": False,
+        "financial_bridge_rationale": None,
+        "risk_class_changed": False,
+        "risk_class_rationale": None,
+        "supporting_claim_ids": [],
+        "verdict_rationale": "The cycle supports the candidate report.",
+        "blocked_claim_ids": [],
+        "change_class": "evidence_or_claim_only",
+        "required_reruns": [],
     }
-    cycle = {
-        "schema_version": 1,
-        "cycle_id": "RC-0001",
-        "candidate_revision_id": revision["revision_id"],
-        "status": status,
-        "created_at": "2026-07-15T00:30:00Z",
-        "completed_at": "2026-07-15T00:59:00Z" if status == "completed" else None,
-        "aborted_at": None,
-        "abort_reason": None,
-        "intake_sha256": revisit_contract.intake_sha256(intake),
-        "intake": intake,
-        "frontier_bindings": [],
-        "claim_resolutions": [],
-        "derived_claims": [],
-        "decision_assessment": {
-            "new_action_class": action_class,
-            "financial_bridge_affected": False,
-            "financial_bridge_rationale": None,
-            "risk_class_changed": False,
-            "risk_class_rationale": None,
-            "supporting_claim_ids": [],
-            "verdict_rationale": "The completed cycle supports the candidate report.",
-            "blocked_claim_ids": [],
-            "change_class": "evidence_or_claim_only",
-            "required_reruns": [],
-        },
-        "rerun_artifacts": [],
-        "report_candidate": {
-            "revision_id": revision["revision_id"],
-            "revision_of": revision["revision_of"],
-            "report_path": revision["report_path"],
-            "report_sha256": revision["report_sha256"],
-            "registered_at": "2026-07-15T00:58:00Z",
-        },
-        "audit": [],
+    cycle["report_candidate"] = {
+        "revision_id": revision["revision_id"],
+        "revision_of": revision["revision_of"],
+        "report_path": revision["report_path"],
+        "report_sha256": revision["report_sha256"],
+        "registered_at": "2026-07-15T00:58:00Z",
     }
+    cycle["audit"].append(
+        {
+            "sequence": 2,
+            "timestamp": (
+                cycle["completed_at"]
+                if status == "completed"
+                else "2026-07-15T00:58:00Z"
+            ),
+            "command": (
+                "complete" if status == "completed" else "record-report-candidate"
+            ),
+            "affected_ids": ["RC-0001", revision["revision_id"]],
+            "pre_state_sha256": cycle["audit"][-1]["post_state_sha256"],
+            "post_state_sha256": revisit_contract.cycle_state_sha256(cycle),
+        }
+    )
     revisit_contract.persist_cycle(workspace, cycle, expected_sha256=None)
 
 

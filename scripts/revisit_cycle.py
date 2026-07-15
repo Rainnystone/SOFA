@@ -21,6 +21,7 @@ from revisit_contract import (
     cycle_directory,
     cycle_json_path,
     empty_pointer,
+    evaluate_history,
     list_cycle_ids,
     load_cycle,
     load_pointer,
@@ -29,10 +30,16 @@ from revisit_contract import (
     pointer_path,
     sha256_bytes,
     sha256_file,
+    workspace_transaction,
 )
 from revisit_contract.model import with_audit
-from revisit_contract.store import load_intake_request, verify_workspace_artifact
-from framing_contract import evaluate_contract, load_contract
+from revisit_contract.store import (
+    load_intake_request,
+    resolve_workspace_path,
+    verify_workspace_artifact,
+)
+from framing_contract import evaluate_contract
+from framing_contract.model import normalize_contract
 from frontier_lifecycle import LOOP_HEADER_RE, derive_loop_counts
 from frontier_review import read_registry_snapshot
 from source_cache import evaluate_index
@@ -51,7 +58,7 @@ def _configure_utf8_stdio() -> None:
             pass
 
 
-def _load_ticker_state(workspace: Path) -> dict:
+def _load_ticker_state(workspace: Path, operation: str) -> dict:
     state_path = workspace / "state.json"
     try:
         state = json.loads(state_path.read_bytes().decode("utf-8"))
@@ -62,8 +69,13 @@ def _load_ticker_state(workspace: Path) -> dict:
     if not isinstance(state, dict):
         raise RevisitContractError("state.json must contain an object")
     if state.get("mode") != "ticker":
+        if str(state.get("mode", "")).lower() == "sector":
+            raise RevisitContractError(
+                f"{operation} is unavailable for Sector workspaces; "
+                "revisit cycles require ticker mode"
+            )
         raise RevisitContractError(
-            "register-current is available only for ticker workspaces"
+            f"{operation} is available only for ticker workspaces"
         )
     return state
 
@@ -88,23 +100,37 @@ def _require_current_report(
             "pointer current report path is not canonical: "
             f"{current['report_path']}"
         )
+    report_sha256 = sha256_bytes(payload)
+    if report_sha256 != current["report_sha256"]:
+        raise RevisitContractError(
+            "registered report bytes do not match current pointer"
+        )
     result = evaluate_specific_ticker_report(
         workspace,
         relative,
-        expected_sha256=current["report_sha256"],
+        expected_sha256=report_sha256,
     )
     if not result.passed:
         details = "; ".join(
             f"{issue.code}: {issue.message}" for issue in result.failures
         )
         raise RevisitContractError(details)
-    return current, workspace / relative, sha256_bytes(payload)
+    report_path = workspace / relative
+    if sha256_file(report_path) != report_sha256:
+        raise RevisitContractError("current report changed during validation")
+    return current, report_path, report_sha256
 
 
 def _load_revisit_framing(workspace: Path) -> tuple[dict, Path, str]:
     path = workspace / "framing_contract.json"
     payload = path.read_bytes()
-    contract = load_contract(workspace)
+    try:
+        raw_contract = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RevisitContractError(
+            "framing_contract.json must be valid UTF-8 JSON"
+        ) from exc
+    contract = normalize_contract(raw_contract)
     evaluation = evaluate_contract(contract, state_mode="ticker")
     if not evaluation.complete:
         details = "; ".join(
@@ -165,17 +191,64 @@ def _validate_request_references(
     workspace: Path, request: dict
 ) -> tuple[dict, dict[Path, str]]:
     canonical = copy.deepcopy(request)
-    evaluation = evaluate_index(workspace)
-    if evaluation.issues:
-        details = "; ".join(
-            f"{issue.code} at {issue.location}: {issue.message}"
-            for issue in evaluation.issues
-        )
-        raise RevisitContractError(f"source cache failed validation: {details}")
-    registered_source_ids = {
-        str(record["source_id"]) for record in evaluation.records
-    }
     artifact_snapshots: dict[Path, str] = {}
+
+    requested_source_ids: set[str] = set()
+    for trigger in canonical["triggers"]:
+        for ref in trigger["evidence_refs"]:
+            if ref["kind"] == "source":
+                requested_source_ids.add(ref["source_id"])
+    for claim in canonical["selected_claims"]:
+        for inherited in claim["inherited_evidence"]:
+            ref = inherited["ref"]
+            if ref["kind"] == "source":
+                requested_source_ids.add(ref["source_id"])
+
+    registered_source_ids: set[str] = set()
+    if requested_source_ids:
+        preliminary = evaluate_index(workspace)
+        if preliminary.issues:
+            details = "; ".join(
+                f"{issue.code} at {issue.location}: {issue.message}"
+                for issue in preliminary.issues
+            )
+            raise RevisitContractError(f"source cache failed validation: {details}")
+        preliminary_by_id = {
+            str(record["source_id"]): record for record in preliminary.records
+        }
+        missing = sorted(requested_source_ids - set(preliminary_by_id))
+        if missing:
+            raise RevisitContractError(f"source_id is not registered: {missing[0]}")
+
+        source_index_path = workspace / "sources_index.jsonl"
+        try:
+            source_index_payload = source_index_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise RevisitContractError("sources_index.jsonl is required") from exc
+        artifact_snapshots[source_index_path] = sha256_bytes(source_index_payload)
+        for source_id in sorted(requested_source_ids):
+            excerpt_path = resolve_workspace_path(
+                workspace,
+                preliminary_by_id[source_id]["excerpt_path"],
+                parent="sources",
+            )
+            if not excerpt_path.is_file():
+                raise RevisitContractError(
+                    f"source excerpt is not a file: {source_id}"
+                )
+            artifact_snapshots[excerpt_path] = sha256_bytes(excerpt_path.read_bytes())
+
+        evaluation = evaluate_index(workspace)
+        if evaluation.issues:
+            details = "; ".join(
+                f"{issue.code} at {issue.location}: {issue.message}"
+                for issue in evaluation.issues
+            )
+            raise RevisitContractError(f"source cache failed validation: {details}")
+        registered_source_ids = {
+            str(record["source_id"]) for record in evaluation.records
+        }
+        _require_unchanged_authorities(artifact_snapshots)
 
     def validate_reference(ref: dict) -> None:
         if ref["kind"] == "source":
@@ -219,21 +292,8 @@ def _require_unchanged_authorities(snapshots: dict[Path, str]) -> None:
             )
 
 
-def _is_completed_unpublished(
-    cycle: dict, current_revision: dict | None
-) -> bool:
-    if cycle["status"] != "completed":
-        return False
-    if current_revision is None:
-        return True
-    candidate_number = int(cycle["candidate_revision_id"].removeprefix("REV-"))
-    current_number = int(current_revision["revision_id"].removeprefix("REV-"))
-    return candidate_number > current_number
-
-
-def command_start(args: argparse.Namespace) -> int:
-    workspace = Path(args.workspace)
-    _load_ticker_state(workspace)
+def _command_start_in_transaction(args: argparse.Namespace, workspace: Path) -> int:
+    _load_ticker_state(workspace, "start")
     request = load_intake_request(args.intake_file)
     request, artifact_snapshots = _validate_request_references(workspace, request)
 
@@ -246,15 +306,20 @@ def command_start(args: argparse.Namespace) -> int:
 
     cycle_ids = list_cycle_ids(workspace)
     cycles = [load_cycle(workspace, cycle_id) for cycle_id in cycle_ids]
-    for cycle in cycles:
-        if cycle["status"] in {"active", "ready_for_report"}:
-            raise RevisitContractError(
-                f"cycle conflict: {cycle['cycle_id']} is {cycle['status']}"
-            )
-        if _is_completed_unpublished(cycle, current):
-            raise RevisitContractError(
-                f"cycle conflict: {cycle['cycle_id']} is completed-unpublished"
-            )
+    history = evaluate_history(pointer, cycles)
+    history.require_valid()
+    cycles_by_id = {cycle["cycle_id"]: cycle for cycle in cycles}
+    if history.nonterminal_cycle_ids:
+        cycle = cycles_by_id[history.nonterminal_cycle_ids[0]]
+        raise RevisitContractError(
+            f"cycle conflict: {cycle['cycle_id']} is {cycle['status']}"
+        )
+    if history.completed_unpublished_cycle_ids:
+        raise RevisitContractError(
+            "cycle conflict: "
+            f"{history.completed_unpublished_cycle_ids[0]} "
+            "is completed-unpublished"
+        )
 
     framing_snapshot, framing_path, framing_sha256 = _load_revisit_framing(
         workspace
@@ -291,7 +356,12 @@ def command_start(args: argparse.Namespace) -> int:
         **artifact_snapshots,
     }
     _require_unchanged_authorities(snapshots)
-    persist_cycle(workspace, cycle, expected_sha256=None)
+    persist_cycle(
+        workspace,
+        cycle,
+        expected_sha256=None,
+        authority_snapshots=snapshots,
+    )
     print(
         f"REVISIT CYCLE STARTED: {cycle_id} "
         f"(candidate {candidate_revision_id})"
@@ -299,19 +369,25 @@ def command_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def _operational_cycle_status(cycle: dict, current_revision: dict | None) -> str:
-    if _is_completed_unpublished(cycle, current_revision):
-        return "completed-unpublished"
-    return cycle["status"]
+def command_start(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        return _command_start_in_transaction(args, workspace)
 
 
 def _status_summary(workspace: Path, selected_cycle_id: str | None) -> dict:
     pointer = load_pointer(workspace)
     current = pointer["current_revision"]
+    report_issue = None
+    if current is not None:
+        try:
+            _require_current_report(workspace, pointer)
+        except RevisitContractError as error:
+            report_issue = f"current_report_invalid: {error}"
     all_cycles = [
         load_cycle(workspace, cycle_id)
         for cycle_id in list_cycle_ids(workspace)
     ]
+    history = evaluate_history(pointer, all_cycles)
     if selected_cycle_id is None:
         selected_cycles = all_cycles
     else:
@@ -326,12 +402,17 @@ def _status_summary(workspace: Path, selected_cycle_id: str | None) -> dict:
         selected_cycles = [selected_by_id[selected_cycle_id]]
 
     cycles = []
+    unpublished_ids = set(history.completed_unpublished_cycle_ids)
     for cycle in selected_cycles:
         cycles.append(
             {
                 "cycle_id": cycle["cycle_id"],
                 "candidate_revision_id": cycle["candidate_revision_id"],
-                "status": _operational_cycle_status(cycle, current),
+                "status": (
+                    "completed-unpublished"
+                    if cycle["cycle_id"] in unpublished_ids
+                    else cycle["status"]
+                ),
                 "created_at": cycle["created_at"],
                 "completed_at": cycle["completed_at"],
                 "aborted_at": cycle["aborted_at"],
@@ -339,24 +420,27 @@ def _status_summary(workspace: Path, selected_cycle_id: str | None) -> dict:
             }
         )
 
-    completed_unpublished = next(
-        (
-            cycle
-            for cycle in all_cycles
-            if _operational_cycle_status(cycle, current)
-            == "completed-unpublished"
-        ),
-        None,
+    selected_by_id = {cycle["cycle_id"]: cycle for cycle in all_cycles}
+    completed_unpublished = (
+        selected_by_id[history.completed_unpublished_cycle_ids[0]]
+        if history.completed_unpublished_cycle_ids
+        else None
     )
-    nonterminal = next(
-        (
-            cycle
-            for cycle in all_cycles
-            if cycle["status"] in {"active", "ready_for_report"}
-        ),
-        None,
+    nonterminal = (
+        selected_by_id[history.nonterminal_cycle_ids[0]]
+        if history.nonterminal_cycle_ids
+        else None
     )
-    if current is None:
+    issues = ([report_issue] if report_issue is not None else []) + [
+        (
+            f"{issue.code}: {issue.message}"
+            + (f" ({issue.evidence})" if issue.evidence else "")
+        )
+        for issue in history.issues
+    ]
+    if issues:
+        next_command = None
+    elif current is None:
         next_command = (
             "register-current --report REPORT --action-class ACTION_CLASS"
         )
@@ -372,7 +456,7 @@ def _status_summary(workspace: Path, selected_cycle_id: str | None) -> dict:
         "mode": "ticker",
         "current_revision": copy.deepcopy(current),
         "cycles": cycles,
-        "issues": [],
+        "issues": issues,
         "next_legal_command": next_command,
     }
 
@@ -403,12 +487,15 @@ def _render_status_text(summary: dict) -> str:
             lines.append(f"ISSUE: {issue}")
     else:
         lines.append("ISSUES: none")
-    lines.append(f"NEXT LEGAL COMMAND: {summary['next_legal_command']}")
+    next_command = summary["next_legal_command"] or "none"
+    lines.append(f"NEXT LEGAL COMMAND: {next_command}")
     return "\n".join(lines) + "\n"
 
 
 def command_status(args: argparse.Namespace) -> int:
-    summary = _status_summary(Path(args.workspace), args.cycle)
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        _load_ticker_state(workspace, "status")
+        summary = _status_summary(workspace, args.cycle)
     if args.json:
         print(
             json.dumps(
@@ -423,7 +510,7 @@ def command_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_abort(args: argparse.Namespace) -> int:
+def _command_abort_in_transaction(args: argparse.Namespace, workspace: Path) -> int:
     reason = args.reason
     if (
         not isinstance(reason, str)
@@ -434,8 +521,7 @@ def command_abort(args: argparse.Namespace) -> int:
             "abort reason must be non-empty text without control characters"
         )
 
-    workspace = Path(args.workspace)
-    _load_ticker_state(workspace)
+    _load_ticker_state(workspace, "abort")
     current_pointer_path = pointer_path(workspace)
     expected_pointer_sha256 = sha256_file(current_pointer_path)
     pointer = load_pointer(workspace)
@@ -483,14 +569,24 @@ def command_abort(args: argparse.Namespace) -> int:
         workspace,
         aborted,
         expected_sha256=expected_cycle_sha256,
+        authority_snapshots={
+            current_pointer_path: expected_pointer_sha256,
+            report_path: report_sha256,
+        },
     )
     print(f"REVISIT CYCLE ABORTED: {args.cycle}")
     return 0
 
 
-def command_register_current(args: argparse.Namespace) -> int:
-    workspace = Path(args.workspace)
-    _load_ticker_state(workspace)
+def command_abort(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        return _command_abort_in_transaction(args, workspace)
+
+
+def _command_register_current_in_transaction(
+    args: argparse.Namespace, workspace: Path
+) -> int:
+    _load_ticker_state(workspace, "register-current")
 
     current_pointer_path = pointer_path(workspace)
     expected_pointer_sha256 = (
@@ -539,6 +635,7 @@ def command_register_current(args: argparse.Namespace) -> int:
             workspace,
             pointer,
             expected_sha256=expected_pointer_sha256,
+            authority_snapshots={workspace / relative: report_sha256},
         )
     except Exception:
         if created_cycles:
@@ -547,6 +644,11 @@ def command_register_current(args: argparse.Namespace) -> int:
 
     print(f"CURRENT REPORT REGISTERED: {relative}")
     return 0
+
+
+def command_register_current(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        return _command_register_current_in_transaction(args, workspace)
 
 
 def build_parser() -> argparse.ArgumentParser:
