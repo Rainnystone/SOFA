@@ -15,6 +15,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from revisit_contract import (
     ACTION_CLASSES,
+    POINTER_FILENAME,
     RevisitContractError,
     allocate_cycle_and_revision_ids,
     create_cycle,
@@ -27,7 +28,6 @@ from revisit_contract import (
     load_pointer,
     persist_cycle,
     persist_pointer,
-    pointer_path,
     sha256_bytes,
     sha256_file,
     workspace_transaction,
@@ -35,6 +35,7 @@ from revisit_contract import (
 from revisit_contract.model import with_audit
 from revisit_contract.store import (
     load_intake_request,
+    normalize_workspace_relative_path,
     resolve_workspace_path,
     verify_workspace_artifact,
 )
@@ -214,7 +215,8 @@ def _validate_request_references(
             )
             raise RevisitContractError(f"source cache failed validation: {details}")
         preliminary_by_id = {
-            str(record["source_id"]): record for record in preliminary.records
+            str(record["source_id"]): copy.deepcopy(record)
+            for record in preliminary.records
         }
         missing = sorted(requested_source_ids - set(preliminary_by_id))
         if missing:
@@ -227,16 +229,21 @@ def _validate_request_references(
             raise RevisitContractError("sources_index.jsonl is required") from exc
         artifact_snapshots[source_index_path] = sha256_bytes(source_index_payload)
         for source_id in sorted(requested_source_ids):
+            excerpt_relative = normalize_workspace_relative_path(
+                preliminary_by_id[source_id]["excerpt_path"]
+            )
             excerpt_path = resolve_workspace_path(
                 workspace,
-                preliminary_by_id[source_id]["excerpt_path"],
+                excerpt_relative,
                 parent="sources",
             )
             if not excerpt_path.is_file():
                 raise RevisitContractError(
                     f"source excerpt is not a file: {source_id}"
                 )
-            artifact_snapshots[excerpt_path] = sha256_bytes(excerpt_path.read_bytes())
+            artifact_snapshots[workspace / excerpt_relative] = sha256_bytes(
+                excerpt_path.read_bytes()
+            )
 
         evaluation = evaluate_index(workspace)
         if evaluation.issues:
@@ -245,9 +252,15 @@ def _validate_request_references(
                 for issue in evaluation.issues
             )
             raise RevisitContractError(f"source cache failed validation: {details}")
-        registered_source_ids = {
-            str(record["source_id"]) for record in evaluation.records
+        final_by_id = {
+            str(record["source_id"]): record for record in evaluation.records
         }
+        for source_id in sorted(requested_source_ids):
+            if final_by_id.get(source_id) != preliminary_by_id[source_id]:
+                raise RevisitContractError(
+                    f"source record changed during validation: {source_id}"
+                )
+        registered_source_ids = set(final_by_id)
         _require_unchanged_authorities(artifact_snapshots)
 
     def validate_reference(ref: dict) -> None:
@@ -297,7 +310,7 @@ def _command_start_in_transaction(args: argparse.Namespace, workspace: Path) -> 
     request = load_intake_request(args.intake_file)
     request, artifact_snapshots = _validate_request_references(workspace, request)
 
-    current_pointer_path = pointer_path(workspace)
+    current_pointer_path = workspace / POINTER_FILENAME
     expected_pointer_sha256 = sha256_file(current_pointer_path)
     pointer = load_pointer(workspace)
     current, report_path, report_sha256 = _require_current_report(
@@ -522,7 +535,7 @@ def _command_abort_in_transaction(args: argparse.Namespace, workspace: Path) -> 
         )
 
     _load_ticker_state(workspace, "abort")
-    current_pointer_path = pointer_path(workspace)
+    current_pointer_path = workspace / POINTER_FILENAME
     expected_pointer_sha256 = sha256_file(current_pointer_path)
     pointer = load_pointer(workspace)
     current, report_path, report_sha256 = _require_current_report(
@@ -588,7 +601,7 @@ def _command_register_current_in_transaction(
 ) -> int:
     _load_ticker_state(workspace, "register-current")
 
-    current_pointer_path = pointer_path(workspace)
+    current_pointer_path = workspace / POINTER_FILENAME
     expected_pointer_sha256 = (
         sha256_file(current_pointer_path) if current_pointer_path.exists() else None
     )
@@ -599,6 +612,12 @@ def _command_register_current_in_transaction(
         if existing["current_revision"] is not None:
             raise RevisitContractError("current report is already registered")
         pointer = existing
+
+    existing_cycles = [
+        load_cycle(workspace, cycle_id)
+        for cycle_id in list_cycle_ids(workspace)
+    ]
+    evaluate_history(pointer, existing_cycles).require_valid()
 
     relative, payload, _ = read_specific_markdown_report(workspace, args.report)
     report_sha256 = sha256_bytes(payload)

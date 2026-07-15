@@ -407,17 +407,23 @@ def evaluate_history(
         cycle["cycle_id"]
         for cycle in ordered
         if cycle["status"] == "completed"
-        and (
-            current_revision_number is None
-            or int(
-                REVISION_ID_RE.fullmatch(
-                    cycle["candidate_revision_id"]
-                ).group("number")
-            )
-            > current_revision_number
-        )
+        and current_revision_number is not None
+        and int(
+            REVISION_ID_RE.fullmatch(
+                cycle["candidate_revision_id"]
+            ).group("number")
+        ) > current_revision_number
     )
     issues: list[RevisitIssue] = []
+    if current is None and ordered:
+        issues.append(
+            RevisitIssue(
+                "history_without_current_revision",
+                "pointer.current_revision",
+                "cycle history exists without a current revision",
+                ", ".join(cycle["cycle_id"] for cycle in ordered),
+            )
+        )
     reservations: dict[str, list[str]] = {}
     for cycle in ordered:
         reservations.setdefault(cycle["candidate_revision_id"], []).append(

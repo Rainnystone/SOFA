@@ -10,6 +10,7 @@ import time
 import unicodedata
 from contextlib import contextmanager
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -40,6 +41,14 @@ class RevisitPersistenceRollbackError(RevisitContractError):
             "mirror rollback failed "
             f"({type(rollback_error).__name__}: {rollback_error})"
         )
+
+
+@dataclass(frozen=True)
+class _AuthoritySnapshot:
+    workspace: Path
+    lexical_path: Path
+    resolved_target: Path
+    expected_sha256: str
 
 
 def canonical_value_bytes(value: Any) -> bytes:
@@ -128,6 +137,11 @@ def workspace_transaction(workspace: str | Path) -> Iterator[Path]:
     key = _workspace_transaction_key(resolved_workspace)
     entries = _transaction_entries()
     existing = entries.get(key)
+    current_pid = os.getpid()
+    if existing is not None and existing["owner_pid"] != current_pid:
+        del entries[key]
+        existing["handle"].close()
+        existing = None
     if existing is not None:
         existing["depth"] += 1
         try:
@@ -145,6 +159,7 @@ def workspace_transaction(workspace: str | Path) -> Iterator[Path]:
     entries[key] = {
         "depth": 1,
         "handle": handle,
+        "owner_pid": current_pid,
         "workspace": resolved_workspace,
     }
     try:
@@ -370,12 +385,33 @@ def _require_expected_bytes(path: Path, expected_sha256: str | None) -> bytes | 
 def _normalize_authority_snapshots(
     workspace: Path,
     snapshots: dict[Path, str] | None,
-) -> dict[Path, str]:
-    normalized: dict[Path, str] = {}
+    *,
+    lexical_workspace: Path | None = None,
+) -> dict[Path, _AuthoritySnapshot]:
+    normalized: dict[Path, _AuthoritySnapshot] = {}
+    input_root = Path(
+        os.path.abspath(os.fspath(lexical_workspace or workspace))
+    )
     for raw_path, expected_sha256 in (snapshots or {}).items():
-        path = Path(raw_path).resolve(strict=False)
+        raw = Path(raw_path)
+        raw_absolute = Path(
+            os.path.abspath(os.fspath(raw if raw.is_absolute() else input_root / raw))
+        )
+        relative = None
+        for candidate_root in (input_root, workspace):
+            try:
+                relative = raw_absolute.relative_to(candidate_root)
+                break
+            except ValueError:
+                continue
+        if relative is None:
+            raise RevisitContractError(
+                f"snapshot authority escapes workspace: {raw_path}"
+            )
+        lexical_path = workspace / relative
+        resolved_target = lexical_path.resolve(strict=False)
         try:
-            path.relative_to(workspace)
+            resolved_target.relative_to(workspace)
         except ValueError as exc:
             raise RevisitContractError(
                 f"snapshot authority escapes workspace: {raw_path}"
@@ -384,23 +420,52 @@ def _normalize_authority_snapshots(
             expected_sha256
         ) is None:
             raise RevisitContractError(
-                f"snapshot digest must be a lowercase SHA-256: {path.name}"
+                "snapshot digest must be a lowercase SHA-256: "
+                f"{lexical_path.name}"
             )
-        normalized[path] = expected_sha256
+        snapshot = _AuthoritySnapshot(
+            workspace=workspace,
+            lexical_path=lexical_path,
+            resolved_target=resolved_target,
+            expected_sha256=expected_sha256,
+        )
+        existing = normalized.get(lexical_path)
+        if existing is not None and existing != snapshot:
+            raise RevisitContractError(
+                f"conflicting snapshot authority: {lexical_path.name}"
+            )
+        normalized[lexical_path] = snapshot
     return normalized
 
 
 def _require_snapshot_generations(
-    snapshots: dict[Path, str], boundary: str
+    snapshots: dict[Path, _AuthoritySnapshot], boundary: str
 ) -> None:
-    for path, expected_sha256 in snapshots.items():
+    for snapshot in snapshots.values():
+        path = snapshot.lexical_path
         try:
-            payload = path.read_bytes()
+            resolved_target = path.resolve(strict=True)
         except FileNotFoundError as exc:
             raise RevisitContractError(
                 f"authority disappeared {boundary}: {path.name}"
             ) from exc
-        if sha256_bytes(payload) != expected_sha256:
+        try:
+            resolved_target.relative_to(snapshot.workspace)
+        except ValueError as exc:
+            raise RevisitContractError(
+                f"snapshot authority escapes workspace {boundary}: {path.name}"
+            ) from exc
+        if resolved_target != snapshot.resolved_target:
+            raise RevisitContractError(
+                f"authority target changed {boundary}: {path.name}"
+            )
+        try:
+            payload = resolved_target.read_bytes()
+        except FileNotFoundError as exc:
+            raise RevisitContractError(
+                f"authority disappeared {boundary}: {path.name}"
+            ) from exc
+        if sha256_bytes(payload) != snapshot.expected_sha256:
             raise RevisitContractError(
                 f"authority changed {boundary}: {path.name}"
             )
@@ -411,6 +476,21 @@ def _read_optional_bytes(path: Path) -> bytes | None:
         return path.read_bytes()
     except FileNotFoundError:
         return None
+
+
+def _restore_committed_markdown(
+    path: Path,
+    written_payload: bytes,
+    prior_payload: bytes | None,
+) -> None:
+    if _read_optional_bytes(path) != written_payload:
+        raise RevisitContractError(
+            "cycle Markdown changed after transaction write; rollback refused"
+        )
+    if prior_payload is None:
+        path.unlink()
+    else:
+        _atomic_replace(path, prior_payload)
 
 
 def _restore_committed_cycle_pair(
@@ -461,11 +541,14 @@ def persist_pointer(
     *,
     authority_snapshots: dict[Path, str] | None = None,
 ) -> Path:
+    lexical_workspace = Path(workspace)
     with workspace_transaction(workspace) as locked_workspace:
         validate_pointer(pointer)
         path = pointer_path(locked_workspace)
         snapshots = _normalize_authority_snapshots(
-            locked_workspace, authority_snapshots
+            locked_workspace,
+            authority_snapshots,
+            lexical_workspace=lexical_workspace,
         )
         prior_payload = _require_expected_bytes(path, expected_sha256)
         payload = canonical_document_bytes(pointer)
@@ -491,6 +574,7 @@ def persist_cycle(
     *,
     authority_snapshots: dict[Path, str] | None = None,
 ) -> tuple[Path, Path]:
+    lexical_workspace = Path(workspace)
     with workspace_transaction(workspace) as locked_workspace:
         validate_cycle(cycle)
         json_path = cycle_json_path(locked_workspace, cycle["cycle_id"])
@@ -500,7 +584,9 @@ def persist_cycle(
                 "cycle JSON and Markdown authority targets must be distinct"
             )
         snapshots = _normalize_authority_snapshots(
-            locked_workspace, authority_snapshots
+            locked_workspace,
+            authority_snapshots,
+            lexical_workspace=lexical_workspace,
         )
         prior_json = _require_expected_bytes(json_path, expected_sha256)
         prior_markdown = markdown_path.read_bytes() if markdown_path.exists() else None
@@ -512,11 +598,11 @@ def persist_cycle(
             _atomic_replace(json_path, json_payload)
         except Exception as original_error:
             try:
-                if prior_markdown is None:
-                    if markdown_path.exists():
-                        markdown_path.unlink()
-                else:
-                    _atomic_replace(markdown_path, prior_markdown)
+                _restore_committed_markdown(
+                    markdown_path,
+                    markdown_payload,
+                    prior_markdown,
+                )
             except Exception as rollback_error:
                 raise RevisitPersistenceRollbackError(
                     original_error, rollback_error

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import tempfile
@@ -671,6 +672,35 @@ class TestRevisitCycleCliBootstrap(unittest.TestCase):
 
 
 class TestRevisitCycleRegisterCurrentCli(unittest.TestCase):
+    def test_register_current_rejects_existing_cycle_history_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, report = make_registration_workspace(Path(temp_dir))
+            cycle = make_history_cycle(1, 2, "aborted")
+            revisit_contract.persist_cycle(
+                workspace,
+                cycle,
+                expected_sha256=None,
+            )
+            before = snapshot_tree(workspace)
+            report_before = report.read_bytes()
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "register-current",
+                "--report",
+                "reports/final.md",
+                "--action-class",
+                "Watch with Trigger",
+            )
+
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertIn(
+                "cycle history exists without a current revision",
+                result.stderr,
+            )
+            self.assertEqual(before, snapshot_tree(workspace))
+            self.assertEqual(report_before, report.read_bytes())
+
     def test_register_current_rejects_pointer_changed_between_snapshot_and_load(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, report = make_registration_workspace(Path(temp_dir))
@@ -1780,6 +1810,25 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                     self.assertEqual(drifted_bytes, target.read_bytes())
                     self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    def test_source_excerpt_snapshot_preserves_canonical_lexical_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            lexical_excerpt = workspace / "sources" / "src-001.md"
+            resolved_excerpt = workspace / "sources" / "src-001-target.md"
+            resolved_excerpt.write_bytes(lexical_excerpt.read_bytes())
+            lexical_excerpt.unlink()
+            lexical_excerpt.symlink_to(resolved_excerpt.name)
+
+            request = revisit_store.load_intake_request(request_path)
+            _, snapshots = revisit_cycle_cli._validate_request_references(
+                workspace, request
+            )
+
+            self.assertIn(lexical_excerpt, snapshots)
+            self.assertNotIn(resolved_excerpt, snapshots)
+
     def test_start_binds_source_index_and_excerpt_after_cycle_persistence(self):
         for target_name in ("sources_index.jsonl", "sources/src-001.md"):
             with self.subTest(target=target_name):
@@ -1869,6 +1918,60 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                     self.assertNotIn("REVISIT CYCLE STARTED", stdout.getvalue())
                     self.assertEqual(drifted_bytes, target.read_bytes())
                     self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
+
+    def test_source_evaluations_must_agree_on_requested_record_mapping(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            original_excerpt = workspace / "sources" / "src-001.md"
+            remapped_excerpt = workspace / "sources" / "src-001-remapped.md"
+            remapped_excerpt.write_bytes(original_excerpt.read_bytes())
+            before = snapshot_tree(workspace)
+            real_evaluate_index = revisit_cycle_cli.evaluate_index
+            calls = 0
+
+            def evaluate_with_second_call_remap(*args, **kwargs):
+                nonlocal calls
+                evaluation = real_evaluate_index(*args, **kwargs)
+                calls += 1
+                if calls != 2:
+                    return evaluation
+                remapped_record = copy.deepcopy(evaluation.records[0])
+                remapped_record["excerpt_path"] = "sources/src-001-remapped.md"
+                return dataclasses.replace(
+                    evaluation,
+                    records=(remapped_record, *evaluation.records[1:]),
+                )
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_index",
+                    side_effect=evaluate_with_second_call_remap,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "start",
+                        "--intake-file",
+                        str(request_path),
+                    ]
+                )
+
+            self.assertEqual(2, calls)
+            self.assertEqual(2, result, stderr.getvalue())
+            self.assertIn(
+                "source record changed during validation: src-001",
+                stderr.getvalue(),
+            )
+            self.assertNotIn("REVISIT CYCLE STARTED", stdout.getvalue())
+            self.assertEqual(before, snapshot_tree(workspace))
+            self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
 
     def test_start_refuses_to_rollback_over_third_party_cycle_pair_bytes(self):
         for authority_suffix in (".json", ".md"):
@@ -2085,6 +2188,30 @@ class TestRevisitHistoryValidation(unittest.TestCase):
         initial = evaluator(self.initial_pointer(), [])
         self.assertEqual(1, initial.current_revision_number)
         self.assertEqual((), initial.issues)
+
+    def test_nonempty_history_requires_a_current_revision_for_every_status(self):
+        evaluator = self.required_evaluator()
+        for status in ("active", "ready_for_report", "aborted", "completed"):
+            with self.subTest(status=status):
+                pointer = revisit_contract.empty_pointer()
+                cycle = make_history_cycle(1, 2, status)
+                pointer_before = copy.deepcopy(pointer)
+                cycle_before = copy.deepcopy(cycle)
+
+                fact = evaluator(pointer, [cycle])
+
+                self.assertEqual(
+                    ["history_without_current_revision"],
+                    [issue.code for issue in fact.issues],
+                )
+                self.assertEqual((), fact.completed_unpublished_cycle_ids)
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    "cycle history exists without a current revision",
+                ):
+                    fact.require_valid()
+                self.assertEqual(pointer_before, pointer)
+                self.assertEqual(cycle_before, cycle)
 
     def test_history_validator_and_allocator_reject_every_global_conflict(self):
         invalid_histories = (
@@ -2451,6 +2578,38 @@ class TestRevisitCycleStatusCli(unittest.TestCase):
                             (workspace / "revisit_cycles" / "RC-0001.json")
                             .read_text(encoding="utf-8"),
                         )
+
+    def test_status_reports_history_without_current_revision_and_no_next_command(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self.make_status_workspace(Path(temp_dir), "empty")
+            revisit_contract.persist_cycle(
+                workspace,
+                make_history_cycle(1, 2, "completed"),
+                expected_sha256=None,
+            )
+            before = snapshot_tree(workspace)
+
+            json_result = run_revisit_cycle_cli(workspace, "status", "--json")
+            text_result = run_revisit_cycle_cli(workspace, "status")
+
+            self.assertEqual(0, json_result.returncode, json_result.stderr)
+            self.assertEqual(0, text_result.returncode, text_result.stderr)
+            summary = json.loads(json_result.stdout)
+            self.assertTrue(
+                any(
+                    "history_without_current_revision" in issue
+                    for issue in summary["issues"]
+                ),
+                summary,
+            )
+            self.assertEqual("completed", summary["cycles"][0]["status"])
+            self.assertIsNone(summary["next_legal_command"])
+            self.assertIn(
+                "ISSUE: history_without_current_revision",
+                text_result.stdout,
+            )
+            self.assertIn("NEXT LEGAL COMMAND: none", text_result.stdout)
+            self.assertEqual(before, snapshot_tree(workspace))
 
     def test_status_optional_cycle_filters_history_and_rejects_unknown_id_without_writes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3596,6 +3755,71 @@ class TestRevisitWorkspaceTransaction(unittest.TestCase):
             self.assertEqual(0, child.returncode, stderr)
             self.assertEqual("acquired", acquired.read_text(encoding="utf-8"))
 
+    @unittest.skipUnless(hasattr(os, "fork"), "os.fork is unavailable")
+    def test_forked_child_must_reacquire_after_parent_transaction_releases(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            workspace.mkdir()
+            ready_read, ready_write = os.pipe()
+            entered_read, entered_write = os.pipe()
+            pid = None
+            try:
+                with revisit_contract.workspace_transaction(workspace):
+                    pid = os.fork()
+                    if pid == 0:
+                        try:
+                            os.close(ready_read)
+                            os.close(entered_read)
+                            os.write(ready_write, b"ready")
+                            os.close(ready_write)
+                            with revisit_contract.workspace_transaction(workspace):
+                                os.write(entered_write, b"entered")
+                            os.close(entered_write)
+                        except BaseException:
+                            os._exit(97)
+                        os._exit(0)
+
+                    os.close(ready_write)
+                    ready_write = None
+                    os.close(entered_write)
+                    entered_write = None
+                    readable, _, _ = select.select([ready_read], [], [], 5)
+                    self.assertTrue(readable, "forked child did not reach lock boundary")
+                    self.assertEqual(b"ready", os.read(ready_read, 5))
+                    readable, _, _ = select.select([entered_read], [], [], 0.5)
+                    self.assertFalse(
+                        readable,
+                        "forked child reused the parent's transaction entry",
+                    )
+
+                readable, _, _ = select.select([entered_read], [], [], 5)
+                self.assertTrue(
+                    readable,
+                    "forked child did not enter after parent released the lock",
+                )
+                self.assertEqual(b"entered", os.read(entered_read, 7))
+                waited_pid, status = os.waitpid(pid, 0)
+                self.assertEqual(pid, waited_pid)
+                self.assertEqual(0, os.waitstatus_to_exitcode(status))
+                pid = None
+            finally:
+                if pid is not None:
+                    waited_pid, _ = os.waitpid(pid, os.WNOHANG)
+                    if waited_pid == 0:
+                        os.kill(pid, 9)
+                        os.waitpid(pid, 0)
+                for descriptor in (
+                    ready_read,
+                    ready_write,
+                    entered_read,
+                    entered_write,
+                ):
+                    if descriptor is not None:
+                        try:
+                            os.close(descriptor)
+                        except OSError:
+                            pass
+
     def test_status_enters_the_workspace_transaction_before_reading_authority(self):
         transaction = revisit_contract.workspace_transaction
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4007,6 +4231,118 @@ class TestRevisitPersistence(unittest.TestCase):
             )
             self.assertEqual(cycle, revisit_contract.load_cycle(workspace, "RC-0001"))
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    def test_snapshot_rejects_same_byte_target_change_before_cycle_persistence(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        cycle = make_minimal_cycle()
+        authority_bytes = b"same authority generation\n"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            sources = workspace / "sources"
+            sources.mkdir()
+            first_target = sources / "src-001-first.md"
+            second_target = sources / "src-001-second.md"
+            lexical_excerpt = sources / "src-001.md"
+            first_target.write_bytes(authority_bytes)
+            second_target.write_bytes(authority_bytes)
+            lexical_excerpt.symlink_to(first_target.name)
+            expected_sha256 = hashlib.sha256(authority_bytes).hexdigest()
+            real_require = revisit_store._require_snapshot_generations
+            injected = False
+
+            def retarget_then_require(snapshots, boundary):
+                nonlocal injected
+                if boundary == "before cycle persistence" and not injected:
+                    injected = True
+                    lexical_excerpt.unlink()
+                    lexical_excerpt.symlink_to(second_target.name)
+                return real_require(snapshots, boundary)
+
+            with mock.patch.object(
+                revisit_store,
+                "_require_snapshot_generations",
+                side_effect=retarget_then_require,
+            ):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    "authority target changed before cycle persistence",
+                ):
+                    persist_cycle(
+                        workspace,
+                        cycle,
+                        expected_sha256=None,
+                        authority_snapshots={
+                            lexical_excerpt: expected_sha256,
+                        },
+                    )
+
+            self.assertEqual(second_target.resolve(), lexical_excerpt.resolve())
+            self.assertEqual(authority_bytes, first_target.read_bytes())
+            self.assertEqual(authority_bytes, second_target.read_bytes())
+            self.assertFalse(
+                (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.json").exists()
+            )
+            self.assertFalse(
+                (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md").exists()
+            )
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    def test_snapshot_rejects_same_byte_target_change_after_cycle_persistence(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        cycle = make_minimal_cycle()
+        authority_bytes = b"same authority generation\n"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            sources = workspace / "sources"
+            sources.mkdir()
+            first_target = sources / "src-001-first.md"
+            second_target = sources / "src-001-second.md"
+            lexical_excerpt = sources / "src-001.md"
+            first_target.write_bytes(authority_bytes)
+            second_target.write_bytes(authority_bytes)
+            lexical_excerpt.symlink_to(first_target.name)
+            expected_sha256 = hashlib.sha256(authority_bytes).hexdigest()
+            real_atomic_replace = revisit_store._atomic_replace
+            injected = False
+
+            def replace_then_retarget(path, payload):
+                nonlocal injected
+                real_atomic_replace(path, payload)
+                if Path(path).name == "RC-0001.json" and not injected:
+                    injected = True
+                    lexical_excerpt.unlink()
+                    lexical_excerpt.symlink_to(second_target.name)
+
+            with mock.patch.object(
+                revisit_store,
+                "_atomic_replace",
+                side_effect=replace_then_retarget,
+            ):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    "authority target changed after cycle persistence",
+                ):
+                    persist_cycle(
+                        workspace,
+                        cycle,
+                        expected_sha256=None,
+                        authority_snapshots={
+                            lexical_excerpt: expected_sha256,
+                        },
+                    )
+
+            self.assertEqual(second_target.resolve(), lexical_excerpt.resolve())
+            self.assertEqual(authority_bytes, first_target.read_bytes())
+            self.assertEqual(authority_bytes, second_target.read_bytes())
+            self.assertFalse(
+                (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.json").exists()
+            )
+            self.assertFalse(
+                (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md").exists()
+            )
+
     def test_persist_cycle_rejects_path_alias_before_render_and_preserves_bytes(self):
         persist_cycle = self.required_callable("persist_cycle")
         original = make_minimal_cycle()
@@ -4114,6 +4450,93 @@ class TestRevisitPersistence(unittest.TestCase):
             self.assertFalse((directory / "RC-0001.json").exists())
             self.assertEqual(["RC-0001.md", "RC-0001.json"], destinations)
             self.assertEqual([], list(directory.iterdir()))
+
+    def test_first_write_json_failure_refuses_to_remove_third_party_mirror(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        cycle = make_minimal_cycle()
+        third_party_bytes = b"third-party mirror after transaction write\n"
+        real_replace = os.replace
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            markdown_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md"
+            )
+            json_path = workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.json"
+
+            def fail_json_after_third_party_write(source, destination):
+                destination = Path(destination)
+                if destination.name == "RC-0001.json":
+                    markdown_path.write_bytes(third_party_bytes)
+                    raise OSError("first cycle JSON replace failed")
+                return real_replace(source, destination)
+
+            with mock.patch(
+                "scripts.revisit_contract.store.os.replace",
+                side_effect=fail_json_after_third_party_write,
+            ):
+                try:
+                    persist_cycle(workspace, cycle, expected_sha256=None)
+                except Exception as error:
+                    self.assertIsInstance(
+                        error, revisit_contract.RevisitPersistenceRollbackError
+                    )
+                    self.assertIn("first cycle JSON replace failed", str(error))
+                    self.assertIn("rollback refused", str(error))
+                else:
+                    self.fail("third-party mirror ownership loss was not reported")
+
+            self.assertEqual(third_party_bytes, markdown_path.read_bytes())
+            self.assertFalse(json_path.exists())
+
+    def test_existing_json_failure_refuses_to_restore_over_third_party_mirror(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        original = make_minimal_cycle()
+        updated = make_minimal_cycle()
+        updated["status"] = "ready_for_report"
+        attach_valid_audit(updated)
+        original_json = revisit_contract.canonical_document_bytes(original)
+        original_markdown = b"prior exact mirror bytes\n"
+        third_party_bytes = b"third-party mirror after transaction write\n"
+        real_replace = os.replace
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            directory = workspace / revisit_contract.CYCLES_DIRNAME
+            directory.mkdir()
+            json_path = directory / "RC-0001.json"
+            markdown_path = directory / "RC-0001.md"
+            json_path.write_bytes(original_json)
+            markdown_path.write_bytes(original_markdown)
+
+            def fail_json_after_third_party_write(source, destination):
+                destination = Path(destination)
+                if destination.name == "RC-0001.json":
+                    markdown_path.write_bytes(third_party_bytes)
+                    raise OSError("existing cycle JSON replace failed")
+                return real_replace(source, destination)
+
+            with mock.patch(
+                "scripts.revisit_contract.store.os.replace",
+                side_effect=fail_json_after_third_party_write,
+            ):
+                try:
+                    persist_cycle(
+                        workspace,
+                        updated,
+                        expected_sha256=hashlib.sha256(original_json).hexdigest(),
+                    )
+                except Exception as error:
+                    self.assertIsInstance(
+                        error, revisit_contract.RevisitPersistenceRollbackError
+                    )
+                    self.assertIn("existing cycle JSON replace failed", str(error))
+                    self.assertIn("rollback refused", str(error))
+                else:
+                    self.fail("third-party mirror ownership loss was not reported")
+
+            self.assertEqual(third_party_bytes, markdown_path.read_bytes())
+            self.assertEqual(original_json, json_path.read_bytes())
 
     def test_rollback_error_is_an_explicit_contract_error(self):
         error_type = getattr(
