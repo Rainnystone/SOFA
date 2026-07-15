@@ -28,16 +28,17 @@ from revisit_contract import (
     load_pointer,
     persist_cycle,
     persist_pointer,
-    sha256_bytes,
     sha256_file,
     workspace_transaction,
 )
 from revisit_contract.model import with_audit
 from revisit_contract.store import (
     PreparedAuthoritySnapshot,
+    _AuthorityGeneration,
+    _read_authority_generation,
+    _require_authority_generation,
     load_intake_request,
     normalize_workspace_relative_path,
-    prepare_authority_snapshot,
     resolve_workspace_path,
     verify_workspace_artifact,
 )
@@ -87,6 +88,21 @@ def _utc_now_seconds() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _require_owner_generation(
+    generation: _AuthorityGeneration,
+    owner_payload: bytes,
+    authority: str,
+) -> None:
+    if owner_payload != generation.payload:
+        raise RevisitContractError(
+            f"{authority} owner bytes differ from captured generation"
+        )
+    _require_authority_generation(
+        generation,
+        f"after {authority} validation",
+    )
+
+
 def _require_current_report(
     workspace: Path, pointer: dict
 ) -> tuple[dict, Path, str, PreparedAuthoritySnapshot]:
@@ -95,15 +111,25 @@ def _require_current_report(
         raise RevisitContractError(
             "current report is not registered; run register-current first"
         )
+    report_relative = normalize_workspace_relative_path(current["report_path"])
+    report_generation = _read_authority_generation(
+        workspace,
+        workspace / report_relative,
+    )
     relative, payload, _ = read_specific_markdown_report(
         workspace, current["report_path"]
+    )
+    _require_owner_generation(
+        report_generation,
+        payload,
+        "current report",
     )
     if relative != current["report_path"]:
         raise RevisitContractError(
             "pointer current report path is not canonical: "
             f"{current['report_path']}"
         )
-    report_sha256 = sha256_bytes(payload)
+    report_sha256 = report_generation.snapshot.expected_sha256
     if report_sha256 != current["report_sha256"]:
         raise RevisitContractError(
             "registered report bytes do not match current pointer"
@@ -118,22 +144,24 @@ def _require_current_report(
             f"{issue.code}: {issue.message}" for issue in result.failures
         )
         raise RevisitContractError(details)
-    report_path = workspace / relative
-    if sha256_file(report_path) != report_sha256:
-        raise RevisitContractError("current report changed during validation")
-    authority_snapshot = prepare_authority_snapshot(
-        workspace,
-        report_path,
-        report_sha256,
+    _require_authority_generation(
+        report_generation,
+        "after current report evaluation",
     )
-    return current, report_path, report_sha256, authority_snapshot
+    return (
+        current,
+        report_generation.snapshot.lexical_path,
+        report_sha256,
+        report_generation.snapshot,
+    )
 
 
 def _load_revisit_framing(
     workspace: Path,
 ) -> tuple[dict, Path, str, PreparedAuthoritySnapshot]:
     path = workspace / "framing_contract.json"
-    payload = path.read_bytes()
+    generation = _read_authority_generation(workspace, path)
+    payload = generation.payload
     try:
         raw_contract = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -164,12 +192,12 @@ def _load_revisit_framing(
         "report_language": contract["report_language"],
         "budget_appetite": contract["budget_appetite"],
     }
-    digest = sha256_bytes(payload)
+    digest = generation.snapshot.expected_sha256
     return (
         snapshot,
         path,
         digest,
-        prepare_authority_snapshot(workspace, path, digest),
+        generation.snapshot,
     )
 
 
@@ -185,11 +213,19 @@ def _load_workspace_boundary(
     PreparedAuthoritySnapshot,
     PreparedAuthoritySnapshot,
 ]:
+    registry_path = workspace / "frontier_registry.json"
+    registry_generation = _read_authority_generation(workspace, registry_path)
     registry, registry_payload = read_registry_snapshot(workspace)
+    _require_owner_generation(
+        registry_generation,
+        registry_payload,
+        "frontier registry",
+    )
     if registry.get("mode") != "ticker":
         raise RevisitContractError("frontier registry mode must be ticker")
     ledger_path = workspace / "evidence_ledger.md"
-    ledger_payload = ledger_path.read_bytes()
+    ledger_generation = _read_authority_generation(workspace, ledger_path)
+    ledger_payload = ledger_generation.payload
     ledger_text = ledger_payload.decode("utf-8")
     max_loop_number = 0
     if "## Loop " in ledger_text:
@@ -202,27 +238,42 @@ def _load_workspace_boundary(
             if match is None:
                 raise RevisitContractError(f"malformed loop header: {line}")
             max_loop_number = max(max_loop_number, int(match.group("loop")))
-    registry_path = workspace / "frontier_registry.json"
-    registry_sha256 = sha256_bytes(registry_payload)
-    ledger_sha256 = sha256_bytes(ledger_payload)
+    registry_sha256 = registry_generation.snapshot.expected_sha256
+    ledger_sha256 = ledger_generation.snapshot.expected_sha256
     return (
         registry,
-        registry_path,
+        registry_generation.snapshot.lexical_path,
         registry_sha256,
-        ledger_path,
+        ledger_generation.snapshot.lexical_path,
         ledger_sha256,
         max_loop_number,
-        prepare_authority_snapshot(
-            workspace,
-            registry_path,
-            registry_sha256,
-        ),
-        prepare_authority_snapshot(
-            workspace,
-            ledger_path,
-            ledger_sha256,
-        ),
+        registry_generation.snapshot,
+        ledger_generation.snapshot,
     )
+
+
+def _validate_workspace_artifact_generation(
+    workspace: Path,
+    value: str,
+    expected_sha256: str,
+) -> tuple[str, _AuthorityGeneration]:
+    relative = normalize_workspace_relative_path(value)
+    resolve_workspace_path(workspace, relative)
+    generation = _read_authority_generation(
+        workspace,
+        workspace / relative,
+    )
+    owner_relative, owner_payload = verify_workspace_artifact(
+        workspace,
+        relative,
+        expected_sha256,
+    )
+    _require_owner_generation(
+        generation,
+        owner_payload,
+        "workspace artifact",
+    )
+    return owner_relative, generation
 
 
 def _validate_request_references(
@@ -244,7 +295,16 @@ def _validate_request_references(
 
     registered_source_ids: set[str] = set()
     if requested_source_ids:
+        source_index_path = workspace / "sources_index.jsonl"
+        source_index_generation = _read_authority_generation(
+            workspace,
+            source_index_path,
+        )
         preliminary = evaluate_index(workspace)
+        _require_authority_generation(
+            source_index_generation,
+            "after preliminary source cache validation",
+        )
         if preliminary.issues:
             details = "; ".join(
                 f"{issue.code} at {issue.location}: {issue.message}"
@@ -259,42 +319,41 @@ def _validate_request_references(
         if missing:
             raise RevisitContractError(f"source_id is not registered: {missing[0]}")
 
-        source_index_path = workspace / "sources_index.jsonl"
-        try:
-            source_index_payload = source_index_path.read_bytes()
-        except FileNotFoundError as exc:
-            raise RevisitContractError("sources_index.jsonl is required") from exc
-        source_index_sha256 = sha256_bytes(source_index_payload)
-        artifact_snapshots.append(
-            prepare_authority_snapshot(
-                workspace,
-                source_index_path,
-                source_index_sha256,
-            )
-        )
+        artifact_snapshots.append(source_index_generation.snapshot)
+        excerpt_generations: list[_AuthorityGeneration] = []
         for source_id in sorted(requested_source_ids):
             excerpt_relative = normalize_workspace_relative_path(
                 preliminary_by_id[source_id]["excerpt_path"]
             )
-            excerpt_path = resolve_workspace_path(
+            excerpt_generation = _read_authority_generation(
+                workspace,
+                workspace / excerpt_relative,
+            )
+            resolved_excerpt = resolve_workspace_path(
                 workspace,
                 excerpt_relative,
                 parent="sources",
             )
-            if not excerpt_path.is_file():
+            if (
+                resolved_excerpt != excerpt_generation.snapshot.resolved_target
+                or not resolved_excerpt.is_file()
+            ):
                 raise RevisitContractError(
                     f"source excerpt is not a file: {source_id}"
                 )
-            excerpt_sha256 = sha256_bytes(excerpt_path.read_bytes())
-            artifact_snapshots.append(
-                prepare_authority_snapshot(
-                    workspace,
-                    workspace / excerpt_relative,
-                    excerpt_sha256,
-                )
-            )
+            excerpt_generations.append(excerpt_generation)
+            artifact_snapshots.append(excerpt_generation.snapshot)
 
         evaluation = evaluate_index(workspace)
+        _require_authority_generation(
+            source_index_generation,
+            "after source cache validation",
+        )
+        for generation in excerpt_generations:
+            _require_authority_generation(
+                generation,
+                "after source cache validation",
+            )
         if evaluation.issues:
             details = "; ".join(
                 f"{issue.code} at {issue.location}: {issue.message}"
@@ -318,34 +377,26 @@ def _validate_request_references(
                     f"source_id is not registered: {ref['source_id']}"
                 )
             return
-        relative, payload = verify_workspace_artifact(
-            workspace, ref["path"], ref["sha256"]
+        relative, generation = _validate_workspace_artifact_generation(
+            workspace,
+            ref["path"],
+            ref["sha256"],
         )
         ref["path"] = relative
-        artifact_snapshots.append(
-            prepare_authority_snapshot(
-                workspace,
-                workspace / relative,
-                sha256_bytes(payload),
-            )
-        )
+        artifact_snapshots.append(generation.snapshot)
 
     for trigger in canonical["triggers"]:
         for ref in trigger["evidence_refs"]:
             validate_reference(ref)
     for claim in canonical["selected_claims"]:
         source_ref = claim["source_ref"]
-        relative, payload = verify_workspace_artifact(
-            workspace, source_ref["path"], source_ref["sha256"]
+        relative, generation = _validate_workspace_artifact_generation(
+            workspace,
+            source_ref["path"],
+            source_ref["sha256"],
         )
         source_ref["path"] = relative
-        artifact_snapshots.append(
-            prepare_authority_snapshot(
-                workspace,
-                workspace / relative,
-                sha256_bytes(payload),
-            )
-        )
+        artifact_snapshots.append(generation.snapshot)
         for inherited in claim["inherited_evidence"]:
             validate_reference(inherited["ref"])
     return canonical, tuple(artifact_snapshots)
@@ -357,13 +408,15 @@ def _command_start_in_transaction(args: argparse.Namespace, workspace: Path) -> 
     request, artifact_snapshots = _validate_request_references(workspace, request)
 
     current_pointer_path = workspace / POINTER_FILENAME
-    expected_pointer_sha256 = sha256_file(current_pointer_path)
-    pointer_authority = prepare_authority_snapshot(
+    pointer_generation = _read_authority_generation(
         workspace,
         current_pointer_path,
-        expected_pointer_sha256,
     )
     pointer = load_pointer(workspace)
+    _require_authority_generation(
+        pointer_generation,
+        "after pointer validation",
+    )
     current, _, _, report_authority = _require_current_report(
         workspace, pointer
     )
@@ -417,7 +470,7 @@ def _command_start_in_transaction(args: argparse.Namespace, workspace: Path) -> 
     )
 
     snapshots = (
-        pointer_authority,
+        pointer_generation.snapshot,
         report_authority,
         framing_authority,
         registry_authority,
@@ -591,13 +644,15 @@ def _command_abort_in_transaction(args: argparse.Namespace, workspace: Path) -> 
 
     _load_ticker_state(workspace, "abort")
     current_pointer_path = workspace / POINTER_FILENAME
-    expected_pointer_sha256 = sha256_file(current_pointer_path)
-    pointer_authority = prepare_authority_snapshot(
+    pointer_generation = _read_authority_generation(
         workspace,
         current_pointer_path,
-        expected_pointer_sha256,
     )
     pointer = load_pointer(workspace)
+    _require_authority_generation(
+        pointer_generation,
+        "after pointer validation",
+    )
     current, _, _, report_authority = _require_current_report(
         workspace, pointer
     )
@@ -636,7 +691,7 @@ def _command_abort_in_transaction(args: argparse.Namespace, workspace: Path) -> 
         workspace,
         aborted,
         expected_sha256=expected_cycle_sha256,
-        authority_snapshots=(pointer_authority, report_authority),
+        authority_snapshots=(pointer_generation.snapshot, report_authority),
     )
     print(f"REVISIT CYCLE ABORTED: {args.cycle}")
     return 0
@@ -670,8 +725,18 @@ def _command_register_current_in_transaction(
     ]
     evaluate_history(pointer, existing_cycles).require_valid()
 
+    report_relative = normalize_workspace_relative_path(args.report)
+    report_generation = _read_authority_generation(
+        workspace,
+        workspace / report_relative,
+    )
     relative, payload, _ = read_specific_markdown_report(workspace, args.report)
-    report_sha256 = sha256_bytes(payload)
+    _require_owner_generation(
+        report_generation,
+        payload,
+        "current report",
+    )
+    report_sha256 = report_generation.snapshot.expected_sha256
     report_result = evaluate_specific_ticker_report(
         workspace,
         relative,
@@ -681,10 +746,9 @@ def _command_register_current_in_transaction(
         for issue in report_result.failures:
             print(issue.display(), file=sys.stderr)
         return 1
-    report_authority = prepare_authority_snapshot(
-        workspace,
-        workspace / relative,
-        report_sha256,
+    _require_authority_generation(
+        report_generation,
+        "after current report evaluation",
     )
 
     pointer["current_revision"] = {
@@ -710,7 +774,7 @@ def _command_register_current_in_transaction(
             workspace,
             pointer,
             expected_sha256=expected_pointer_sha256,
-            authority_snapshots=(report_authority,),
+            authority_snapshots=(report_generation.snapshot,),
         )
     except Exception:
         if created_cycles:

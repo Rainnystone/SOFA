@@ -673,6 +673,52 @@ class TestRevisitCycleCliBootstrap(unittest.TestCase):
 
 class TestRevisitCycleRegisterCurrentCli(unittest.TestCase):
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    def test_register_current_rejects_report_retarget_between_owner_and_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, report = make_registration_workspace(Path(temp_dir))
+            first_target = report.with_name("first.md")
+            second_target = report.with_name("second.md")
+            report_bytes = report.read_bytes()
+            second_target.write_bytes(report_bytes)
+            real_evaluate_report = revisit_cycle_cli.evaluate_specific_ticker_report
+
+            def evaluate_then_retarget(*args, **kwargs):
+                result = real_evaluate_report(*args, **kwargs)
+                report.replace(first_target)
+                report.symlink_to(second_target.name)
+                return result
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_specific_ticker_report",
+                    side_effect=evaluate_then_retarget,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "register-current",
+                        "--report",
+                        "reports/final.md",
+                        "--action-class",
+                        "Watch with Trigger",
+                    ]
+                )
+
+            self.assertNotEqual(0, result, stdout.getvalue())
+            self.assertNotIn("CURRENT REPORT REGISTERED", stdout.getvalue())
+            self.assertEqual(second_target.resolve(), report.resolve())
+            self.assertEqual(report_bytes, first_target.read_bytes())
+            self.assertEqual(report_bytes, second_target.read_bytes())
+            self.assertFalse((workspace / revisit_contract.POINTER_FILENAME).exists())
+            self.assertFalse((workspace / revisit_contract.CYCLES_DIRNAME).exists())
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
     def test_register_current_rejects_equal_byte_report_retarget_after_validation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, report = make_registration_workspace(Path(temp_dir))
@@ -1284,6 +1330,7 @@ class TestRevisitCycleStartCli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, _ = make_revisit_start_workspace(Path(temp_dir))
             framing_path = workspace / "framing_contract.json"
+            framing_target = framing_path.resolve()
             original_bytes = framing_path.read_bytes()
             drifted = json.loads(original_bytes.decode("utf-8"))
             drifted["time_horizon"] = "drifted horizon"
@@ -1296,7 +1343,7 @@ class TestRevisitCycleStartCli(unittest.TestCase):
             def read_then_drift(path):
                 nonlocal injected
                 payload = real_read_bytes(path)
-                if Path(path) == framing_path and not injected:
+                if Path(path) == framing_target and not injected:
                     injected = True
                     framing_path.write_bytes(drifted_bytes)
                 return payload
@@ -1944,44 +1991,161 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                 (workspace / "revisit_cycles" / "RC-0001.md").exists()
             )
 
-    def test_start_prepares_all_authorities_at_validation_boundaries(self):
-        prepare_snapshot = getattr(
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    def test_start_rejects_registry_retarget_between_owner_and_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            registry = workspace / "frontier_registry.json"
+            first_target = workspace / "frontier_registry-first.json"
+            second_target = workspace / "frontier_registry-second.json"
+            registry_bytes = registry.read_bytes()
+            second_target.write_bytes(registry_bytes)
+            pointer = workspace / revisit_contract.POINTER_FILENAME
+            source_index = workspace / "sources_index.jsonl"
+            source_excerpt = workspace / "sources" / "src-001.md"
+            pointer_before = pointer.read_bytes()
+            source_index_before = source_index.read_bytes()
+            source_excerpt_before = source_excerpt.read_bytes()
+            real_read_registry = revisit_cycle_cli.read_registry_snapshot
+
+            def read_then_retarget(*args, **kwargs):
+                result = real_read_registry(*args, **kwargs)
+                registry.replace(first_target)
+                registry.symlink_to(second_target.name)
+                return result
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "read_registry_snapshot",
+                    side_effect=read_then_retarget,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "start",
+                        "--intake-file",
+                        str(request_path),
+                    ]
+                )
+
+            self.assertNotEqual(0, result, stdout.getvalue())
+            self.assertNotIn("REVISIT CYCLE STARTED", stdout.getvalue())
+            self.assertEqual(second_target.resolve(), registry.resolve())
+            self.assertEqual(registry_bytes, first_target.read_bytes())
+            self.assertEqual(registry_bytes, second_target.read_bytes())
+            self.assertEqual(pointer_before, pointer.read_bytes())
+            self.assertEqual(source_index_before, source_index.read_bytes())
+            self.assertEqual(source_excerpt_before, source_excerpt.read_bytes())
+            self.assertFalse(
+                (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.json").exists()
+            )
+            self.assertFalse(
+                (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md").exists()
+            )
+
+    def test_start_captures_all_authority_generations_before_owner_reads(self):
+        read_generation = getattr(
             revisit_cycle_cli,
-            "prepare_authority_snapshot",
+            "_read_authority_generation",
             None,
         )
         self.assertTrue(
-            callable(prepare_snapshot),
-            "authority snapshot preparation seam is missing",
+            callable(read_generation),
+            "authority generation read seam is missing",
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             workspace, request_path = make_revisit_start_workspace(root)
-            prepared_paths = []
-            pointer_events = []
-            real_load_pointer = revisit_cycle_cli.load_pointer
+            events = []
 
-            def record_prepared_path(snapshot_workspace, path, digest):
+            def record_generation(snapshot_workspace, path):
                 relative = Path(path).relative_to(snapshot_workspace).as_posix()
-                prepared_paths.append(relative)
-                if relative == revisit_contract.POINTER_FILENAME:
-                    pointer_events.append("prepare")
-                return prepare_snapshot(snapshot_workspace, path, digest)
+                events.append(("capture", relative))
+                return read_generation(snapshot_workspace, path)
 
-            def record_pointer_load(*args, **kwargs):
-                pointer_events.append("load")
-                return real_load_pointer(*args, **kwargs)
+            def record_owner(label, operation):
+                def wrapper(*args, **kwargs):
+                    events.append(("owner", label))
+                    return operation(*args, **kwargs)
+
+                return wrapper
 
             with (
                 mock.patch.object(
                     revisit_cycle_cli,
-                    "prepare_authority_snapshot",
-                    side_effect=record_prepared_path,
+                    "_read_authority_generation",
+                    side_effect=record_generation,
                 ),
                 mock.patch.object(
                     revisit_cycle_cli,
                     "load_pointer",
-                    side_effect=record_pointer_load,
+                    side_effect=record_owner(
+                        "pointer",
+                        revisit_cycle_cli.load_pointer,
+                    ),
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "read_specific_markdown_report",
+                    side_effect=record_owner(
+                        "report-read",
+                        revisit_cycle_cli.read_specific_markdown_report,
+                    ),
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_specific_ticker_report",
+                    side_effect=record_owner(
+                        "report-evaluate",
+                        revisit_cycle_cli.evaluate_specific_ticker_report,
+                    ),
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_contract",
+                    side_effect=record_owner(
+                        "framing",
+                        revisit_cycle_cli.evaluate_contract,
+                    ),
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "read_registry_snapshot",
+                    side_effect=record_owner(
+                        "registry",
+                        revisit_cycle_cli.read_registry_snapshot,
+                    ),
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "derive_loop_counts",
+                    side_effect=record_owner(
+                        "ledger",
+                        revisit_cycle_cli.derive_loop_counts,
+                    ),
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_index",
+                    side_effect=record_owner(
+                        "source-cache",
+                        revisit_cycle_cli.evaluate_index,
+                    ),
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "verify_workspace_artifact",
+                    side_effect=record_owner(
+                        "artifact",
+                        revisit_cycle_cli.verify_workspace_artifact,
+                    ),
                 ),
                 mock.patch.object(revisit_cycle_cli.sys, "stdout", io.StringIO()),
             ):
@@ -1995,6 +2159,9 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                 )
 
             self.assertEqual(0, result)
+            captured_paths = {
+                path for kind, path in events if kind == "capture"
+            }
             self.assertEqual(
                 {
                     "revisit_contract.json",
@@ -2006,9 +2173,44 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                     "sources/src-001.md",
                     "claim_ledger.md",
                 },
-                set(prepared_paths),
+                captured_paths,
             )
-            self.assertEqual(["prepare", "load"], pointer_events)
+
+            def event_position(kind, label):
+                return events.index((kind, label))
+
+            for path, owner in (
+                ("revisit_contract.json", "pointer"),
+                ("reports/final.md", "report-read"),
+                ("reports/final.md", "report-evaluate"),
+                ("framing_contract.json", "framing"),
+                ("frontier_registry.json", "registry"),
+                ("evidence_ledger.md", "ledger"),
+                ("claim_ledger.md", "artifact"),
+            ):
+                with self.subTest(path=path, owner=owner):
+                    self.assertLess(
+                        event_position("capture", path),
+                        event_position("owner", owner),
+                    )
+            source_cache_positions = [
+                index
+                for index, event in enumerate(events)
+                if event == ("owner", "source-cache")
+            ]
+            self.assertEqual(2, len(source_cache_positions))
+            self.assertLess(
+                event_position("capture", "sources_index.jsonl"),
+                source_cache_positions[0],
+            )
+            self.assertLess(
+                source_cache_positions[0],
+                event_position("capture", "sources/src-001.md"),
+            )
+            self.assertLess(
+                event_position("capture", "sources/src-001.md"),
+                source_cache_positions[1],
+            )
 
     def test_start_binds_source_index_and_excerpt_after_cycle_persistence(self):
         for target_name in ("sources_index.jsonl", "sources/src-001.md"):
@@ -3103,28 +3305,28 @@ class TestRevisitCycleAbortCli(unittest.TestCase):
             expected_sha256=hashlib.sha256(cycle_path.read_bytes()).hexdigest(),
         )
 
-    def test_abort_prepares_pointer_and_current_report_authorities(self):
-        prepare_snapshot = getattr(
+    def test_abort_captures_pointer_and_report_before_owner_reads(self):
+        read_generation = getattr(
             revisit_cycle_cli,
-            "prepare_authority_snapshot",
+            "_read_authority_generation",
             None,
         )
         self.assertTrue(
-            callable(prepare_snapshot),
-            "authority snapshot preparation seam is missing",
+            callable(read_generation),
+            "authority generation read seam is missing",
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, _ = self.start_cycle(Path(temp_dir))
-            prepared_paths = []
+            captured_paths = []
             pointer_events = []
             real_load_pointer = revisit_cycle_cli.load_pointer
 
-            def record_prepared_path(snapshot_workspace, path, digest):
+            def record_generation(snapshot_workspace, path):
                 relative = Path(path).relative_to(snapshot_workspace).as_posix()
-                prepared_paths.append(relative)
+                captured_paths.append(relative)
                 if relative == revisit_contract.POINTER_FILENAME:
-                    pointer_events.append("prepare")
-                return prepare_snapshot(snapshot_workspace, path, digest)
+                    pointer_events.append("capture")
+                return read_generation(snapshot_workspace, path)
 
             def record_pointer_load(*args, **kwargs):
                 pointer_events.append("load")
@@ -3133,8 +3335,8 @@ class TestRevisitCycleAbortCli(unittest.TestCase):
             with (
                 mock.patch.object(
                     revisit_cycle_cli,
-                    "prepare_authority_snapshot",
-                    side_effect=record_prepared_path,
+                    "_read_authority_generation",
+                    side_effect=record_generation,
                 ),
                 mock.patch.object(
                     revisit_cycle_cli,
@@ -3159,9 +3361,9 @@ class TestRevisitCycleAbortCli(unittest.TestCase):
                     "revisit_contract.json",
                     "reports/final.md",
                 },
-                set(prepared_paths),
+                set(captured_paths),
             )
-            self.assertEqual(["prepare", "load"], pointer_events)
+            self.assertEqual(["capture", "load"], pointer_events)
 
     def test_abort_accepts_active_and_ready_with_copy_on_write_audit(self):
         for starting_status in ("active", "ready_for_report"):

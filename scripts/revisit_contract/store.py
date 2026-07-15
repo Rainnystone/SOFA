@@ -51,6 +51,12 @@ class PreparedAuthoritySnapshot:
     expected_sha256: str
 
 
+@dataclass(frozen=True)
+class _AuthorityGeneration:
+    snapshot: PreparedAuthoritySnapshot
+    payload: bytes
+
+
 _AuthoritySnapshots = (
     dict[Path, str] | tuple[PreparedAuthoritySnapshot, ...] | None
 )
@@ -387,13 +393,12 @@ def _require_expected_bytes(path: Path, expected_sha256: str | None) -> bytes | 
     return original
 
 
-def _prepare_authority_snapshot(
+def _resolve_authority_identity(
     workspace: Path,
     raw_path: Path,
-    expected_sha256: str,
     *,
     lexical_workspace: Path | None = None,
-) -> PreparedAuthoritySnapshot:
+) -> tuple[Path, Path]:
     input_root = Path(
         os.path.abspath(os.fspath(lexical_workspace or workspace))
     )
@@ -418,6 +423,21 @@ def _prepare_authority_snapshot(
         raise RevisitContractError(
             f"snapshot authority escapes workspace: {raw_path}"
         ) from exc
+    return lexical_path, resolved_target
+
+
+def _prepare_authority_snapshot(
+    workspace: Path,
+    raw_path: Path,
+    expected_sha256: str,
+    *,
+    lexical_workspace: Path | None = None,
+) -> PreparedAuthoritySnapshot:
+    lexical_path, resolved_target = _resolve_authority_identity(
+        workspace,
+        raw_path,
+        lexical_workspace=lexical_workspace,
+    )
     if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(
         expected_sha256
     ) is None:
@@ -445,6 +465,32 @@ def prepare_authority_snapshot(
         expected_sha256,
         lexical_workspace=Path(workspace),
     )
+
+
+def _read_authority_generation(
+    workspace: str | Path,
+    lexical_path: Path,
+) -> _AuthorityGeneration:
+    resolved_workspace = Path(workspace).resolve()
+    canonical_path, resolved_target = _resolve_authority_identity(
+        resolved_workspace,
+        lexical_path,
+        lexical_workspace=Path(workspace),
+    )
+    try:
+        payload = resolved_target.read_bytes()
+    except FileNotFoundError as exc:
+        raise RevisitContractError(
+            f"authority disappeared during generation capture: "
+            f"{canonical_path.name}"
+        ) from exc
+    snapshot = PreparedAuthoritySnapshot(
+        workspace=resolved_workspace,
+        lexical_path=canonical_path,
+        resolved_target=resolved_target,
+        expected_sha256=sha256_bytes(payload),
+    )
+    return _AuthorityGeneration(snapshot=snapshot, payload=payload)
 
 
 def _validate_prepared_authority_snapshot(
@@ -545,6 +591,18 @@ def _require_snapshot_generations(
             raise RevisitContractError(
                 f"authority changed {boundary}: {path.name}"
             )
+
+
+def _require_authority_generation(
+    generation: _AuthorityGeneration,
+    boundary: str,
+) -> None:
+    if not isinstance(generation, _AuthorityGeneration):
+        raise RevisitContractError("authority generation has an unsupported value")
+    _require_snapshot_generations(
+        {generation.snapshot.lexical_path: generation.snapshot},
+        boundary,
+    )
 
 
 def _read_optional_bytes(path: Path) -> bytes | None:
