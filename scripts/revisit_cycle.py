@@ -378,6 +378,8 @@ def _validate_evidence_references(
     workspace: Path,
     references: list[dict],
     path: str,
+    *,
+    forbidden_delivery_snapshot: PreparedAuthoritySnapshot | None = None,
 ) -> tuple[list[dict], tuple[PreparedAuthoritySnapshot, ...]]:
     canonical = copy.deepcopy(references)
     for index, reference in enumerate(canonical):
@@ -403,6 +405,16 @@ def _validate_evidence_references(
             reference["path"],
             reference["sha256"],
         )
+        if forbidden_delivery_snapshot is not None and (
+            generation.snapshot.lexical_path
+            == forbidden_delivery_snapshot.lexical_path
+            or generation.snapshot.resolved_target
+            == forbidden_delivery_snapshot.resolved_target
+        ):
+            raise RevisitContractError(
+                "worker delivery is provenance only and cannot be accepted "
+                "as artifact evidence"
+            )
         reference["path"] = relative
         snapshots.append(generation.snapshot)
     return canonical, tuple(snapshots)
@@ -907,7 +919,7 @@ def _command_add_derived_claim_in_transaction(
     proposed = add_derived_claim(previous, request)
     external_authorities: tuple[PreparedAuthoritySnapshot, ...] = ()
     if request["origin"] == "emergent":
-        dispatch_authorities = _validate_emergent_dispatch(
+        dispatch_authority, delivery_authority = _validate_emergent_dispatch(
             workspace,
             request["accepted_from"],
         )
@@ -915,11 +927,16 @@ def _command_add_derived_claim_in_transaction(
             workspace,
             request["accepted_from"]["evidence_refs"],
             "request.accepted_from.evidence_refs",
+            forbidden_delivery_snapshot=delivery_authority,
         )
         canonical_request = copy.deepcopy(request)
         canonical_request["accepted_from"]["evidence_refs"] = canonical_refs
         proposed = add_derived_claim(previous, canonical_request)
-        external_authorities = (*dispatch_authorities, *evidence_authorities)
+        external_authorities = (
+            dispatch_authority,
+            delivery_authority,
+            *evidence_authorities,
+        )
     claim_id = proposed["derived_claims"][-1]["claim_id"]
     updated = with_audit(
         previous,

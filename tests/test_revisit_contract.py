@@ -4008,6 +4008,46 @@ class TestRevisitDerivedClaimMutation(unittest.TestCase):
                 ),
             )
 
+    def test_emergent_claim_accepts_unrelated_exact_artifact_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            artifact = workspace / "evidence" / "accepted-filing.md"
+            artifact.parent.mkdir()
+            artifact.write_text(
+                "Independent accepted evidence.\n", encoding="utf-8"
+            )
+            request = make_emergent_claim_request()
+            request["accepted_from"]["evidence_refs"] = [
+                {
+                    "kind": "artifact",
+                    "path": "evidence/accepted-filing.md",
+                    "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                    "locator": "Independent accepted evidence",
+                    "checked_at": "2026-07-14T12:00:00Z",
+                }
+            ]
+            request_path = self.write_request(
+                root, "unrelated-artifact-evidence.json", request
+            )
+            before = revisit_contract.load_cycle(workspace, cycle_id)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "add-derived-claim",
+                cycle_id,
+                "--request-file",
+                str(request_path),
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(
+                request["accepted_from"]["evidence_refs"],
+                cycle["derived_claims"][0]["accepted_from"]["evidence_refs"],
+            )
+            self.assertEqual(len(before["audit"]) + 1, len(cycle["audit"]))
+
     def test_emergent_claim_rejects_unaccepted_provenance_with_zero_writes(self):
         cases = (
             ("undelivered", "dispatch", r"dispatch.*delivered"),
@@ -4057,6 +4097,64 @@ class TestRevisitDerivedClaimMutation(unittest.TestCase):
                 self.assertNotEqual(0, result.returncode)
                 self.assertRegex(result.stderr, pattern)
                 self.assertEqual(before, snapshot_tree(workspace))
+
+    def _assert_worker_delivery_artifact_rejected(self, *, alias: bool) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            delivery = workspace / "scouts" / "loop_10_scout.md"
+            evidence_path = delivery
+            form = "same-path"
+            if alias:
+                form = "resolved-alias"
+                evidence_path = workspace / "evidence" / "delivery-alias.md"
+                evidence_path.parent.mkdir()
+                evidence_path.symlink_to(
+                    Path("..") / "scouts" / "loop_10_scout.md"
+                )
+            request = make_emergent_claim_request()
+            request["accepted_from"]["evidence_refs"] = [
+                {
+                    "kind": "artifact",
+                    "path": evidence_path.relative_to(workspace).as_posix(),
+                    "sha256": hashlib.sha256(delivery.read_bytes()).hexdigest(),
+                    "locator": "Entire worker delivery",
+                    "checked_at": "2026-07-14T12:00:00Z",
+                }
+            ]
+            request_path = self.write_request(
+                root, f"worker-delivery-{form}.json", request
+            )
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "add-derived-claim",
+                cycle_id,
+                "--request-file",
+                str(request_path),
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertRegex(
+                result.stderr,
+                r"worker delivery.*provenance|provenance.*worker delivery",
+            )
+            self.assertEqual(before, snapshot_tree(workspace))
+            self.assertEqual(
+                [], revisit_contract.load_cycle(workspace, cycle_id)["derived_claims"]
+            )
+
+    def test_emergent_claim_rejects_delivery_as_artifact_evidence_without_writes(
+        self,
+    ):
+        self._assert_worker_delivery_artifact_rejected(alias=False)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    def test_emergent_claim_rejects_delivery_alias_as_artifact_evidence_without_writes(
+        self,
+    ):
+        self._assert_worker_delivery_artifact_rejected(alias=True)
 
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
     def test_emergent_dispatch_delivery_keeps_declared_lexical_identity(self):
@@ -4212,6 +4310,53 @@ class TestRevisitDerivedClaimMutation(unittest.TestCase):
             r"derived_claims\[0\]\.claim_id.*01.*99",
         ):
             revisit_contract.validate_cycle(cycle)
+
+    def test_derived_claim_id_space_exhaustion_is_copy_on_write(self):
+        cycle = make_minimal_cycle()
+        existing_request = {
+            "origin": "split_child",
+            "statement": "The final available derived claim.",
+            "derived_from": "RC-0001-CL-01",
+            "accepted_from": None,
+            "acceptance_rationale": "The selected proposition required a child.",
+        }
+        cycle["derived_claims"].append(
+            {"claim_id": "RC-0001-DC-99", **copy.deepcopy(existing_request)}
+        )
+        cycle["claim_resolutions"].append(
+            {
+                "claim_id": "RC-0001-DC-99",
+                "status": "cycle-pending-validation",
+                "revised_statement": None,
+                "current_evidence_refs": [],
+                "counter_evidence_refs": [],
+                "current_grade": None,
+                "current_confidence": None,
+                "bound_frontier_ids": [],
+                "rationale": None,
+                "missing_proof": None,
+                "attempted_loop_ids": [],
+                "attempted_search_refs": [],
+                "verdict_impact": None,
+                "split_child_ids": [],
+            }
+        )
+        attach_valid_audit(cycle)
+        request = {
+            **existing_request,
+            "statement": "No derived claim ID remains available.",
+        }
+        original_cycle = copy.deepcopy(cycle)
+        original_request = copy.deepcopy(request)
+
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "derived claim ID space is exhausted",
+        ):
+            revisit_contract.add_derived_claim(cycle, request)
+
+        self.assertEqual(original_cycle, cycle)
+        self.assertEqual(original_request, request)
 
 
 class TestRevisitClaimResolutionMutation(unittest.TestCase):
