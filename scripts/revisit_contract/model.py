@@ -816,6 +816,153 @@ def add_derived_claim(
     return updated
 
 
+def bind_frontier(
+    cycle: dict[str, Any], binding: dict[str, Any]
+) -> dict[str, Any]:
+    validate_cycle(cycle)
+    if cycle["status"] != "active":
+        raise RevisitContractError(
+            "frontiers may be bound only to an active cycle"
+        )
+    if cycle["decision_assessment"] is not None:
+        raise RevisitContractError(
+            "frontiers cannot be bound after decision assessment"
+        )
+    updated = copy.deepcopy(cycle)
+    updated["frontier_bindings"].append(copy.deepcopy(binding))
+    _validate_bindings(updated)
+    return updated
+
+
+def mark_ready_for_report(cycle: dict[str, Any]) -> dict[str, Any]:
+    validate_cycle(cycle)
+    if cycle["status"] != "active":
+        raise RevisitContractError(
+            "mark_ready_for_report requires an active cycle"
+        )
+    updated = copy.deepcopy(cycle)
+    updated["status"] = "ready_for_report"
+    return updated
+
+
+def derive_frontier_requirements(
+    cycle: dict[str, Any],
+) -> tuple[RevisitIssue, ...]:
+    validate_cycle(cycle)
+    bound_claim_ids = {
+        claim_id
+        for binding in cycle["frontier_bindings"]
+        for claim_id in binding["claim_ids"]
+    }
+    claim_ids = [
+        *(claim["claim_id"] for claim in cycle["intake"]["selected_claims"]),
+        *(claim["claim_id"] for claim in cycle["derived_claims"]),
+    ]
+    return tuple(
+        RevisitIssue(
+            "REVISIT_FRONTIER_BINDING_INVALID",
+            f"cycle.claim_resolutions[{claim_id}]",
+            "claim has no declared frontier binding",
+            claim_id,
+        )
+        for claim_id in claim_ids
+        if claim_id not in bound_claim_ids
+    )
+
+
+def derive_claim_issues(cycle: dict[str, Any]) -> tuple[RevisitIssue, ...]:
+    validate_cycle(cycle)
+    issues = []
+    resolutions = {
+        resolution["claim_id"]: resolution
+        for resolution in cycle["claim_resolutions"]
+    }
+    for claim_id, resolution in resolutions.items():
+        if resolution["status"] in {
+            "inherited-pending-reverification",
+            "cycle-pending-validation",
+        }:
+            issues.append(
+                RevisitIssue(
+                    "REVISIT_CLAIM_UNRESOLVED",
+                    f"cycle.claim_resolutions[{claim_id}]",
+                    "claim has not reached a terminal cycle outcome",
+                    claim_id,
+                )
+            )
+    assessment = cycle["decision_assessment"]
+    if assessment is not None:
+        for claim_id in assessment["supporting_claim_ids"]:
+            if resolutions[claim_id]["status"] not in {"confirmed", "weakened"}:
+                issues.append(
+                    RevisitIssue(
+                        "REVISIT_CLAIM_SUPPORT_FORBIDDEN",
+                        "cycle.decision_assessment.supporting_claim_ids",
+                        "only confirmed or weakened claims may support the decision",
+                        claim_id,
+                    )
+                )
+    return tuple(issues)
+
+
+def derive_freshness_issues(
+    cycle: dict[str, Any],
+) -> tuple[RevisitIssue, ...]:
+    validate_cycle(cycle)
+    selected = {
+        claim["claim_id"]: claim
+        for claim in cycle["intake"]["selected_claims"]
+    }
+    issues = []
+    for resolution in cycle["claim_resolutions"]:
+        if resolution["status"] not in {"confirmed", "weakened"}:
+            continue
+        inherited = [
+            evidence
+            for evidence in selected.get(
+                resolution["claim_id"], {"inherited_evidence": []}
+            )["inherited_evidence"]
+            if evidence["freshness"] in {"stale", "unknown"}
+        ]
+        if not inherited:
+            continue
+        valid_support = False
+        for current_ref in resolution["current_evidence_refs"]:
+            matching = [
+                evidence
+                for evidence in inherited
+                if _evidence_identity(evidence["ref"])
+                == _evidence_identity(current_ref)
+            ]
+            if not matching or all(
+                current_ref["checked_at"] > evidence["checked_at"]
+                for evidence in matching
+            ):
+                valid_support = True
+                break
+        if not valid_support:
+            issues.append(
+                RevisitIssue(
+                    "REVISIT_FRESHNESS_SUPPORT_INVALID",
+                    f"cycle.claim_resolutions[{resolution['claim_id']}].current_evidence_refs",
+                    "confirmed or weakened support requires new current evidence or explicit fresh revalidation",
+                    resolution["claim_id"],
+                )
+            )
+    return tuple(issues)
+
+
+def _evidence_identity(reference: dict[str, Any]) -> tuple[Any, ...]:
+    if reference["kind"] == "source":
+        return ("source", reference["source_id"])
+    return (
+        "artifact",
+        reference["path"],
+        reference["sha256"],
+        reference["locator"],
+    )
+
+
 def resolve_claim(
     cycle: dict[str, Any], claim_id: str, outcome: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1424,8 +1571,11 @@ def _validate_bindings(raw: dict[str, Any]) -> None:
             path,
         )
         _require_non_empty_text(binding["frontier_id"], f"{path}.frontier_id")
-        _require_non_empty_text(binding["action"], f"{path}.action")
+        if binding["action"] not in {"reactivated", "added"}:
+            raise RevisitContractError(f"{path}.action is unsupported")
         claim_ids = _require_list(binding["claim_ids"], f"{path}.claim_ids")
+        if not claim_ids:
+            raise RevisitContractError(f"{path}.claim_ids must not be empty")
         for claim_id in claim_ids:
             _require_any_claim_id(claim_id, f"{path}.claim_ids", raw["cycle_id"])
             if claim_id not in known_claim_ids:
@@ -1433,10 +1583,9 @@ def _validate_bindings(raw: dict[str, Any]) -> None:
                     f"{path}.claim_ids must reference known same-cycle claims"
                 )
         _require_unique(claim_ids, f"{path}.claim_ids")
-        for expected in _require_list(
+        _require_non_empty_text(
             binding["expected_evidence"], f"{path}.expected_evidence"
-        ):
-            _require_non_empty_text(expected, f"{path}.expected_evidence")
+        )
         _require_strict_int(
             binding["baseline_loop_count"], f"{path}.baseline_loop_count"
         )

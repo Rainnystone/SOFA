@@ -20,6 +20,7 @@ from revisit_contract import (
     add_derived_claim,
     allocate_cycle_and_revision_ids,
     assess_decision,
+    bind_frontier,
     create_cycle,
     cycle_directory,
     cycle_json_path,
@@ -28,6 +29,7 @@ from revisit_contract import (
     list_cycle_ids,
     load_cycle,
     load_pointer,
+    mark_ready_for_report,
     persist_cycle,
     persist_pointer,
     resolve_claim,
@@ -41,6 +43,7 @@ from revisit_contract.store import (
     _AuthorityGeneration,
     _read_authority_generation,
     _require_authority_generation,
+    _require_snapshot_generations,
     load_intake_request,
     normalize_workspace_relative_path,
     resolve_workspace_path,
@@ -48,10 +51,13 @@ from revisit_contract.store import (
 )
 from framing_contract import evaluate_contract
 from framing_contract.model import normalize_contract
-from frontier_lifecycle import LOOP_HEADER_RE, derive_loop_counts
+from frontier_lifecycle import LOOP_HEADER_RE, derive_loop_counts, get_frontier
 from frontier_review import read_registry_snapshot
 from source_cache import evaluate_index
-from sofa_contract.evaluate import evaluate_specific_ticker_report
+from sofa_contract.evaluate import (
+    evaluate_revisit_report,
+    evaluate_specific_ticker_report,
+)
 from sofa_contract.workspace import read_specific_markdown_report
 
 
@@ -256,6 +262,63 @@ def _load_workspace_boundary(
     )
 
 
+def _load_frontier_binding_snapshot(
+    workspace: Path,
+) -> tuple[
+    dict,
+    dict[str, int],
+    tuple[tuple[int, str], ...],
+    PreparedAuthoritySnapshot,
+    PreparedAuthoritySnapshot,
+]:
+    registry_generation = _read_authority_generation(
+        workspace, workspace / "frontier_registry.json"
+    )
+    registry, registry_payload = read_registry_snapshot(workspace)
+    _require_owner_generation(
+        registry_generation,
+        registry_payload,
+        "frontier registry",
+    )
+    if registry.get("mode") != "ticker":
+        raise RevisitContractError("frontier registry mode must be ticker")
+
+    ledger_generation = _read_authority_generation(
+        workspace, workspace / "evidence_ledger.md"
+    )
+    try:
+        ledger_text = ledger_generation.payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RevisitContractError(
+            "evidence_ledger.md must be valid UTF-8"
+        ) from exc
+    loop_counts = (
+        derive_loop_counts(ledger_text, registry)
+        if "## Loop " in ledger_text
+        else {frontier["id"]: 0 for frontier in registry["frontiers"]}
+    )
+    headers: list[tuple[int, str]] = []
+    for raw_line in ledger_text.splitlines():
+        line = raw_line.rstrip()
+        if not line.startswith("## Loop "):
+            continue
+        match = LOOP_HEADER_RE.fullmatch(line)
+        if match is None:
+            raise RevisitContractError(f"malformed loop header: {line}")
+        headers.append((int(match.group("loop")), match.group("frontier_id")))
+    _require_authority_generation(
+        ledger_generation,
+        "after evidence ledger validation",
+    )
+    return (
+        registry,
+        loop_counts,
+        tuple(headers),
+        registry_generation.snapshot,
+        ledger_generation.snapshot,
+    )
+
+
 def _validate_workspace_artifact_generation(
     workspace: Path,
     value: str,
@@ -420,16 +483,16 @@ def _validate_evidence_references(
     return canonical, tuple(snapshots)
 
 
-def _validate_emergent_dispatch(
-    workspace: Path, accepted_from: dict
-) -> tuple[PreparedAuthoritySnapshot, PreparedAuthoritySnapshot]:
-    dispatch_generation = _read_authority_generation(
-        workspace,
-        workspace / "dispatch_log.jsonl",
-    )
+def _decode_dispatch_generation(
+    generation: _AuthorityGeneration,
+    *,
+    strict: bool,
+) -> list[dict]:
     try:
-        text = dispatch_generation.payload.decode("utf-8")
+        text = generation.payload.decode("utf-8")
     except UnicodeDecodeError as exc:
+        if not strict:
+            return []
         raise RevisitContractError(
             "dispatch_log.jsonl must be valid UTF-8 JSONL"
         ) from exc
@@ -440,14 +503,109 @@ def _validate_emergent_dispatch(
         try:
             record = json.loads(line)
         except json.JSONDecodeError as exc:
+            if not strict:
+                return []
             raise RevisitContractError(
                 f"dispatch_log.jsonl line {line_number} must be valid JSON"
             ) from exc
         if not isinstance(record, dict):
+            if not strict:
+                return []
             raise RevisitContractError(
                 f"dispatch_log.jsonl line {line_number} must contain an object"
             )
         records.append(record)
+    return records
+
+
+def _read_dispatch_delivery_generation(
+    workspace: Path,
+    record: dict,
+    *,
+    strict: bool,
+) -> _AuthorityGeneration | None:
+    dispatch_id = str(record.get("dispatch_id", ""))
+    raw_delivery = record.get("delivery_path")
+    if (
+        not isinstance(raw_delivery, str)
+        or not raw_delivery
+        or any(unicodedata.category(character) == "Cc" for character in raw_delivery)
+    ):
+        if not strict:
+            return None
+        raise RevisitContractError(
+            f"dispatch {dispatch_id} delivery_path must be non-empty text"
+        )
+    candidate = Path(raw_delivery)
+    lexical_delivery = (
+        candidate if candidate.is_absolute() else workspace / candidate
+    )
+    resolved = (
+        candidate.resolve(strict=False)
+        if candidate.is_absolute()
+        else (workspace / candidate).resolve(strict=False)
+    )
+    try:
+        relative = resolved.relative_to(workspace.resolve()).as_posix()
+    except ValueError as exc:
+        if not strict:
+            return None
+        raise RevisitContractError(
+            f"dispatch {dispatch_id} delivery path escapes workspace"
+        ) from exc
+    if not resolved.is_file():
+        if not strict:
+            return None
+        raise RevisitContractError(
+            f"dispatch {dispatch_id} delivery path is missing or not a file: {relative}"
+        )
+    return _read_authority_generation(workspace, lexical_delivery)
+
+
+def _capture_dispatch_delivery_generations(
+    workspace: Path,
+) -> tuple[_AuthorityGeneration, ...]:
+    # This transaction layer captures existing targets only. The evaluator
+    # remains the sole owner of malformed, missing, or ineligible delivery
+    # verdicts, so invalid records are not reinterpreted here.
+    dispatch_path = workspace / "dispatch_log.jsonl"
+    if not dispatch_path.is_file():
+        return ()
+    dispatch_generation = _read_authority_generation(workspace, dispatch_path)
+    records = _decode_dispatch_generation(dispatch_generation, strict=False)
+    generations = [dispatch_generation]
+    seen_paths = set()
+    for record in records:
+        if record.get("status") != "delivered":
+            continue
+        generation = _read_dispatch_delivery_generation(
+            workspace,
+            record,
+            strict=False,
+        )
+        if (
+            generation is None
+            or generation.snapshot.lexical_path in seen_paths
+        ):
+            continue
+        seen_paths.add(generation.snapshot.lexical_path)
+        generations.append(generation)
+    for generation in generations:
+        _require_authority_generation(
+            generation,
+            "after dispatch delivery generation capture",
+        )
+    return tuple(generations)
+
+
+def _validate_emergent_dispatch(
+    workspace: Path, accepted_from: dict
+) -> tuple[PreparedAuthoritySnapshot, PreparedAuthoritySnapshot]:
+    dispatch_generation = _read_authority_generation(
+        workspace,
+        workspace / "dispatch_log.jsonl",
+    )
+    records = _decode_dispatch_generation(dispatch_generation, strict=True)
     _require_authority_generation(
         dispatch_generation,
         "after dispatch log validation",
@@ -473,36 +631,15 @@ def _validate_emergent_dispatch(
         raise RevisitContractError(
             f"dispatch {dispatch_id} must have status delivered"
         )
-    raw_delivery = record.get("delivery_path")
-    if (
-        not isinstance(raw_delivery, str)
-        or not raw_delivery
-        or any(unicodedata.category(character) == "Cc" for character in raw_delivery)
-    ):
-        raise RevisitContractError(
-            f"dispatch {dispatch_id} delivery_path must be non-empty text"
-        )
-    candidate = Path(raw_delivery)
-    lexical_delivery = candidate if candidate.is_absolute() else workspace / candidate
-    resolved = (
-        candidate.resolve(strict=False)
-        if candidate.is_absolute()
-        else (workspace / candidate).resolve(strict=False)
-    )
-    try:
-        relative = resolved.relative_to(workspace.resolve()).as_posix()
-    except ValueError as exc:
-        raise RevisitContractError(
-            f"dispatch {dispatch_id} delivery path escapes workspace"
-        ) from exc
-    if not resolved.is_file():
-        raise RevisitContractError(
-            f"dispatch {dispatch_id} delivery path is missing or not a file: {relative}"
-        )
-    delivery_generation = _read_authority_generation(
+    delivery_generation = _read_dispatch_delivery_generation(
         workspace,
-        lexical_delivery,
+        record,
+        strict=True,
     )
+    if delivery_generation is None:
+        raise RevisitContractError(
+            f"dispatch {dispatch_id} delivery path could not be captured"
+        )
     return dispatch_generation.snapshot, delivery_generation.snapshot
 
 
@@ -1041,6 +1178,250 @@ def command_assess_decision(args: argparse.Namespace) -> int:
         return _command_assess_decision_in_transaction(args, workspace)
 
 
+def _command_bind_frontier_in_transaction(
+    args: argparse.Namespace, workspace: Path
+) -> int:
+    cycle, expected_cycle_sha256, base_authorities = (
+        _load_active_cycle_mutation_context(
+        workspace,
+        args.cycle,
+        "bind-frontier",
+        )
+    )
+    (
+        registry,
+        loop_counts,
+        headers,
+        registry_authority,
+        ledger_authority,
+    ) = _load_frontier_binding_snapshot(workspace)
+    boundary = cycle["intake"]["workspace_boundary"][
+        "max_existing_loop_number"
+    ]
+    post_boundary = [
+        loop_number
+        for loop_number, frontier_id in headers
+        if frontier_id == args.frontier and loop_number > boundary
+    ]
+    if post_boundary:
+        raise RevisitContractError(
+            f"frontier {args.frontier} has post-boundary loop "
+            f"{min(post_boundary)}; bind before new loops"
+        )
+
+    frontier = get_frontier(registry, args.frontier)
+    lifecycle = frontier.get("lifecycle", [])
+    if args.action == "reactivated":
+        if frontier.get("status") != "Active":
+            raise RevisitContractError(
+                f"reactivated frontier {args.frontier} must be Active"
+            )
+        if (
+            len(lifecycle) < 2
+            or lifecycle[-1].get("to") != "Active"
+            or not isinstance(lifecycle[-1].get("ts"), str)
+            or lifecycle[-1]["ts"] < cycle["created_at"]
+        ):
+            raise RevisitContractError(
+                f"reactivated frontier {args.frontier} requires a post-cycle "
+                "Active transition"
+            )
+        if lifecycle[-2].get("to") != "Continued":
+            raise RevisitContractError(
+                f"reactivated frontier {args.frontier} must immediately follow "
+                "Continued"
+            )
+    else:
+        first_transition = lifecycle[0] if lifecycle else None
+        if frontier.get("status") not in {"New", "Active"}:
+            raise RevisitContractError(
+                f"added frontier {args.frontier} must be New or Active"
+            )
+        if (
+            first_transition is None
+            or not isinstance(first_transition.get("ts"), str)
+            or first_transition["ts"] < cycle["created_at"]
+        ):
+            raise RevisitContractError(
+                f"added frontier {args.frontier} must begin at or after cycle creation"
+            )
+        if frontier.get("proposed_at_loop", 0) <= boundary:
+            raise RevisitContractError(
+                f"added frontier {args.frontier} proposed_at_loop must be greater "
+                "than the cycle boundary"
+            )
+
+    binding = {
+        "frontier_id": args.frontier,
+        "action": args.action,
+        "claim_ids": list(args.claims),
+        "expected_evidence": args.expected_evidence,
+        "baseline_loop_count": int(loop_counts.get(args.frontier, 0)),
+        "baseline_review_count": int(frontier.get("review_count", 0)),
+        "registry_sha256": registry_authority.expected_sha256,
+        "bound_at": _utc_now_seconds(),
+    }
+    proposed = bind_frontier(cycle, binding)
+    updated = with_audit(
+        cycle,
+        proposed,
+        "bind-frontier",
+        [args.frontier, *args.claims],
+        binding["bound_at"],
+    )
+    persist_cycle(
+        workspace,
+        updated,
+        expected_sha256=expected_cycle_sha256,
+        authority_snapshots=(
+            *base_authorities,
+            registry_authority,
+            ledger_authority,
+        ),
+    )
+    print(f"FRONTIER BOUND: {args.frontier}")
+    return 0
+
+
+def command_bind_frontier(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        return _command_bind_frontier_in_transaction(args, workspace)
+
+
+def _command_check_in_transaction(
+    args: argparse.Namespace, workspace: Path
+) -> int:
+    _load_ticker_state(workspace, "check")
+    pointer_generation = _read_authority_generation(
+        workspace, workspace / POINTER_FILENAME
+    )
+    pointer = load_pointer(workspace)
+    _require_authority_generation(
+        pointer_generation, "after pointer validation"
+    )
+    _, _, _, report_authority = _require_current_report(workspace, pointer)
+
+    cycle_path = cycle_json_path(workspace, args.cycle)
+    cycle_generation = _read_authority_generation(workspace, cycle_path)
+    cycle = load_cycle(workspace, args.cycle)
+    _require_authority_generation(
+        cycle_generation, "after cycle validation"
+    )
+    if cycle["status"] not in {"active", "ready_for_report"}:
+        raise RevisitContractError(
+            f"check requires active or ready cycle {args.cycle}; "
+            f"current status is {cycle['status']}"
+        )
+
+    evidence_references = (
+        *(
+            ref
+            for trigger in cycle["intake"]["triggers"]
+            for ref in trigger["evidence_refs"]
+        ),
+        *(
+            ref
+            for resolution in cycle["claim_resolutions"]
+            for field in ("current_evidence_refs", "counter_evidence_refs")
+            for ref in resolution[field]
+        ),
+    )
+    requested_source_ids = {
+        reference["source_id"]
+        for reference in evidence_references
+        if reference.get("kind") == "source"
+    }
+    _, source_snapshots = _validate_source_ids(
+        workspace,
+        requested_source_ids,
+    )
+
+    authority_generations = list(
+        _capture_dispatch_delivery_generations(workspace)
+    )
+    authority_paths = [
+        workspace / "state.json",
+        workspace / "frontier_registry.json",
+        workspace / "evidence_ledger.md",
+        workspace / "search_log.jsonl",
+    ]
+    for reference in evidence_references:
+        if reference.get("kind") == "artifact":
+            authority_paths.append(workspace / reference["path"])
+    seen_paths = {
+        generation.snapshot.lexical_path
+        for generation in authority_generations
+    }
+    for path in authority_paths:
+        lexical = Path(path)
+        if lexical in seen_paths or not lexical.is_file():
+            continue
+        seen_paths.add(lexical)
+        authority_generations.append(
+            _read_authority_generation(workspace, lexical)
+        )
+
+    evaluation = evaluate_revisit_report(
+        workspace,
+        args.cycle,
+        require_candidate=False,
+    )
+    _require_authority_generation(
+        pointer_generation, "after revisit report evaluation"
+    )
+    _require_authority_generation(
+        cycle_generation, "after revisit report evaluation"
+    )
+    for generation in authority_generations:
+        _require_authority_generation(
+            generation, "after revisit report evaluation"
+        )
+    prepared_authorities = (report_authority, *source_snapshots)
+    _require_snapshot_generations(
+        {
+            snapshot.lexical_path: snapshot
+            for snapshot in prepared_authorities
+        },
+        "after revisit report evaluation",
+    )
+    for warning in evaluation.warnings:
+        print(warning.display(), file=sys.stderr)
+    if not evaluation.passed:
+        for failure in evaluation.failures:
+            print(failure.display(), file=sys.stderr)
+        return 1
+    if cycle["status"] == "ready_for_report":
+        print(f"REVISIT CYCLE READY: {args.cycle}")
+        return 0
+
+    timestamp = _utc_now_seconds()
+    proposed = mark_ready_for_report(cycle)
+    updated = with_audit(
+        cycle,
+        proposed,
+        "check",
+        [args.cycle],
+        timestamp,
+    )
+    persist_cycle(
+        workspace,
+        updated,
+        expected_sha256=cycle_generation.snapshot.expected_sha256,
+        authority_snapshots=(
+            pointer_generation.snapshot,
+            *prepared_authorities,
+            *(generation.snapshot for generation in authority_generations),
+        ),
+    )
+    print(f"REVISIT CYCLE READY: {args.cycle}")
+    return 0
+
+
+def command_check(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        return _command_check_in_transaction(args, workspace)
+
+
 def _command_register_current_in_transaction(
     args: argparse.Namespace, workspace: Path
 ) -> int:
@@ -1211,6 +1592,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON main-thread decision assessment",
     )
     assess.set_defaults(handler=command_assess_decision)
+    bind = subparsers.add_parser(
+        "bind-frontier",
+        help="bind one legal cycle-relative frontier before new loop work",
+    )
+    bind.add_argument("cycle", help="active revisit cycle ID")
+    bind.add_argument("--frontier", required=True, help="stable frontier ID")
+    bind.add_argument(
+        "--action",
+        required=True,
+        choices=("reactivated", "added"),
+    )
+    bind.add_argument(
+        "--claim",
+        dest="claims",
+        action="append",
+        required=True,
+        help="selected or derived same-cycle claim ID",
+    )
+    bind.add_argument("--expected-evidence", required=True)
+    bind.set_defaults(handler=command_bind_frontier)
+    check = subparsers.add_parser(
+        "check",
+        help="evaluate one cycle and mark it ready for report when complete",
+    )
+    check.add_argument("cycle", help="active or ready revisit cycle ID")
+    check.set_defaults(handler=command_check)
     return parser
 
 

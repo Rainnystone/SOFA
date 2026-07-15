@@ -37,6 +37,12 @@ except ImportError:
 try:
     from revisit_contract import (
         RevisitContractError,
+        RevisitIssue,
+        derive_claim_issues,
+        derive_freshness_issues,
+        evaluate_history,
+        derive_frontier_requirements,
+        list_cycle_ids,
         load_cycle,
         load_pointer,
         sha256_bytes,
@@ -44,10 +50,26 @@ try:
 except ImportError:
     from scripts.revisit_contract import (
         RevisitContractError,
+        RevisitIssue,
+        derive_claim_issues,
+        derive_freshness_issues,
+        evaluate_history,
+        derive_frontier_requirements,
+        list_cycle_ids,
         load_cycle,
         load_pointer,
         sha256_bytes,
     )
+
+try:
+    from frontier_lifecycle import LOOP_HEADER_RE, validate_registry
+except ImportError:
+    from scripts.frontier_lifecycle import LOOP_HEADER_RE, validate_registry
+
+try:
+    from frontier_review import read_registry_snapshot
+except ImportError:
+    from scripts.frontier_review import read_registry_snapshot
 
 from .result import ContractProfile, ContractResult
 from .workspace import (
@@ -164,12 +186,227 @@ def evaluate_specific_ticker_report(
     return result
 
 
+def evaluate_revisit_report(
+    workspace: Path | str,
+    cycle_id: str,
+    require_candidate: bool = False,
+) -> ContractResult:
+    del require_candidate
+    root = Path(workspace)
+    result = ContractResult()
+    try:
+        state = read_json_file(root / "state.json")
+    except (OSError, ValueError) as exc:
+        result.fail(
+            code="REVISIT_CYCLE_MALFORMED",
+            message=str(exc),
+            path="state.json",
+        )
+        return result
+    if isinstance(state, dict) and str(state.get("mode", "")).lower() == "sector":
+        result.fail(
+            code="REVISIT_UNSUPPORTED_MODE",
+            message="revisit_report is unavailable for Sector workspaces",
+            path="state.json",
+        )
+        return result
+    try:
+        pointer = load_pointer(root)
+        cycle = load_cycle(root, cycle_id)
+        registry, _ = read_registry_snapshot(root)
+        ledger_text = (root / "evidence_ledger.md").read_text(encoding="utf-8")
+    except (OSError, ValueError, RevisitContractError) as exc:
+        message = str(exc)
+        code = (
+            "REVISIT_CLAIM_SUPPORT_FORBIDDEN"
+            if "cannot be used as positive support" in message
+            else "REVISIT_CYCLE_MALFORMED"
+        )
+        result.fail(
+            code=code,
+            message=message,
+            path=f"revisit_cycles/{cycle_id}.json",
+        )
+        return result
+
+    current = pointer["current_revision"]
+    base = cycle["intake"]["base_revision"]
+    expected_base = (
+        {
+            "revision_id": current["revision_id"],
+            "report_path": current["report_path"],
+            "report_sha256": current["report_sha256"],
+            "action_class": current["action_class"],
+        }
+        if current is not None
+        else None
+    )
+    base_drift = base != expected_base
+    if current is not None:
+        try:
+            relative, payload, _ = read_specific_markdown_report(
+                root, current["report_path"]
+            )
+            base_drift = base_drift or (
+                relative != current["report_path"]
+                or sha256_bytes(payload) != current["report_sha256"]
+            )
+        except (OSError, ValueError, RevisitContractError):
+            base_drift = True
+    if base_drift:
+        result.fail(
+            code="REVISIT_BASE_REPORT_DRIFT",
+            message="cycle base revision or current report bytes differ from the registered pointer",
+            path="cycle.intake.base_revision",
+        )
+
+    source_evaluation = evaluate_index(root)
+    source_ids = {str(record["source_id"]) for record in source_evaluation.records}
+    source_context_valid = not source_evaluation.issues
+    for trigger_index, trigger in enumerate(cycle["intake"]["triggers"]):
+        if not any(
+            _revisit_evidence_ref_valid(
+                root,
+                reference,
+                source_ids=source_ids,
+                source_context_valid=source_context_valid,
+            )
+            for reference in trigger["evidence_refs"]
+        ):
+            result.fail(
+                code="REVISIT_TRIGGER_EVIDENCE_MISSING",
+                message="fired trigger has no currently valid registered evidence reference",
+                path=f"cycle.intake.triggers[{trigger_index}].evidence_refs",
+                evidence=trigger["trigger_id"],
+            )
+
+    for issue in derive_claim_issues(cycle):
+        result.fail(
+            code=issue.code,
+            message=issue.message,
+            path=issue.path,
+            evidence=issue.evidence,
+        )
+    if cycle["decision_assessment"] is None and not any(
+        issue.code == "REVISIT_CLAIM_UNRESOLVED" for issue in result.failures
+    ):
+        result.fail(
+            code="REVISIT_CYCLE_MALFORMED",
+            message="pre-report readiness requires a decision assessment",
+            path="cycle.decision_assessment",
+        )
+
+    for issue in _derive_revisit_frontier_floor_issues(
+        root, cycle, registry, ledger_text
+    ):
+        result.fail(
+            code=issue.code,
+            message=issue.message,
+            path=issue.path,
+            evidence=issue.evidence,
+        )
+    for issue in derive_freshness_issues(cycle):
+        result.fail(
+            code=issue.code,
+            message=issue.message,
+            path=issue.path,
+            evidence=issue.evidence,
+        )
+    for resolution_index, resolution in enumerate(cycle["claim_resolutions"]):
+        if resolution["status"] not in {"confirmed", "weakened"}:
+            continue
+        if any(
+            _revisit_evidence_ref_valid(
+                root,
+                reference,
+                source_ids=source_ids,
+                source_context_valid=source_context_valid,
+            )
+            for reference in resolution["current_evidence_refs"]
+        ):
+            continue
+        result.fail(
+            code="REVISIT_FRESHNESS_SUPPORT_INVALID",
+            message="positive claim support has no currently valid exact evidence reference",
+            path=(
+                f"cycle.claim_resolutions[{resolution_index}].current_evidence_refs"
+            ),
+            evidence=resolution["claim_id"],
+        )
+    return result
+
+
+def _revisit_evidence_ref_valid(
+    workspace: Path,
+    reference: dict,
+    *,
+    source_ids: set[str],
+    source_context_valid: bool,
+) -> bool:
+    if reference.get("kind") == "source":
+        return (
+            source_context_valid
+            and str(reference.get("source_id", "")) in source_ids
+        )
+    normalized = _normalize_delivery_path(workspace, reference.get("path", ""))
+    if normalized is None:
+        return False
+    path = workspace / normalized
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return False
+    return sha256_bytes(payload) == reference.get("sha256")
+
+
+def _evaluate_discovered_revisit_report(workspace: Path) -> ContractResult:
+    result = ContractResult()
+    try:
+        pointer = load_pointer(workspace)
+        cycles = [
+            load_cycle(workspace, cycle_id)
+            for cycle_id in list_cycle_ids(workspace)
+        ]
+        history = evaluate_history(pointer, cycles)
+    except (OSError, ValueError, RevisitContractError) as exc:
+        result.fail(
+            code="REVISIT_CYCLE_MALFORMED",
+            message=str(exc),
+            path="revisit_contract.json",
+        )
+        return result
+    if history.issues:
+        for issue in history.issues:
+            result.fail(
+                code="REVISIT_CYCLE_MALFORMED",
+                message=issue.message,
+                path=issue.path,
+                evidence=issue.evidence,
+            )
+        return result
+    eligible = (
+        *history.nonterminal_cycle_ids,
+        *history.completed_unpublished_cycle_ids,
+    )
+    if len(eligible) != 1:
+        result.fail(
+            code="REVISIT_CYCLE_MALFORMED",
+            message="revisit_report requires exactly one active, ready, or completed-unpublished cycle",
+            path="revisit_cycles",
+            evidence=", ".join(eligible),
+        )
+        return result
+    return evaluate_revisit_report(workspace, eligible[0])
+
+
 def _has_exact_single_metadata_block(report_text: str, expected_metadata: str) -> bool:
     return report_text.count(expected_metadata) == 1
 
 
 def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> ContractResult:
     workspace = Path(workspace_path)
+    if profile.target == "revisit_report":
+        return _evaluate_discovered_revisit_report(workspace)
     result = ContractResult()
     state = _check_core_workspace_files(workspace, result)
     workflow_text = read_text_file(workspace / "research_workflow.md")
@@ -350,6 +587,223 @@ def _valid_search_coverage(workspace: Path) -> tuple[set[str], bool]:
     except (json.JSONDecodeError, ValueError):
         return set(), False
     return loop_ids, has_any_valid
+
+
+def _derive_revisit_frontier_floor_issues(
+    workspace: Path,
+    cycle: dict,
+    registry: dict,
+    ledger_text: str,
+) -> tuple[RevisitIssue, ...]:
+    validate_registry(registry)
+    frontiers = {
+        frontier["id"]: frontier for frontier in registry["frontiers"]
+    }
+    headers: list[tuple[int, str]] = []
+    for raw_line in ledger_text.splitlines():
+        line = raw_line.rstrip()
+        if not line.startswith("## Loop "):
+            continue
+        match = LOOP_HEADER_RE.fullmatch(line)
+        if match is None:
+            return (
+                RevisitIssue(
+                    "REVISIT_FRONTIER_BINDING_INVALID",
+                    "evidence_ledger.md",
+                    f"malformed loop header: {line}",
+                ),
+            )
+        headers.append(
+            (int(match.group("loop")), match.group("frontier_id"))
+        )
+
+    covered_search_loops, _ = _valid_search_coverage(workspace)
+    dispatch_result = ContractResult()
+    dispatch_records = (
+        _read_dispatch_records(workspace, dispatch_result)
+        if (workspace / "dispatch_log.jsonl").exists()
+        else []
+    )
+    if dispatch_records is None:
+        dispatch_records = []
+
+    boundary = cycle["intake"]["workspace_boundary"][
+        "max_existing_loop_number"
+    ]
+    issues: list[RevisitIssue] = []
+    for index, binding in enumerate(cycle["frontier_bindings"]):
+        path = f"cycle.frontier_bindings[{index}]"
+        frontier_id = binding["frontier_id"]
+        frontier = frontiers.get(frontier_id)
+        if frontier is None:
+            issues.append(
+                RevisitIssue(
+                    "REVISIT_FRONTIER_BINDING_INVALID",
+                    path,
+                    "bound frontier is absent from the validated registry",
+                    frontier_id,
+                )
+            )
+            continue
+        new_loop_numbers = tuple(
+            sorted(
+                {
+                    loop_number
+                    for loop_number, header_frontier_id in headers
+                    if header_frontier_id == frontier_id
+                    and loop_number > boundary
+                }
+            )
+        )
+        loop_ids = tuple(f"loop_{number}" for number in new_loop_numbers)
+        if len(loop_ids) < 3:
+            suffix = (
+                "; retire this incomplete cycle through abort"
+                if frontier.get("status") == "Retired"
+                else ""
+            )
+            issues.append(
+                RevisitIssue(
+                    "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+                    path,
+                    "bound frontier requires at least three distinct "
+                    f"post-boundary ledger loops; found {len(loop_ids)}{suffix}",
+                    ", ".join(loop_ids),
+                )
+            )
+            continue
+
+        missing_search = tuple(
+            loop_id for loop_id in loop_ids if loop_id not in covered_search_loops
+        )
+        if missing_search:
+            issues.append(
+                RevisitIssue(
+                    "REVISIT_SEARCH_FLOOR_MISSING",
+                    path,
+                    "every post-boundary frontier loop requires a valid search record",
+                    ", ".join(missing_search),
+                )
+            )
+
+        for role_slug, code in (
+            ("frontier_scout", "REVISIT_SCOUT_FLOOR_MISSING"),
+            ("challenge_probe", "REVISIT_CHALLENGE_FLOOR_MISSING"),
+        ):
+            missing_role = tuple(
+                loop_id
+                for loop_id in loop_ids
+                if not _has_exact_revisit_role_delivery(
+                    workspace,
+                    dispatch_records,
+                    loop_id,
+                    role_slug,
+                )
+            )
+            if missing_role:
+                issues.append(
+                    RevisitIssue(
+                        code,
+                        path,
+                        f"every post-boundary frontier loop requires delivered {role_slug} work",
+                        ", ".join(missing_role),
+                    )
+                )
+
+        baseline_reviews = binding["baseline_review_count"]
+        matching_reviews = [
+            decision
+            for decision in frontier.get("review_decisions", [])
+            if isinstance(decision.get("review_number"), int)
+            and not isinstance(decision.get("review_number"), bool)
+            and decision["review_number"] > baseline_reviews
+            and decision.get("at_loop") in new_loop_numbers
+            and decision.get("decision") in {"Continued", "Retired"}
+        ]
+        review_complete = (
+            int(frontier.get("review_count", 0)) >= baseline_reviews + 1
+            and bool(matching_reviews)
+            and frontier.get("status") == matching_reviews[-1]["decision"]
+        )
+        if not review_complete:
+            issues.append(
+                RevisitIssue(
+                    "REVISIT_REVIEW_FLOOR_MISSING",
+                    path,
+                    "bound frontier requires a post-binding review that leaves Continued or review-based Retired",
+                    (
+                        f"baseline={baseline_reviews}; "
+                        f"current={frontier.get('review_count', 0)}"
+                    ),
+                )
+            )
+    issues.extend(derive_frontier_requirements(cycle))
+    failed_binding_paths = {
+        issue.path
+        for issue in issues
+        if issue.path.startswith("cycle.frontier_bindings[")
+    }
+    bound_claim_ids = {
+        claim_id
+        for binding in cycle["frontier_bindings"]
+        for claim_id in binding["claim_ids"]
+    }
+    for claim in (
+        *cycle["intake"]["selected_claims"],
+        *cycle["derived_claims"],
+    ):
+        claim_id = claim["claim_id"]
+        binding_paths = {
+            f"cycle.frontier_bindings[{index}]"
+            for index, binding in enumerate(cycle["frontier_bindings"])
+            if claim_id in binding["claim_ids"]
+        }
+        if (
+            claim_id in bound_claim_ids
+            and binding_paths
+            and binding_paths.issubset(failed_binding_paths)
+        ):
+            issues.append(
+                RevisitIssue(
+                    "REVISIT_FRONTIER_BINDING_INVALID",
+                    f"cycle.claim_resolutions[{claim_id}]",
+                    "claim has no binding that independently passes every research floor",
+                    claim_id,
+                )
+            )
+    return tuple(issues)
+
+
+def _has_exact_revisit_role_delivery(
+    workspace: Path,
+    records: list[dict],
+    loop_id: str,
+    required_role_slug: str,
+) -> bool:
+    for record in records:
+        if str(record.get("loop_id", "")) != loop_id:
+            continue
+        if not _dispatch_record_counts_as_delivery(record):
+            continue
+        normalized_path = _normalize_delivery_path(
+            workspace, record.get("delivery_path", "")
+        )
+        if (
+            normalized_path is None
+            or not (workspace / normalized_path).is_file()
+            or _dispatch_role_delivery_issue(record, normalized_path, "ticker")
+            is not None
+        ):
+            continue
+        try:
+            role_slug = normalize_role_slug(
+                record.get("role"), delivery_path=normalized_path
+            )
+        except ValueError:
+            continue
+        if role_slug == required_role_slug:
+            return True
+    return False
 
 
 def _has_completed_search_record_shape(record: dict) -> bool:

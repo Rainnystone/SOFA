@@ -1675,7 +1675,7 @@ def write_matching_completed_cycle(
             "frontier_id": "F1",
             "action": "added",
             "claim_ids": ["RC-0001-CL-01"],
-            "expected_evidence": ["Current source evidence"],
+            "expected_evidence": "Current source evidence",
             "baseline_loop_count": 0,
             "baseline_review_count": 0,
             "registry_sha256": "c" * 64,

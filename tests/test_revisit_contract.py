@@ -18,7 +18,9 @@ import scripts.revisit_contract as revisit_contract
 import scripts.revisit_contract.model as revisit_model
 import scripts.revisit_contract.store as revisit_store
 import scripts.revisit_cycle as revisit_cycle_cli
-from scripts.frontier_lifecycle import create_frontier, make_registry
+import scripts.sofa_contract.evaluate as sofa_evaluate
+import scripts.timeliness_checker as timeliness_checker
+from scripts.frontier_lifecycle import create_frontier, make_registry, transition
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVISIT_CYCLE_SCRIPT = REPO_ROOT / "scripts" / "revisit_cycle.py"
@@ -269,6 +271,289 @@ def make_task5_mutation_workspace(root: Path) -> tuple[Path, str]:
     return workspace, "RC-0001"
 
 
+def make_task6_binding_workspace(root: Path) -> tuple[Path, str]:
+    workspace, request_path = make_revisit_start_workspace(root)
+    (workspace / "evidence_ledger.md").write_text(
+        "\n".join(
+            [
+                "# Evidence Ledger",
+                "",
+                "## Loop 2: F1 - Qualification timing",
+                "",
+                "Prior evidence.",
+                "",
+                "## Loop 5: F1 - Qualification timing",
+                "",
+                "Prior challenge.",
+                "",
+                "## Loop 7: F1 - Qualification timing",
+                "",
+                "Prior review evidence.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        mock.patch.object(
+            revisit_cycle_cli,
+            "_utc_now_seconds",
+            return_value="2026-07-14T10:00:00Z",
+        ),
+        mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+        mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+    ):
+        start = revisit_cycle_cli.main(
+            [
+                str(workspace),
+                "start",
+                "--intake-file",
+                str(request_path),
+            ]
+        )
+    if start != 0:
+        raise AssertionError(stderr.getvalue())
+
+    registry_path = workspace / "frontier_registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry = transition(
+        registry,
+        "F1",
+        "Continued",
+        {"F1": 3},
+        mode="ticker",
+        action="review",
+        rationale="The historical frontier remains decision-relevant.",
+        at_loop=7,
+        ts="2026-07-14T10:30:00Z",
+    )
+    registry = transition(
+        registry,
+        "F1",
+        "Active",
+        {"F1": 3},
+        mode="ticker",
+        action="reactivate",
+        at_loop=8,
+        ts="2026-07-14T11:00:00Z",
+    )
+    registry_path.write_text(
+        json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return workspace, "RC-0001"
+
+
+def add_task6_frontier(
+    workspace: Path,
+    *,
+    proposed_at_loop: int = 8,
+    initial_status: str = "New",
+    ts: str = "2026-07-14T10:30:00Z",
+    retire: bool = False,
+) -> str:
+    registry_path = workspace / "frontier_registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry = create_frontier(
+        registry,
+        name="New cycle-relative qualification branch",
+        proposed_at_loop=proposed_at_loop,
+        source="discovery",
+        source_frontier="F1",
+        initial_status=initial_status,
+        ts=ts,
+    )
+    frontier_id = registry["frontiers"][-1]["id"]
+    if retire:
+        registry = transition(
+            registry,
+            frontier_id,
+            "Retired",
+            {frontier_id: 0},
+            mode="ticker",
+            action="retire",
+            rationale="The branch was invalidated before research started.",
+            retire_category="invalidated",
+            at_loop=proposed_at_loop,
+            ts="2026-07-14T10:45:00Z",
+        )
+    registry_path.write_text(
+        json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return frontier_id
+
+
+def bind_task6_reactivated_frontier(workspace: Path, cycle_id: str) -> None:
+    result = run_revisit_cycle_cli(
+        workspace,
+        "bind-frontier",
+        cycle_id,
+        "--frontier",
+        "F1",
+        "--action",
+        "reactivated",
+        "--claim",
+        f"{cycle_id}-CL-01",
+        "--expected-evidence",
+        "Current qualification timing and counter-evidence.",
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+
+
+def append_task6_loops(workspace: Path, count: int) -> tuple[str, ...]:
+    loop_ids = tuple(f"loop_{number}" for number in range(8, 8 + count))
+    with (workspace / "evidence_ledger.md").open("a", encoding="utf-8") as handle:
+        for number in range(8, 8 + count):
+            handle.write(
+                f"## Loop {number}: F1 - Qualification timing\n\n"
+                f"Cycle-relative evidence for loop {number}.\n\n"
+            )
+    return loop_ids
+
+
+def write_task6_search_and_dispatch(
+    workspace: Path,
+    loop_ids: tuple[str, ...],
+) -> None:
+    search_records = [
+        {
+            "loop_id": loop_id,
+            "query": f"{loop_id} qualification evidence and counter-evidence",
+            "result_status": "completed",
+        }
+        for loop_id in loop_ids
+    ]
+    (workspace / "search_log.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in search_records),
+        encoding="utf-8",
+    )
+    dispatch_records = []
+    for loop_id in loop_ids:
+        for role, directory, suffix in (
+            ("frontier_scout", "scouts", "scout"),
+            ("challenge_probe", "challenges", "challenge"),
+        ):
+            delivery_path = f"{directory}/{loop_id}_{suffix}.md"
+            absolute = workspace / delivery_path
+            absolute.parent.mkdir(exist_ok=True)
+            absolute.write_text(
+                f"# {role}\n\nCycle-relative delivery for {loop_id}.\n",
+                encoding="utf-8",
+            )
+            dispatch_records.append(
+                {
+                    "dispatch_id": f"dispatch_{loop_id}_{suffix}",
+                    "loop_id": loop_id,
+                    "role": role,
+                    "mechanism": "host_subagent",
+                    "delivery_path": delivery_path,
+                    "status": "delivered",
+                }
+            )
+    (workspace / "dispatch_log.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in dispatch_records),
+        encoding="utf-8",
+    )
+
+
+def review_task6_frontier(
+    workspace: Path,
+    *,
+    decision: str = "Continued",
+) -> None:
+    registry_path = workspace / "frontier_registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry = transition(
+        registry,
+        "F1",
+        decision,
+        {"F1": 6},
+        mode="ticker",
+        action="review",
+        rationale="Three new loops completed the cycle-relative review.",
+        retire_category="answered_out" if decision == "Retired" else None,
+        at_loop=10,
+        ts="2026-07-14T12:00:00Z",
+    )
+    registry_path.write_text(
+        json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def derive_task6_floor_issues(workspace: Path, cycle_id: str):
+    return sofa_evaluate._derive_revisit_frontier_floor_issues(
+        workspace,
+        revisit_contract.load_cycle(workspace, cycle_id),
+        json.loads(
+            (workspace / "frontier_registry.json").read_text(encoding="utf-8")
+        ),
+        (workspace / "evidence_ledger.md").read_text(encoding="utf-8"),
+    )
+
+
+def make_task6_ready_workspace(
+    root: Path,
+    *,
+    current_ref: dict | None = None,
+) -> tuple[Path, str]:
+    workspace, cycle_id = make_task6_binding_workspace(root)
+    bind_task6_reactivated_frontier(workspace, cycle_id)
+    loop_ids = append_task6_loops(workspace, 3)
+    write_task6_search_and_dispatch(workspace, loop_ids)
+    review_task6_frontier(workspace)
+
+    resolution = make_confirmed_resolution_request()
+    resolution["current_evidence_refs"] = [
+        current_ref
+        or {
+            "kind": "source",
+            "source_id": "src-001",
+            "checked_at": "2026-07-14T12:00:00Z",
+        }
+    ]
+    resolution_path = root / "task6-resolution.json"
+    resolution_path.write_text(
+        json.dumps(resolution, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    resolved = run_revisit_cycle_cli(
+        workspace,
+        "resolve-claim",
+        cycle_id,
+        f"{cycle_id}-CL-01",
+        "--resolution-file",
+        str(resolution_path),
+    )
+    if resolved.returncode != 0:
+        raise AssertionError(resolved.stderr)
+
+    assessment_path = root / "task6-assessment.json"
+    assessment_path.write_text(
+        json.dumps(
+            make_decision_assessment_request(),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assessed = run_revisit_cycle_cli(
+        workspace,
+        "assess-decision",
+        cycle_id,
+        "--assessment-file",
+        str(assessment_path),
+    )
+    if assessed.returncode != 0:
+        raise AssertionError(assessed.stderr)
+    return workspace, cycle_id
+
+
 def make_emergent_claim_request() -> dict:
     return {
         "origin": "emergent",
@@ -300,7 +585,7 @@ def bind_selected_claim_for_task5(workspace: Path, cycle_id: str) -> None:
             "frontier_id": "F1",
             "action": "reactivated",
             "claim_ids": [f"{cycle_id}-CL-01"],
-            "expected_evidence": ["Current qualification evidence"],
+            "expected_evidence": "Current qualification evidence",
             "baseline_loop_count": 2,
             "baseline_review_count": 1,
             "registry_sha256": cycle["intake"]["workspace_boundary"][
@@ -371,7 +656,7 @@ def make_bound_model_cycle() -> dict:
             "frontier_id": "F1",
             "action": "reactivated",
             "claim_ids": ["RC-0001-CL-01"],
-            "expected_evidence": ["Current qualification evidence"],
+            "expected_evidence": "Current qualification evidence",
             "baseline_loop_count": 2,
             "baseline_review_count": 1,
             "registry_sha256": "c" * 64,
@@ -440,7 +725,7 @@ def make_split_terminal_model_cycle() -> dict:
             "frontier_id": "F2",
             "action": "added",
             "claim_ids": ["RC-0001-DC-01", "RC-0001-DC-02"],
-            "expected_evidence": ["Atomic customer qualification evidence"],
+            "expected_evidence": "Atomic customer qualification evidence",
             "baseline_loop_count": 0,
             "baseline_review_count": 0,
             "registry_sha256": "c" * 64,
@@ -757,9 +1042,9 @@ def make_populated_cycle():
     cycle["frontier_bindings"] = [
         {
             "frontier_id": "frontier-001",
-            "action": "reuse",
+            "action": "reactivated",
             "claim_ids": [claim_id, derived_id],
-            "expected_evidence": ["Primary filing"],
+            "expected_evidence": "Primary filing",
             "baseline_loop_count": 1,
             "baseline_review_count": 1,
             "registry_sha256": "c" * 64,
@@ -3900,6 +4185,1259 @@ class TestRevisitCycleAbortCli(unittest.TestCase):
                 },
                 {path.name for path in (workspace / "revisit_cycles").iterdir()},
             )
+
+
+class TestRevisitFrontierBindingMutation(unittest.TestCase):
+    def assert_bind_fails_without_writes(
+        self,
+        workspace: Path,
+        cycle_id: str,
+        *,
+        frontier_id: str,
+        action: str,
+        claim_id: str = "RC-0001-CL-01",
+        error_pattern: str,
+    ) -> None:
+        before = snapshot_tree(workspace)
+        result = run_revisit_cycle_cli(
+            workspace,
+            "bind-frontier",
+            cycle_id,
+            "--frontier",
+            frontier_id,
+            "--action",
+            action,
+            "--claim",
+            claim_id,
+            "--expected-evidence",
+            "Current qualification timing and counter-evidence.",
+        )
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertRegex(result.stderr, error_pattern)
+        self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_bind_rejects_first_post_boundary_loop_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_binding_workspace(root)
+            with (workspace / "evidence_ledger.md").open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write(
+                    "## Loop 8: F1 - Qualification timing\n\n"
+                    "Cycle-relative evidence has already started.\n"
+                )
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "bind-frontier",
+                cycle_id,
+                "--frontier",
+                "F1",
+                "--action",
+                "reactivated",
+                "--claim",
+                f"{cycle_id}-CL-01",
+                "--expected-evidence",
+                "Current qualification timing and counter-evidence.",
+            )
+
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertRegex(result.stderr, r"post-boundary loop|before new loops")
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_bind_persists_exact_legal_reactivated_snapshot_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_binding_workspace(root)
+            registry_path = workspace / "frontier_registry.json"
+            registry_before = registry_path.read_bytes()
+            cycle_before = revisit_contract.load_cycle(workspace, cycle_id)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_utc_now_seconds",
+                    return_value="2026-07-14T11:00:00Z",
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "bind-frontier",
+                        cycle_id,
+                        "--frontier",
+                        "F1",
+                        "--action",
+                        "reactivated",
+                        "--claim",
+                        f"{cycle_id}-CL-01",
+                        "--expected-evidence",
+                        "Current qualification timing and counter-evidence.",
+                    ]
+                )
+
+            self.assertEqual(0, result, stderr.getvalue())
+            self.assertEqual(registry_before, registry_path.read_bytes())
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(
+                [
+                    {
+                        "frontier_id": "F1",
+                        "action": "reactivated",
+                        "claim_ids": ["RC-0001-CL-01"],
+                        "expected_evidence": (
+                            "Current qualification timing and counter-evidence."
+                        ),
+                        "baseline_loop_count": 3,
+                        "baseline_review_count": 1,
+                        "registry_sha256": hashlib.sha256(
+                            registry_before
+                        ).hexdigest(),
+                        "bound_at": "2026-07-14T11:00:00Z",
+                    }
+                ],
+                cycle["frontier_bindings"],
+            )
+            self.assertEqual(
+                len(cycle_before["audit"]) + 1,
+                len(cycle["audit"]),
+            )
+            self.assertEqual("bind-frontier", cycle["audit"][-1]["command"])
+            self.assertEqual(
+                ["F1", "RC-0001-CL-01"],
+                cycle["audit"][-1]["affected_ids"],
+            )
+            self.assertIn("FRONTIER BOUND: F1", stdout.getvalue())
+
+    def test_bind_persists_exact_legal_added_snapshot_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_binding_workspace(root)
+            frontier_id = add_task6_frontier(workspace)
+            registry_path = workspace / "frontier_registry.json"
+            registry_before = registry_path.read_bytes()
+            cycle_before = revisit_contract.load_cycle(workspace, cycle_id)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_utc_now_seconds",
+                    return_value="2026-07-14T11:00:00Z",
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "bind-frontier",
+                        cycle_id,
+                        "--frontier",
+                        frontier_id,
+                        "--action",
+                        "added",
+                        "--claim",
+                        f"{cycle_id}-CL-01",
+                        "--expected-evidence",
+                        "Current qualification timing and counter-evidence.",
+                    ]
+                )
+
+            self.assertEqual(0, result, stderr.getvalue())
+            self.assertEqual(registry_before, registry_path.read_bytes())
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(
+                {
+                    "frontier_id": frontier_id,
+                    "action": "added",
+                    "claim_ids": ["RC-0001-CL-01"],
+                    "expected_evidence": (
+                        "Current qualification timing and counter-evidence."
+                    ),
+                    "baseline_loop_count": 0,
+                    "baseline_review_count": 0,
+                    "registry_sha256": hashlib.sha256(
+                        registry_before
+                    ).hexdigest(),
+                    "bound_at": "2026-07-14T11:00:00Z",
+                },
+                cycle["frontier_bindings"][0],
+            )
+            self.assertEqual(
+                len(cycle_before["audit"]) + 1,
+                len(cycle["audit"]),
+            )
+            self.assertEqual("bind-frontier", cycle["audit"][-1]["command"])
+
+    def test_bind_rejects_unknown_retired_and_illegal_lifecycle_frontiers(self):
+        cases = (
+            (
+                "unknown",
+                lambda workspace: "F99",
+                "added",
+                r"unknown frontier id: F99",
+            ),
+            (
+                "retired added",
+                lambda workspace: add_task6_frontier(
+                    workspace, initial_status="Active", retire=True
+                ),
+                "added",
+                r"must be New or Active",
+            ),
+            (
+                "reactivated previous state",
+                self._make_wrong_previous_reactivated,
+                "reactivated",
+                r"immediately follow Continued",
+            ),
+            (
+                "reactivated missing post-cycle Active",
+                self._make_old_active_reactivated,
+                "reactivated",
+                r"post-cycle Active transition",
+            ),
+            (
+                "added before boundary",
+                lambda workspace: add_task6_frontier(
+                    workspace, proposed_at_loop=7
+                ),
+                "added",
+                r"proposed_at_loop must be greater",
+            ),
+        )
+        for label, prepare, action, error_pattern in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, cycle_id = make_task6_binding_workspace(
+                        Path(temp_dir)
+                    )
+                    frontier_id = prepare(workspace)
+                    self.assert_bind_fails_without_writes(
+                        workspace,
+                        cycle_id,
+                        frontier_id=frontier_id,
+                        action=action,
+                        error_pattern=error_pattern,
+                    )
+
+    @staticmethod
+    def _make_wrong_previous_reactivated(workspace: Path) -> str:
+        registry_path = workspace / "frontier_registry.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry["frontiers"][0]["lifecycle"][-2]["to"] = "New"
+        registry_path.write_text(
+            json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return "F1"
+
+    @staticmethod
+    def _make_old_active_reactivated(workspace: Path) -> str:
+        registry_path = workspace / "frontier_registry.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry["frontiers"][0]["lifecycle"][-1]["ts"] = (
+            "2026-07-14T09:00:00Z"
+        )
+        registry_path.write_text(
+            json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return "F1"
+
+    def test_bind_rejects_duplicate_empty_unknown_and_derived_backfill_without_writes(self):
+        for claim_id, error_pattern in (
+            ("", r"claim_ids must match RC-NNNN"),
+            ("RC-0001-CL-99", r"known same-cycle claims"),
+        ):
+            with self.subTest(claim_id=claim_id):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, cycle_id = make_task6_binding_workspace(
+                        Path(temp_dir)
+                    )
+                    self.assert_bind_fails_without_writes(
+                        workspace,
+                        cycle_id,
+                        frontier_id="F1",
+                        action="reactivated",
+                        claim_id=claim_id,
+                        error_pattern=error_pattern,
+                    )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_binding_workspace(root)
+            first = run_revisit_cycle_cli(
+                workspace,
+                "bind-frontier",
+                cycle_id,
+                "--frontier",
+                "F1",
+                "--action",
+                "reactivated",
+                "--claim",
+                "RC-0001-CL-01",
+                "--expected-evidence",
+                "Current qualification timing and counter-evidence.",
+            )
+            self.assertEqual(0, first.returncode, first.stderr)
+            self.assert_bind_fails_without_writes(
+                workspace,
+                cycle_id,
+                frontier_id="F1",
+                action="reactivated",
+                error_pattern=r"duplicate frontier_id",
+            )
+
+            previous = revisit_contract.load_cycle(workspace, cycle_id)
+            derived_request = {
+                "origin": "split_child",
+                "statement": "Customer A qualifies independently.",
+                "derived_from": "RC-0001-CL-01",
+                "accepted_from": None,
+                "acceptance_rationale": "The inherited claim combined customers.",
+            }
+            proposed = revisit_contract.add_derived_claim(
+                previous, derived_request
+            )
+            updated = revisit_model.with_audit(
+                previous,
+                proposed,
+                "add-derived-claim",
+                ["RC-0001-DC-01"],
+                "2026-07-14T12:00:00Z",
+            )
+            revisit_contract.persist_cycle(
+                workspace,
+                updated,
+                expected_sha256=revisit_contract.sha256_file(
+                    workspace / "revisit_cycles" / "RC-0001.json"
+                ),
+            )
+            self.assert_bind_fails_without_writes(
+                workspace,
+                cycle_id,
+                frontier_id="F1",
+                action="reactivated",
+                claim_id="RC-0001-DC-01",
+                error_pattern=r"duplicate frontier_id",
+            )
+
+    def test_bind_rejects_registry_generation_drift_without_cycle_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_binding_workspace(root)
+            registry_path = workspace / "frontier_registry.json"
+            cycle_json = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            cycle_md = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            json_before = cycle_json.read_bytes()
+            md_before = cycle_md.read_bytes()
+            real_bind = revisit_cycle_cli.bind_frontier
+
+            def bind_then_drift(cycle, binding):
+                proposed = real_bind(cycle, binding)
+                registry_path.write_bytes(registry_path.read_bytes() + b" \n")
+                return proposed
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "bind_frontier",
+                    side_effect=bind_then_drift,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "bind-frontier",
+                        cycle_id,
+                        "--frontier",
+                        "F1",
+                        "--action",
+                        "reactivated",
+                        "--claim",
+                        "RC-0001-CL-01",
+                        "--expected-evidence",
+                        "Current qualification timing and counter-evidence.",
+                    ]
+                )
+
+            self.assertEqual(2, result, stderr.getvalue())
+            self.assertRegex(
+                stderr.getvalue(),
+                r"authority changed before cycle persistence: frontier_registry.json",
+            )
+            self.assertEqual(json_before, cycle_json.read_bytes())
+            self.assertEqual(md_before, cycle_md.read_bytes())
+
+
+class TestRevisitFrontierResearchFloors(unittest.TestCase):
+    def test_historical_three_loops_cannot_satisfy_cycle_floor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_binding_workspace(root)
+            bound = run_revisit_cycle_cli(
+                workspace,
+                "bind-frontier",
+                cycle_id,
+                "--frontier",
+                "F1",
+                "--action",
+                "reactivated",
+                "--claim",
+                "RC-0001-CL-01",
+                "--expected-evidence",
+                "Current qualification timing and counter-evidence.",
+            )
+            self.assertEqual(0, bound.returncode, bound.stderr)
+            derive = getattr(
+                sofa_evaluate,
+                "_derive_revisit_frontier_floor_issues",
+                lambda *args: (),
+            )
+
+            issues = derive(
+                workspace,
+                revisit_contract.load_cycle(workspace, cycle_id),
+                json.loads(
+                    (workspace / "frontier_registry.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                (workspace / "evidence_ledger.md").read_text(encoding="utf-8"),
+            )
+
+            self.assertIn(
+                "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+                [issue.code for issue in issues],
+            )
+
+    def test_one_or_two_new_loops_and_state_counts_cannot_substitute(self):
+        for count in (1, 2):
+            with self.subTest(count=count):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, cycle_id = make_task6_binding_workspace(
+                        Path(temp_dir)
+                    )
+                    bind_task6_reactivated_frontier(workspace, cycle_id)
+                    append_task6_loops(workspace, count)
+                    state_path = workspace / "state.json"
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    state["loop_count"] = 999
+                    state_path.write_text(
+                        json.dumps(state, indent=2) + "\n", encoding="utf-8"
+                    )
+
+                    issues = derive_task6_floor_issues(workspace, cycle_id)
+
+                    self.assertIn(
+                        "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+                        [issue.code for issue in issues],
+                    )
+
+    def test_three_new_loops_without_new_review_fail_only_review_floor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
+            bind_task6_reactivated_frontier(workspace, cycle_id)
+            loop_ids = append_task6_loops(workspace, 3)
+            write_task6_search_and_dispatch(workspace, loop_ids)
+
+            issues = derive_task6_floor_issues(workspace, cycle_id)
+
+            codes = [issue.code for issue in issues]
+            self.assertIn("REVISIT_REVIEW_FLOOR_MISSING", codes)
+            self.assertNotIn("REVISIT_SEARCH_FLOOR_MISSING", codes)
+            self.assertNotIn("REVISIT_SCOUT_FLOOR_MISSING", codes)
+            self.assertNotIn("REVISIT_CHALLENGE_FLOOR_MISSING", codes)
+
+    def test_every_new_loop_requires_valid_search(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
+            bind_task6_reactivated_frontier(workspace, cycle_id)
+            loop_ids = append_task6_loops(workspace, 3)
+            write_task6_search_and_dispatch(workspace, loop_ids)
+            search_path = workspace / "search_log.jsonl"
+            search_path.write_text(
+                "".join(search_path.read_text(encoding="utf-8").splitlines(True)[:2]),
+                encoding="utf-8",
+            )
+            review_task6_frontier(workspace)
+
+            issues = derive_task6_floor_issues(workspace, cycle_id)
+
+            search_issue = next(
+                issue
+                for issue in issues
+                if issue.code == "REVISIT_SEARCH_FLOOR_MISSING"
+            )
+            self.assertIn("loop_10", search_issue.evidence)
+
+    def test_every_new_loop_requires_exact_scout_and_challenge_delivery(self):
+        for role, expected_code in (
+            ("frontier_scout", "REVISIT_SCOUT_FLOOR_MISSING"),
+            ("challenge_probe", "REVISIT_CHALLENGE_FLOOR_MISSING"),
+        ):
+            with self.subTest(role=role):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, cycle_id = make_task6_binding_workspace(
+                        Path(temp_dir)
+                    )
+                    bind_task6_reactivated_frontier(workspace, cycle_id)
+                    loop_ids = append_task6_loops(workspace, 3)
+                    write_task6_search_and_dispatch(workspace, loop_ids)
+                    dispatch_path = workspace / "dispatch_log.jsonl"
+                    records = [
+                        json.loads(line)
+                        for line in dispatch_path.read_text(
+                            encoding="utf-8"
+                        ).splitlines()
+                    ]
+                    records = [
+                        record
+                        for record in records
+                        if not (
+                            record["loop_id"] == "loop_10"
+                            and record["role"] == role
+                        )
+                    ]
+                    dispatch_path.write_text(
+                        "".join(json.dumps(record) + "\n" for record in records),
+                        encoding="utf-8",
+                    )
+                    review_task6_frontier(workspace)
+
+                    issues = derive_task6_floor_issues(workspace, cycle_id)
+
+                    role_issue = next(
+                        issue for issue in issues if issue.code == expected_code
+                    )
+                    self.assertIn("loop_10", role_issue.evidence)
+
+    def test_new_looking_worker_paths_with_old_loop_ids_do_not_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
+            bind_task6_reactivated_frontier(workspace, cycle_id)
+            loop_ids = append_task6_loops(workspace, 3)
+            write_task6_search_and_dispatch(workspace, loop_ids)
+            dispatch_path = workspace / "dispatch_log.jsonl"
+            records = [
+                json.loads(line)
+                for line in dispatch_path.read_text(encoding="utf-8").splitlines()
+            ]
+            for record in records:
+                if record["loop_id"] == "loop_10":
+                    record["loop_id"] = "loop_2"
+            dispatch_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            review_task6_frontier(workspace)
+
+            issues = derive_task6_floor_issues(workspace, cycle_id)
+            codes = {issue.code for issue in issues}
+
+            self.assertIn("REVISIT_SCOUT_FLOOR_MISSING", codes)
+            self.assertIn("REVISIT_CHALLENGE_FLOOR_MISSING", codes)
+
+    def test_three_new_loops_all_work_and_post_binding_review_pass(self):
+        for decision in ("Continued", "Retired"):
+            with self.subTest(decision=decision):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, cycle_id = make_task6_binding_workspace(
+                        Path(temp_dir)
+                    )
+                    bind_task6_reactivated_frontier(workspace, cycle_id)
+                    loop_ids = append_task6_loops(workspace, 3)
+                    write_task6_search_and_dispatch(workspace, loop_ids)
+                    review_task6_frontier(workspace, decision=decision)
+
+                    issues = derive_task6_floor_issues(workspace, cycle_id)
+
+                    self.assertEqual((), issues)
+
+    def test_standalone_early_retirement_fails_and_status_directs_abort(self):
+        for count in (1, 2):
+            with self.subTest(count=count):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, cycle_id = make_task6_binding_workspace(
+                        Path(temp_dir)
+                    )
+                    bind_task6_reactivated_frontier(workspace, cycle_id)
+                    append_task6_loops(workspace, count)
+                    registry_path = workspace / "frontier_registry.json"
+                    registry = json.loads(
+                        registry_path.read_text(encoding="utf-8")
+                    )
+                    registry = transition(
+                        registry,
+                        "F1",
+                        "Retired",
+                        {"F1": 3 + count},
+                        mode="ticker",
+                        action="retire",
+                        rationale="The new evidence invalidated the frontier early.",
+                        retire_category="invalidated",
+                        at_loop=7 + count,
+                        ts="2026-07-14T12:00:00Z",
+                    )
+                    registry_path.write_text(
+                        json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+
+                    issues = derive_task6_floor_issues(workspace, cycle_id)
+                    status = run_revisit_cycle_cli(
+                        workspace, "status", cycle_id, "--json"
+                    )
+
+                    loop_issue = next(
+                        issue
+                        for issue in issues
+                        if issue.code == "REVISIT_FRONTIER_LOOP_FLOOR_MISSING"
+                    )
+                    self.assertIn("abort", loop_issue.message)
+                    self.assertEqual(0, status.returncode, status.stderr)
+                    self.assertEqual(
+                        f"abort {cycle_id} --reason TEXT",
+                        json.loads(status.stdout)["next_legal_command"],
+                    )
+
+
+class TestRevisitClaimBindingAndFreshnessFacts(unittest.TestCase):
+    def test_pending_claim_derives_structured_unresolved_fact(self):
+        cycle = make_bound_model_cycle()
+
+        issues = revisit_model.derive_claim_issues(cycle)
+
+        self.assertEqual(
+            ["REVISIT_CLAIM_UNRESOLVED"],
+            [issue.code for issue in issues],
+        )
+        self.assertEqual("RC-0001-CL-01", issues[0].evidence)
+
+    def test_each_claim_requires_its_own_completed_binding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_binding_workspace(root)
+            previous = revisit_contract.load_cycle(workspace, cycle_id)
+            proposed = revisit_contract.add_derived_claim(
+                previous,
+                {
+                    "origin": "split_child",
+                    "statement": "Customer A qualifies independently.",
+                    "derived_from": "RC-0001-CL-01",
+                    "accepted_from": None,
+                    "acceptance_rationale": (
+                        "The inherited claim combined independent customers."
+                    ),
+                },
+            )
+            updated = revisit_model.with_audit(
+                previous,
+                proposed,
+                "add-derived-claim",
+                ["RC-0001-DC-01"],
+                "2026-07-14T10:10:00Z",
+            )
+            revisit_contract.persist_cycle(
+                workspace,
+                updated,
+                expected_sha256=revisit_contract.sha256_file(
+                    workspace / "revisit_cycles" / "RC-0001.json"
+                ),
+            )
+            frontier_id = add_task6_frontier(workspace)
+            bind_task6_reactivated_frontier(workspace, cycle_id)
+            second = run_revisit_cycle_cli(
+                workspace,
+                "bind-frontier",
+                cycle_id,
+                "--frontier",
+                frontier_id,
+                "--action",
+                "added",
+                "--claim",
+                "RC-0001-DC-01",
+                "--expected-evidence",
+                "Independent customer qualification evidence.",
+            )
+            self.assertEqual(0, second.returncode, second.stderr)
+            loop_ids = append_task6_loops(workspace, 3)
+            write_task6_search_and_dispatch(workspace, loop_ids)
+            review_task6_frontier(workspace)
+
+            issues = derive_task6_floor_issues(workspace, cycle_id)
+
+            self.assertIn(
+                "REVISIT_FRONTIER_BINDING_INVALID",
+                [issue.code for issue in issues],
+            )
+            claim_issue = next(
+                issue
+                for issue in issues
+                if issue.code == "REVISIT_FRONTIER_BINDING_INVALID"
+            )
+            self.assertIn("RC-0001-DC-01", claim_issue.evidence)
+
+    def test_stale_identity_with_non_newer_check_is_invalid_positive_support(self):
+        cycle = self.make_stale_positive_cycle(
+            current_source_id="src-001",
+            current_checked_at="2026-07-15T00:05:00Z",
+        )
+
+        issues = revisit_model.derive_freshness_issues(cycle)
+
+        self.assertEqual(
+            ["REVISIT_FRESHNESS_SUPPORT_INVALID"],
+            [issue.code for issue in issues],
+        )
+        self.assertNotRegex(
+            issues[0].message,
+            r"\b[0-9]+\s*(?:day|hour|minute|天|小时|分钟)s?\b",
+        )
+
+    def test_new_current_ref_or_newer_exact_identity_satisfies_freshness(self):
+        cases = (
+            ("src-002", "2026-07-15T00:05:00Z"),
+            ("src-001", "2026-07-15T00:11:00Z"),
+        )
+        for source_id, checked_at in cases:
+            with self.subTest(source_id=source_id, checked_at=checked_at):
+                cycle = self.make_stale_positive_cycle(
+                    current_source_id=source_id,
+                    current_checked_at=checked_at,
+                )
+
+                self.assertEqual((), revisit_model.derive_freshness_issues(cycle))
+
+    def test_stale_or_unknown_provenance_is_allowed_for_disclosed_negative_outcomes(self):
+        for status in ("refuted", "blocked"):
+            with self.subTest(status=status):
+                cycle = self.make_stale_bound_cycle(freshness="unknown")
+                if status == "refuted":
+                    outcome = make_confirmed_resolution_request()
+                    outcome.update(
+                        {
+                            "status": "refuted",
+                            "current_evidence_refs": [],
+                            "counter_evidence_refs": [
+                                {
+                                    "kind": "source",
+                                    "source_id": "src-002",
+                                    "checked_at": "2026-07-15T00:15:00Z",
+                                }
+                            ],
+                            "current_grade": None,
+                            "current_confidence": None,
+                            "rationale": (
+                                "Current counter-evidence defeats the proposition."
+                            ),
+                        }
+                    )
+                else:
+                    outcome = make_blocked_resolution(
+                        "RC-0001-CL-01", "F1"
+                    )
+                    outcome.pop("claim_id")
+                proposed = revisit_contract.resolve_claim(
+                    cycle, "RC-0001-CL-01", outcome
+                )
+                resolved = revisit_model.with_audit(
+                    cycle,
+                    proposed,
+                    "resolve-claim",
+                    ["RC-0001-CL-01"],
+                    "2026-07-15T00:20:00Z",
+                )
+
+                self.assertEqual(
+                    (), revisit_model.derive_freshness_issues(resolved)
+                )
+
+    def test_stale_and_unknown_inherited_refs_remain_visible_in_mirror(self):
+        cycle = self.make_stale_bound_cycle(freshness="stale")
+        cycle["intake"]["selected_claims"][0]["inherited_evidence"].append(
+            {
+                "ref": {
+                    "kind": "source",
+                    "source_id": "src-002",
+                    "checked_at": "2026-07-15T00:10:00Z",
+                },
+                "freshness": "unknown",
+                "checked_at": "2026-07-15T00:10:00Z",
+                "reason": "The source has not been rechecked in this cycle.",
+            }
+        )
+        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        attach_valid_audit(cycle)
+
+        rendered = revisit_contract.render_cycle_markdown(cycle)
+
+        self.assertIn("| RC-0001-CL-01 | stale |", rendered)
+        self.assertIn("| RC-0001-CL-01 | unknown |", rendered)
+
+    def test_revisit_freshness_checker_filters_structured_issue_prefix(self):
+        issues = (
+            revisit_contract.RevisitIssue(
+                "REVISIT_FRESHNESS_SUPPORT_INVALID",
+                "cycle.claim_resolutions[0]",
+                "fresh support is invalid",
+            ),
+            revisit_contract.RevisitIssue(
+                "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+                "cycle.frontier_bindings[0]",
+                "three new loops are required",
+            ),
+        )
+
+        passed, messages = timeliness_checker.check_revisit_freshness(issues)
+
+        self.assertFalse(passed)
+        self.assertEqual(
+            ["cycle.claim_resolutions[0]: fresh support is invalid"],
+            messages,
+        )
+
+    @staticmethod
+    def make_stale_bound_cycle(*, freshness: str = "stale") -> dict:
+        cycle = make_bound_model_cycle()
+        cycle["intake"]["selected_claims"][0]["inherited_evidence"] = [
+            {
+                "ref": {
+                    "kind": "source",
+                    "source_id": "src-001",
+                    "checked_at": "2026-07-15T00:10:00Z",
+                },
+                "freshness": freshness,
+                "checked_at": "2026-07-15T00:10:00Z",
+                "reason": "The source predates the fired trigger.",
+            }
+        ]
+        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        attach_valid_audit(cycle)
+        return cycle
+
+    @staticmethod
+    def make_stale_positive_cycle(
+        *, current_source_id: str, current_checked_at: str
+    ) -> dict:
+        cycle = TestRevisitClaimBindingAndFreshnessFacts.make_stale_bound_cycle()
+        outcome = make_confirmed_resolution_request()
+        outcome["current_evidence_refs"] = [
+            {
+                "kind": "source",
+                "source_id": current_source_id,
+                "checked_at": current_checked_at,
+            }
+        ]
+        proposed = revisit_contract.resolve_claim(
+            cycle, "RC-0001-CL-01", outcome
+        )
+        return revisit_model.with_audit(
+            cycle,
+            proposed,
+            "resolve-claim",
+            ["RC-0001-CL-01"],
+            "2026-07-15T00:20:00Z",
+        )
+
+
+class TestRevisitPreReportEvaluation(unittest.TestCase):
+    def test_revisit_report_profile_routes_to_cycle_relative_floor_verdict(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
+            bind_task6_reactivated_frontier(workspace, cycle_id)
+
+            result = sofa_evaluate.evaluate_workspace(
+                workspace,
+                sofa_evaluate.ContractProfile(
+                    mode="ticker", target="revisit_report"
+                ),
+            )
+
+            self.assertIn(
+                "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_direct_evaluator_passes_ready_pre_report_state_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            before = snapshot_tree(workspace)
+
+            result = sofa_evaluate.evaluate_revisit_report(
+                workspace, cycle_id, require_candidate=False
+            )
+
+            self.assertTrue(
+                result.passed,
+                [issue.display() for issue in result.failures],
+            )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_evaluator_reports_stable_malformed_base_trigger_and_unresolved_codes(self):
+        cases = ("malformed", "base_drift", "trigger_missing", "unresolved")
+        for case in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    if case == "unresolved":
+                        workspace, cycle_id = make_task6_binding_workspace(root)
+                        bind_task6_reactivated_frontier(workspace, cycle_id)
+                        loop_ids = append_task6_loops(workspace, 3)
+                        write_task6_search_and_dispatch(workspace, loop_ids)
+                        review_task6_frontier(workspace)
+                    else:
+                        workspace, cycle_id = make_task6_ready_workspace(root)
+                    if case == "malformed":
+                        (workspace / "revisit_cycles" / f"{cycle_id}.json").write_text(
+                            "{not valid json\n", encoding="utf-8"
+                        )
+                        expected = "REVISIT_CYCLE_MALFORMED"
+                    elif case == "base_drift":
+                        report = workspace / "reports" / "final.md"
+                        report.write_bytes(report.read_bytes() + b"base drift\n")
+                        expected = "REVISIT_BASE_REPORT_DRIFT"
+                    elif case == "trigger_missing":
+                        (workspace / "sources_index.jsonl").unlink()
+                        expected = "REVISIT_TRIGGER_EVIDENCE_MISSING"
+                    else:
+                        expected = "REVISIT_CLAIM_UNRESOLVED"
+
+                    result = sofa_evaluate.evaluate_revisit_report(
+                        workspace, cycle_id
+                    )
+
+                    self.assertIn(
+                        expected,
+                        [issue.code for issue in result.failures],
+                    )
+
+    def test_evaluator_reports_binding_and_each_live_floor_category(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
+            result = sofa_evaluate.evaluate_workspace(
+                workspace,
+                sofa_evaluate.ContractProfile(
+                    mode="ticker", target="revisit_report"
+                ),
+            )
+            self.assertIn(
+                "REVISIT_FRONTIER_BINDING_INVALID",
+                [issue.code for issue in result.failures],
+            )
+
+        for case, expected in (
+            ("search", "REVISIT_SEARCH_FLOOR_MISSING"),
+            ("scout", "REVISIT_SCOUT_FLOOR_MISSING"),
+            ("challenge", "REVISIT_CHALLENGE_FLOOR_MISSING"),
+            ("review", "REVISIT_REVIEW_FLOOR_MISSING"),
+        ):
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, cycle_id = make_task6_binding_workspace(
+                        Path(temp_dir)
+                    )
+                    bind_task6_reactivated_frontier(workspace, cycle_id)
+                    loop_ids = append_task6_loops(workspace, 3)
+                    write_task6_search_and_dispatch(workspace, loop_ids)
+                    if case != "review":
+                        review_task6_frontier(workspace)
+                    if case == "search":
+                        search_path = workspace / "search_log.jsonl"
+                        records = search_path.read_text(encoding="utf-8").splitlines(
+                            keepends=True
+                        )
+                        search_path.write_text(
+                            "".join(records[:2]), encoding="utf-8"
+                        )
+                    elif case in {"scout", "challenge"}:
+                        missing_role = (
+                            "frontier_scout"
+                            if case == "scout"
+                            else "challenge_probe"
+                        )
+                        dispatch_path = workspace / "dispatch_log.jsonl"
+                        records = [
+                            json.loads(line)
+                            for line in dispatch_path.read_text(
+                                encoding="utf-8"
+                            ).splitlines()
+                        ]
+                        records = [
+                            record
+                            for record in records
+                            if not (
+                                record["loop_id"] == "loop_10"
+                                and record["role"] == missing_role
+                            )
+                        ]
+                        dispatch_path.write_text(
+                            "".join(
+                                json.dumps(record) + "\n" for record in records
+                            ),
+                            encoding="utf-8",
+                        )
+
+                    result = sofa_evaluate.evaluate_revisit_report(
+                        workspace, cycle_id
+                    )
+
+                    self.assertIn(
+                        expected,
+                        [issue.code for issue in result.failures],
+                    )
+
+    def test_evaluator_reports_invalid_current_support_and_forbidden_support(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            artifact = workspace / "evidence" / "current.md"
+            artifact.parent.mkdir()
+            artifact.write_text("Current qualification evidence.\n", encoding="utf-8")
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            cycle["claim_resolutions"][0]["current_evidence_refs"] = [
+                {
+                    "kind": "artifact",
+                    "path": "evidence/current.md",
+                    "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                    "locator": "Current evidence",
+                    "checked_at": "2026-07-14T12:00:00Z",
+                }
+            ]
+            attach_valid_audit(cycle)
+            revisit_contract.persist_cycle(
+                workspace,
+                cycle,
+                expected_sha256=revisit_contract.sha256_file(
+                    workspace / "revisit_cycles" / f"{cycle_id}.json"
+                ),
+            )
+            artifact.unlink()
+
+            result = sofa_evaluate.evaluate_revisit_report(workspace, cycle_id)
+
+            self.assertIn(
+                "REVISIT_FRESHNESS_SUPPORT_INVALID",
+                [issue.code for issue in result.failures],
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            cycle = json.loads(cycle_path.read_text(encoding="utf-8"))
+            resolution = cycle["claim_resolutions"][0]
+            resolution.update(
+                {
+                    "status": "refuted",
+                    "current_evidence_refs": [],
+                    "counter_evidence_refs": [
+                        {
+                            "kind": "source",
+                            "source_id": "src-001",
+                            "checked_at": "2026-07-14T12:00:00Z",
+                        }
+                    ],
+                    "current_grade": None,
+                    "current_confidence": None,
+                    "rationale": "Current evidence refutes the proposition.",
+                }
+            )
+            attach_valid_audit(cycle)
+            cycle_path.write_bytes(revisit_contract.canonical_document_bytes(cycle))
+
+            result = sofa_evaluate.evaluate_revisit_report(workspace, cycle_id)
+
+            self.assertIn(
+                "REVISIT_CLAIM_SUPPORT_FORBIDDEN",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_profile_discovery_requires_one_candidate_and_rejects_sector(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _ = make_revisit_start_workspace(Path(temp_dir))
+            result = sofa_evaluate.evaluate_workspace(
+                workspace,
+                sofa_evaluate.ContractProfile(
+                    mode="ticker", target="revisit_report"
+                ),
+            )
+            self.assertIn(
+                "REVISIT_CYCLE_MALFORMED",
+                [issue.code for issue in result.failures],
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _ = make_task6_ready_workspace(Path(temp_dir))
+            state_path = workspace / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["mode"] = "sector"
+            state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+            result = sofa_evaluate.evaluate_workspace(
+                workspace,
+                sofa_evaluate.ContractProfile(
+                    mode="ticker", target="revisit_report"
+                ),
+            )
+
+            self.assertIn(
+                "REVISIT_UNSUPPORTED_MODE",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_check_failure_prints_verdict_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
+            bind_task6_reactivated_frontier(workspace, cycle_id)
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(workspace, "check", cycle_id)
+
+            self.assertEqual(1, result.returncode, result.stderr)
+            self.assertIn(
+                "REVISIT_FRONTIER_LOOP_FLOOR_MISSING", result.stderr
+            )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_check_passes_with_one_ready_transition_and_ready_recheck_is_noop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            before = revisit_contract.load_cycle(workspace, cycle_id)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_utc_now_seconds",
+                    return_value="2026-07-14T13:00:00Z",
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [str(workspace), "check", cycle_id]
+                )
+
+            self.assertEqual(0, result, stderr.getvalue())
+            ready = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual("ready_for_report", ready["status"])
+            self.assertEqual(len(before["audit"]) + 1, len(ready["audit"]))
+            self.assertEqual("check", ready["audit"][-1]["command"])
+            self.assertIn("REVISIT CYCLE READY", stdout.getvalue())
+
+            ready_bytes = snapshot_tree(workspace)
+            second = run_revisit_cycle_cli(workspace, "check", cycle_id)
+
+            self.assertEqual(0, second.returncode, second.stderr)
+            self.assertEqual(ready_bytes, snapshot_tree(workspace))
+
+    def test_check_rejects_source_record_remap_before_ready_persistence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            original_excerpt = workspace / "sources" / "src-001.md"
+            remapped_excerpt = workspace / "sources" / "src-001-remapped.md"
+            remapped_excerpt.write_bytes(original_excerpt.read_bytes())
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_cycle = cycle_path.read_bytes()
+            prior_mirror = mirror_path.read_bytes()
+            real_evaluate_index = revisit_cycle_cli.evaluate_index
+            calls = 0
+
+            def evaluate_with_second_call_remap(*args, **kwargs):
+                nonlocal calls
+                evaluation = real_evaluate_index(*args, **kwargs)
+                calls += 1
+                if calls != 2:
+                    return evaluation
+                remapped_record = copy.deepcopy(evaluation.records[0])
+                remapped_record["excerpt_path"] = (
+                    "sources/src-001-remapped.md"
+                )
+                return dataclasses.replace(
+                    evaluation,
+                    records=(remapped_record, *evaluation.records[1:]),
+                )
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_index",
+                    side_effect=evaluate_with_second_call_remap,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [str(workspace), "check", cycle_id]
+                )
+
+            self.assertEqual(2, calls)
+            self.assertEqual(2, result, stderr.getvalue())
+            self.assertIn(
+                "source record changed during validation: src-001",
+                stderr.getvalue(),
+            )
+            self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+            self.assertEqual(prior_cycle, cycle_path.read_bytes())
+            self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    def test_check_rejects_delivered_worker_path_drift_before_ready_persistence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            delivery = workspace / "scouts" / "loop_8_scout.md"
+            drifted_delivery = delivery.read_bytes() + b"post-evaluation drift\n"
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_cycle = cycle_path.read_bytes()
+            prior_mirror = mirror_path.read_bytes()
+            real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+
+            def evaluate_then_drift(*args, **kwargs):
+                evaluation = real_evaluate(*args, **kwargs)
+                delivery.write_bytes(drifted_delivery)
+                return evaluation
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_revisit_report",
+                    side_effect=evaluate_then_drift,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [str(workspace), "check", cycle_id]
+                )
+
+            self.assertEqual(2, result, stderr.getvalue())
+            self.assertRegex(stderr.getvalue(), "authority changed")
+            self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+            self.assertEqual(drifted_delivery, delivery.read_bytes())
+            self.assertEqual(prior_cycle, cycle_path.read_bytes())
+            self.assertEqual(prior_mirror, mirror_path.read_bytes())
 
 
 class TestRevisitDerivedClaimMutation(unittest.TestCase):
@@ -7311,8 +8849,8 @@ class TestCycleSchema(unittest.TestCase):
             ),
             (
                 ("frontier_bindings", 0, "expected_evidence"),
-                {},
-                "expected_evidence must be a list",
+                [],
+                "expected_evidence must be non-empty text",
             ),
             (
                 ("claim_resolutions",),
@@ -7625,7 +9163,7 @@ class TestCycleSchema(unittest.TestCase):
     def test_frontier_binding_scalars_are_strict_and_same_cycle(self):
         cases = (
             ("frontier_id", "", "frontier_id must be non-empty text"),
-            ("action", "", "frontier_bindings.*action must be non-empty text"),
+            ("action", "", "frontier_bindings.*action is unsupported"),
             (
                 "claim_ids",
                 ["RC-0002-CL-01"],
@@ -7633,7 +9171,7 @@ class TestCycleSchema(unittest.TestCase):
             ),
             (
                 "expected_evidence",
-                [""],
+                "",
                 "expected_evidence.*must be non-empty text",
             ),
             (
@@ -8105,6 +9643,11 @@ class TestCycleSchema(unittest.TestCase):
             "validate_evidence_ref",
             "validate_intake_request",
             "add_derived_claim",
+            "bind_frontier",
+            "derive_claim_issues",
+            "derive_freshness_issues",
+            "derive_frontier_requirements",
+            "mark_ready_for_report",
             "resolve_claim",
             "assess_decision",
             "derive_change_class",
