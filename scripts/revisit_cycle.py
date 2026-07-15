@@ -62,15 +62,17 @@ def command_register_current(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace)
     _load_ticker_state(workspace)
 
+    current_pointer_path = pointer_path(workspace)
+    expected_pointer_sha256 = (
+        sha256_file(current_pointer_path) if current_pointer_path.exists() else None
+    )
     existing = load_pointer(workspace, allow_missing=True)
-    expected_pointer_sha256 = None
     if existing is None:
         pointer = empty_pointer()
     else:
         if existing["current_revision"] is not None:
             raise RevisitContractError("current report is already registered")
         pointer = existing
-        expected_pointer_sha256 = sha256_file(pointer_path(workspace))
 
     relative, payload, _ = read_specific_markdown_report(workspace, args.report)
     report_sha256 = sha256_bytes(payload)

@@ -1,6 +1,7 @@
 import copy
 import dataclasses
 import hashlib
+import io
 import json
 import os
 import re
@@ -13,6 +14,7 @@ from unittest import mock
 
 import scripts.revisit_contract as revisit_contract
 import scripts.revisit_contract.model as revisit_model
+import scripts.revisit_cycle as revisit_cycle_cli
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVISIT_CYCLE_SCRIPT = REPO_ROOT / "scripts" / "revisit_cycle.py"
@@ -396,6 +398,79 @@ class TestRevisitCycleCliBootstrap(unittest.TestCase):
 
 
 class TestRevisitCycleRegisterCurrentCli(unittest.TestCase):
+    def test_register_current_rejects_pointer_changed_between_snapshot_and_load(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, report = make_registration_workspace(Path(temp_dir))
+            report_bytes = report.read_bytes()
+            revisit_contract.persist_pointer(
+                workspace,
+                revisit_contract.empty_pointer(),
+                expected_sha256=None,
+            )
+            pointer_path = workspace / "revisit_contract.json"
+            concurrent_pointer = revisit_contract.empty_pointer()
+            concurrent_pointer["current_revision"] = {
+                "revision_id": "REV-0001",
+                "cycle_id": None,
+                "report_path": "reports/concurrent.md",
+                "report_sha256": "c" * 64,
+                "action_class": "Reject",
+                "validated_at": "2026-07-15T02:00:00Z",
+                "revision_of": None,
+            }
+            concurrent_bytes = revisit_contract.canonical_document_bytes(
+                concurrent_pointer
+            )
+            calls = []
+            real_load_pointer = revisit_cycle_cli.load_pointer
+            real_sha256_file = revisit_cycle_cli.sha256_file
+
+            def inject_concurrent_pointer(operation):
+                calls.append(operation)
+                if len(calls) == 1:
+                    pointer_path.write_bytes(concurrent_bytes)
+
+            def interleaved_load_pointer(*args, **kwargs):
+                loaded = real_load_pointer(*args, **kwargs)
+                inject_concurrent_pointer("load")
+                return loaded
+
+            def interleaved_sha256_file(*args, **kwargs):
+                digest = real_sha256_file(*args, **kwargs)
+                inject_concurrent_pointer("digest")
+                return digest
+
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "load_pointer",
+                    side_effect=interleaved_load_pointer,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "sha256_file",
+                    side_effect=interleaved_sha256_file,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", io.StringIO()),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", io.StringIO()),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "register-current",
+                        "--report",
+                        "reports/final.md",
+                        "--action-class",
+                        "Watch with Trigger",
+                    ]
+                )
+
+            self.assertEqual(concurrent_bytes, pointer_path.read_bytes())
+            self.assertEqual(["digest", "load"], calls)
+            self.assertEqual(2, result)
+            self.assertEqual(report_bytes, report.read_bytes())
+            self.assertFalse((workspace / "revisit_cycles").exists())
+
     def test_register_current_accepts_exact_locked_action_vocabulary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
