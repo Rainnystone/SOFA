@@ -305,6 +305,36 @@ def cycle_state_sha256(cycle: dict[str, Any]) -> str:
     return semantic_sha256(state_without_audit(cycle))
 
 
+def with_audit(
+    previous: dict[str, Any],
+    updated: dict[str, Any],
+    command: str,
+    affected_ids: list[str],
+    timestamp: str,
+) -> dict[str, Any]:
+    validate_cycle(previous)
+    result = copy.deepcopy(updated)
+    audit_prefix = copy.deepcopy(previous["audit"])
+    result["audit"] = audit_prefix
+    pre_state_sha256 = (
+        audit_prefix[-1]["post_state_sha256"]
+        if audit_prefix
+        else semantic_sha256(None)
+    )
+    result["audit"].append(
+        {
+            "sequence": len(audit_prefix) + 1,
+            "timestamp": timestamp,
+            "command": command,
+            "affected_ids": copy.deepcopy(affected_ids),
+            "pre_state_sha256": pre_state_sha256,
+            "post_state_sha256": cycle_state_sha256(result),
+        }
+    )
+    validate_cycle(result)
+    return result
+
+
 def intake_sha256(intake: dict[str, Any]) -> str:
     return semantic_sha256(intake)
 

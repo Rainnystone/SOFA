@@ -2,11 +2,15 @@ import copy
 import dataclasses
 import hashlib
 import json
+import os
 import re
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import scripts.revisit_contract as revisit_contract
+import scripts.revisit_contract.model as revisit_model
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -497,6 +501,691 @@ class TestPointerSchema(unittest.TestCase):
             ),
             getattr(revisit_contract, "ACTION_CLASSES", None),
         )
+
+
+class TestRevisitStorePaths(unittest.TestCase):
+    def test_resolve_workspace_path_rejects_c1_control_character(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "control-free"
+            ):
+                revisit_contract.resolve_workspace_path(
+                    workspace,
+                    "reports/next\u0085line.md",
+                    parent="reports",
+                    suffix=".md",
+                )
+
+    def test_normalize_workspace_relative_path_preserves_unicode_and_separators(self):
+        normalize = getattr(
+            revisit_contract, "normalize_workspace_relative_path", None
+        )
+        self.assertTrue(
+            callable(normalize),
+            "normalize_workspace_relative_path export is missing",
+        )
+        self.assertEqual(
+            "reports/研究/最终.md",
+            normalize("./reports\\研究//最终.md"),
+        )
+
+    def test_normalize_workspace_relative_path_rejects_absolute_forms(self):
+        cases = (
+            "/" + "reports/final.md",
+            "C:" + "\\" + "reports\\final.md",
+            "C:" + "reports\\final.md",
+            "\\" + "reports\\final.md",
+            "\\" + "\\" + "server\\share\\reports\\final.md",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            for value in cases:
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(
+                        revisit_contract.RevisitContractError,
+                        "absolute workspace path is forbidden",
+                    ):
+                        revisit_contract.resolve_workspace_path(
+                            workspace,
+                            value,
+                            parent="reports",
+                            suffix=".md",
+                        )
+
+    def test_normalize_workspace_relative_path_rejects_raw_parent_components(self):
+        cases = (
+            ".." + "/" + "final.md",
+            "reports/" + ".." + "/" + "final.md",
+            "reports\\" + ".." + "\\" + "final.md",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            for value in cases:
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(
+                        revisit_contract.RevisitContractError,
+                        "contains forbidden '..'",
+                    ):
+                        revisit_contract.resolve_workspace_path(
+                            workspace,
+                            value,
+                            parent="reports",
+                            suffix=".md",
+                        )
+
+    def test_resolve_workspace_path_requires_parent_and_suffix(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "path must be under reports/"
+            ):
+                revisit_contract.resolve_workspace_path(
+                    workspace,
+                    "other/final.md",
+                    parent="reports",
+                    suffix=".md",
+                )
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "path must end with .md"
+            ):
+                revisit_contract.resolve_workspace_path(
+                    workspace,
+                    "reports/final.json",
+                    parent="reports",
+                    suffix=".md",
+                )
+
+    def test_resolve_workspace_path_returns_normalized_path_under_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            self.assertEqual(
+                workspace.resolve() / "reports" / "最终.md",
+                revisit_contract.resolve_workspace_path(
+                    workspace,
+                    ".\\reports\\最终.md",
+                    parent="reports",
+                    suffix=".md",
+                ),
+            )
+
+    def test_resolve_workspace_path_rejects_symlink_escape(self):
+        resolve_workspace_path = getattr(
+            revisit_contract, "resolve_workspace_path", None
+        )
+        self.assertTrue(
+            callable(resolve_workspace_path),
+            "resolve_workspace_path export is missing",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            outside = root / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            (workspace / "reports").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "escapes workspace"
+            ):
+                resolve_workspace_path(
+                    workspace,
+                    "reports/final.md",
+                    parent="reports",
+                    suffix=".md",
+                )
+
+
+class TestRevisitStoreBytes(unittest.TestCase):
+    def required_callable(self, name):
+        operation = getattr(revisit_contract, name, None)
+        self.assertTrue(callable(operation), f"{name} export is missing")
+        return operation
+
+    def test_canonical_value_bytes_are_compact_sorted_and_unicode(self):
+        canonical_value_bytes = self.required_callable("canonical_value_bytes")
+        first = {"z": "雪", "a": {"later": 2, "earlier": 1}}
+        second = {"a": {"earlier": 1, "later": 2}, "z": "雪"}
+        expected = '{"a":{"earlier":1,"later":2},"z":"雪"}'.encode("utf-8")
+
+        self.assertEqual(expected, canonical_value_bytes(first))
+        self.assertEqual(expected, canonical_value_bytes(second))
+        self.assertNotIn(b"\\u", canonical_value_bytes(first))
+
+    def test_canonical_document_bytes_are_indented_unicode_with_one_newline(self):
+        canonical_document_bytes = self.required_callable("canonical_document_bytes")
+        document = {"schema_version": 1, "label": "研究"}
+        expected = (
+            '{\n  "schema_version": 1,\n  "label": "研究"\n}\n'.encode("utf-8")
+        )
+
+        payload = canonical_document_bytes(document)
+
+        self.assertEqual(expected, payload)
+        self.assertTrue(payload.endswith(b"}\n"))
+        self.assertFalse(payload.endswith(b"\n\n"))
+
+    def test_sha256_helpers_hash_exact_raw_bytes(self):
+        sha256_bytes = self.required_callable("sha256_bytes")
+        sha256_file = self.required_callable("sha256_file")
+        payload = "line one\r\n雪\r\n".encode("utf-8")
+        expected = hashlib.sha256(payload).hexdigest()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "report.md"
+            path.write_bytes(payload)
+            self.assertEqual(expected, sha256_file(path))
+
+        self.assertEqual(expected, sha256_bytes(payload))
+
+
+class TestRevisitStoreReads(unittest.TestCase):
+    def required_callable(self, name):
+        operation = getattr(revisit_contract, name, None)
+        self.assertTrue(callable(operation), f"{name} export is missing")
+        return operation
+
+    def write_cycle(self, workspace, cycle, filename=None):
+        directory = workspace / revisit_contract.CYCLES_DIRNAME
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / (filename or f"{cycle['cycle_id']}.json")
+        path.write_bytes(revisit_contract.canonical_document_bytes(cycle))
+        return path
+
+    def test_store_paths_are_canonical_and_cycle_ids_are_strict(self):
+        pointer_path = self.required_callable("pointer_path")
+        cycle_directory = self.required_callable("cycle_directory")
+        cycle_json_path = self.required_callable("cycle_json_path")
+        cycle_markdown_path = self.required_callable("cycle_markdown_path")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            self.assertEqual(
+                workspace.resolve() / revisit_contract.POINTER_FILENAME,
+                pointer_path(workspace),
+            )
+            self.assertEqual(
+                workspace.resolve() / revisit_contract.CYCLES_DIRNAME,
+                cycle_directory(workspace),
+            )
+            self.assertEqual(
+                workspace.resolve()
+                / revisit_contract.CYCLES_DIRNAME
+                / "RC-0001.json",
+                cycle_json_path(workspace, "RC-0001"),
+            )
+            self.assertEqual(
+                workspace.resolve()
+                / revisit_contract.CYCLES_DIRNAME
+                / "RC-0001.md",
+                cycle_markdown_path(workspace, "RC-0001"),
+            )
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "cycle_id must match RC-NNNN"
+            ):
+                cycle_json_path(workspace, ".." + "/" + "RC-0001")
+
+    def test_pointer_reads_are_strict_and_allow_missing_is_explicit(self):
+        load_pointer = self.required_callable("load_pointer")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            self.assertIsNone(load_pointer(workspace, allow_missing=True))
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "pointer authority is missing"
+            ):
+                load_pointer(workspace)
+
+            path = workspace / revisit_contract.POINTER_FILENAME
+            path.write_text("{not json", encoding="utf-8")
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "malformed JSON.*revisit_contract"
+            ):
+                load_pointer(workspace)
+
+    def test_cycle_reads_never_use_markdown_when_json_is_absent_or_malformed(self):
+        load_cycle = self.required_callable("load_cycle")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            directory = workspace / revisit_contract.CYCLES_DIRNAME
+            directory.mkdir()
+            markdown = directory / "RC-0001.md"
+            markdown.write_bytes(revisit_contract.canonical_document_bytes(make_minimal_cycle()))
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "cycle authority is missing"
+            ):
+                load_cycle(workspace, "RC-0001")
+
+            (directory / "RC-0001.json").write_text("{broken", encoding="utf-8")
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "malformed JSON.*RC-0001.json"
+            ):
+                load_cycle(workspace, "RC-0001")
+
+            self.assertTrue(markdown.exists())
+
+    def test_list_cycle_ids_validates_history_and_returns_numeric_order(self):
+        list_cycle_ids = self.required_callable("list_cycle_ids")
+        load_cycle = self.required_callable("load_cycle")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            second = make_minimal_cycle()
+            second["cycle_id"] = "RC-0002"
+            second["candidate_revision_id"] = "REV-0003"
+            self.write_cycle(workspace, second)
+            self.write_cycle(workspace, make_minimal_cycle())
+            (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md").write_text(
+                "derived mirror\n", encoding="utf-8"
+            )
+
+            self.assertEqual(("RC-0001", "RC-0002"), list_cycle_ids(workspace))
+            self.assertEqual("RC-0002", load_cycle(workspace, "RC-0002")["cycle_id"])
+
+    def test_list_cycle_ids_rejects_malformed_filenames_and_internal_ids(self):
+        list_cycle_ids = self.required_callable("list_cycle_ids")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            self.write_cycle(workspace, make_minimal_cycle(), "RC-1.json")
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "malformed cycle filename"
+            ):
+                list_cycle_ids(workspace)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            self.write_cycle(workspace, make_minimal_cycle(), "RC-0002.json")
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "filename RC-0002 does not match internal cycle_id RC-0001",
+            ):
+                list_cycle_ids(workspace)
+
+
+class TestRevisitRender(unittest.TestCase):
+    def test_render_cycle_markdown_is_deterministic_escaped_and_factual(self):
+        render_cycle_markdown = getattr(
+            revisit_contract, "render_cycle_markdown", None
+        )
+        self.assertTrue(
+            callable(render_cycle_markdown),
+            "render_cycle_markdown export is missing",
+        )
+        cycle = make_populated_cycle()
+        cycle["intake"]["triggers"][0]["statement"] = "Revenue | baseline changed."
+        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+
+        first = render_cycle_markdown(cycle)
+        second = render_cycle_markdown(copy.deepcopy(cycle))
+
+        self.assertEqual(first, second)
+        for heading in (
+            "## Identity And Status",
+            "## Immutable Base And Framing Boundary",
+            "## Fired Triggers",
+            "## Selected And Derived Claims",
+            "## Freshness",
+            "## Frontier Bindings And Floors",
+            "## Decision And Rerun Duties",
+            "## Report Candidate",
+            "## Audit",
+        ):
+            self.assertIn(heading, first)
+        self.assertIn("Revenue \\| baseline changed.", first)
+        self.assertIn("### Claim Resolutions", first)
+        self.assertIn("confirmed", first)
+        self.assertIn("The primary filing confirms the claim.", first)
+        self.assertNotIn("Inferred verdict", first)
+        self.assertTrue(first.endswith("\n"))
+        self.assertFalse(first.endswith("\n\n"))
+
+        minimal = render_cycle_markdown(make_minimal_cycle())
+        self.assertIn("No decision assessment recorded.", minimal)
+
+
+class TestRevisitPersistence(unittest.TestCase):
+    def required_callable(self, name):
+        operation = getattr(revisit_contract, name, None)
+        self.assertTrue(callable(operation), f"{name} export is missing")
+        return operation
+
+    def test_persist_cycle_replaces_mirror_before_json_with_exact_bytes(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        cycle = make_populated_cycle()
+        real_replace = os.replace
+        destinations = []
+
+        def recording_replace(source, destination):
+            destinations.append(Path(destination).name)
+            return real_replace(source, destination)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            with mock.patch(
+                "scripts.revisit_contract.store.os.replace",
+                side_effect=recording_replace,
+            ):
+                json_path, markdown_path = persist_cycle(
+                    workspace, cycle, expected_sha256=None
+                )
+
+            self.assertEqual(["RC-0001.md", "RC-0001.json"], destinations)
+            self.assertEqual(
+                revisit_contract.canonical_document_bytes(cycle),
+                json_path.read_bytes(),
+            )
+            self.assertEqual(
+                revisit_contract.render_cycle_markdown(cycle).encode("utf-8"),
+                markdown_path.read_bytes(),
+            )
+            self.assertEqual(cycle, revisit_contract.load_cycle(workspace, "RC-0001"))
+
+    def test_json_replace_failure_restores_exact_existing_mirror_bytes(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        original = make_minimal_cycle()
+        updated = make_minimal_cycle()
+        updated["status"] = "ready_for_report"
+        original_json = revisit_contract.canonical_document_bytes(original)
+        original_markdown = b"prior mirror\r\nwith exact CRLF bytes\r\n"
+        real_replace = os.replace
+        destinations = []
+
+        def fail_json_replace(source, destination):
+            destination = Path(destination)
+            destinations.append(destination.name)
+            if destination.name == "RC-0001.json":
+                raise OSError("cycle JSON replace failed")
+            return real_replace(source, destination)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            directory = workspace / revisit_contract.CYCLES_DIRNAME
+            directory.mkdir()
+            json_path = directory / "RC-0001.json"
+            markdown_path = directory / "RC-0001.md"
+            json_path.write_bytes(original_json)
+            markdown_path.write_bytes(original_markdown)
+
+            with mock.patch(
+                "scripts.revisit_contract.store.os.replace",
+                side_effect=fail_json_replace,
+            ):
+                with self.assertRaisesRegex(OSError, "cycle JSON replace failed"):
+                    persist_cycle(
+                        workspace,
+                        updated,
+                        expected_sha256=hashlib.sha256(original_json).hexdigest(),
+                    )
+
+            self.assertEqual(original_markdown, markdown_path.read_bytes())
+            self.assertEqual(original_json, json_path.read_bytes())
+            self.assertEqual(
+                ["RC-0001.md", "RC-0001.json", "RC-0001.md"], destinations
+            )
+
+    def test_first_write_json_failure_removes_new_orphan_mirror(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        cycle = make_minimal_cycle()
+        real_replace = os.replace
+        destinations = []
+
+        def fail_json_replace(source, destination):
+            destination = Path(destination)
+            destinations.append(destination.name)
+            if destination.name == "RC-0001.json":
+                raise OSError("first cycle JSON replace failed")
+            return real_replace(source, destination)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            with mock.patch(
+                "scripts.revisit_contract.store.os.replace",
+                side_effect=fail_json_replace,
+            ):
+                with self.assertRaisesRegex(OSError, "first cycle JSON replace failed"):
+                    persist_cycle(workspace, cycle, expected_sha256=None)
+
+            directory = workspace / revisit_contract.CYCLES_DIRNAME
+            self.assertFalse((directory / "RC-0001.md").exists())
+            self.assertFalse((directory / "RC-0001.json").exists())
+            self.assertEqual(["RC-0001.md", "RC-0001.json"], destinations)
+            self.assertEqual([], list(directory.iterdir()))
+
+    def test_rollback_error_is_an_explicit_contract_error(self):
+        error_type = getattr(
+            revisit_contract, "RevisitPersistenceRollbackError", None
+        )
+        self.assertTrue(
+            isinstance(error_type, type)
+            and issubclass(error_type, revisit_contract.RevisitContractError),
+            "RevisitPersistenceRollbackError export is missing",
+        )
+
+    def test_rollback_failure_surfaces_original_and_rollback_errors_together(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        original = make_minimal_cycle()
+        updated = make_minimal_cycle()
+        updated["status"] = "ready_for_report"
+        original_json = revisit_contract.canonical_document_bytes(original)
+        original_markdown = b"prior mirror\r\n"
+        real_replace = os.replace
+        destinations = []
+        markdown_replaces = 0
+
+        def fail_json_and_rollback(source, destination):
+            nonlocal markdown_replaces
+            destination = Path(destination)
+            destinations.append(destination.name)
+            if destination.name == "RC-0001.json":
+                raise OSError("original JSON failure")
+            if destination.name == "RC-0001.md":
+                markdown_replaces += 1
+                if markdown_replaces == 2:
+                    raise OSError("mirror rollback failure")
+            return real_replace(source, destination)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            directory = workspace / revisit_contract.CYCLES_DIRNAME
+            directory.mkdir()
+            json_path = directory / "RC-0001.json"
+            markdown_path = directory / "RC-0001.md"
+            json_path.write_bytes(original_json)
+            markdown_path.write_bytes(original_markdown)
+
+            try:
+                with mock.patch(
+                    "scripts.revisit_contract.store.os.replace",
+                    side_effect=fail_json_and_rollback,
+                ):
+                    persist_cycle(
+                        workspace,
+                        updated,
+                        expected_sha256=hashlib.sha256(original_json).hexdigest(),
+                    )
+            except Exception as error:
+                self.assertIsInstance(
+                    error, revisit_contract.RevisitPersistenceRollbackError
+                )
+                self.assertIn("original JSON failure", str(error))
+                self.assertIn("mirror rollback failure", str(error))
+                self.assertEqual("original JSON failure", str(error.original_error))
+                self.assertEqual("mirror rollback failure", str(error.rollback_error))
+            else:
+                self.fail("combined rollback error not raised")
+
+            self.assertEqual(original_json, json_path.read_bytes())
+            self.assertNotEqual(original_markdown, markdown_path.read_bytes())
+            self.assertEqual(
+                ["RC-0001.md", "RC-0001.json", "RC-0001.md"], destinations
+            )
+
+    def test_render_payload_failure_writes_neither_cycle_file(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        cycle = make_minimal_cycle()
+        cycle["status"] = "aborted"
+        cycle["aborted_at"] = "2026-07-15T02:00:00Z"
+        cycle["abort_reason"] = "\ud800"
+        self.assertIs(cycle, revisit_contract.validate_cycle(cycle))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            with self.assertRaises(UnicodeEncodeError):
+                persist_cycle(workspace, cycle, expected_sha256=None)
+            self.assertFalse(
+                (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md").exists()
+            )
+            self.assertFalse(
+                (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.json").exists()
+            )
+
+    def test_optimistic_cycle_digest_mismatch_changes_neither_file(self):
+        persist_cycle = self.required_callable("persist_cycle")
+        original = make_minimal_cycle()
+        updated = make_minimal_cycle()
+        updated["status"] = "ready_for_report"
+        original_json = revisit_contract.canonical_document_bytes(original)
+        original_markdown = b"prior mirror\r\nexact bytes\r\n"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            directory = workspace / revisit_contract.CYCLES_DIRNAME
+            directory.mkdir()
+            json_path = directory / "RC-0001.json"
+            markdown_path = directory / "RC-0001.md"
+            json_path.write_bytes(original_json)
+            markdown_path.write_bytes(original_markdown)
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "authority changed before write"
+            ):
+                persist_cycle(workspace, updated, expected_sha256="0" * 64)
+
+            self.assertEqual(original_json, json_path.read_bytes())
+            self.assertEqual(original_markdown, markdown_path.read_bytes())
+
+    def test_persist_pointer_is_one_atomic_replace_with_optimistic_guard(self):
+        persist_pointer = self.required_callable("persist_pointer")
+        pointer = revisit_contract.empty_pointer()
+        real_replace = os.replace
+        destinations = []
+
+        def recording_replace(source, destination):
+            destinations.append(Path(destination).name)
+            return real_replace(source, destination)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            with mock.patch(
+                "scripts.revisit_contract.store.os.replace",
+                side_effect=recording_replace,
+            ):
+                path = persist_pointer(workspace, pointer, expected_sha256=None)
+            self.assertEqual([revisit_contract.POINTER_FILENAME], destinations)
+            self.assertEqual(
+                revisit_contract.canonical_document_bytes(pointer), path.read_bytes()
+            )
+
+            prior_bytes = path.read_bytes()
+            updated = revisit_contract.empty_pointer()
+            updated["current_revision"] = make_initial_revision()
+            destinations.clear()
+            with mock.patch(
+                "scripts.revisit_contract.store.os.replace",
+                side_effect=recording_replace,
+            ):
+                persist_pointer(
+                    workspace,
+                    updated,
+                    expected_sha256=hashlib.sha256(prior_bytes).hexdigest(),
+                )
+            self.assertEqual([revisit_contract.POINTER_FILENAME], destinations)
+            updated_bytes = path.read_bytes()
+            self.assertEqual(revisit_contract.canonical_document_bytes(updated), updated_bytes)
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError, "authority changed before write"
+            ):
+                persist_pointer(workspace, pointer, expected_sha256="0" * 64)
+            self.assertEqual(updated_bytes, path.read_bytes())
+
+
+class TestRevisitAuditMutation(unittest.TestCase):
+    def test_with_audit_is_copy_on_write_and_uses_locked_null_pre_hash(self):
+        with_audit = getattr(revisit_model, "with_audit", None)
+        self.assertTrue(callable(with_audit), "with_audit helper is missing")
+        previous = make_minimal_cycle()
+        updated = make_minimal_cycle()
+        updated["status"] = "ready_for_report"
+        previous_before = copy.deepcopy(previous)
+        updated_before = copy.deepcopy(updated)
+
+        result = with_audit(
+            previous,
+            updated,
+            command="mark-ready",
+            affected_ids=["RC-0001"],
+            timestamp="2026-07-15T03:00:00Z",
+        )
+
+        self.assertEqual(previous_before, previous)
+        self.assertEqual(updated_before, updated)
+        self.assertIsNot(result, updated)
+        self.assertEqual(1, result["audit"][0]["sequence"])
+        self.assertEqual(
+            test_semantic_sha256(None), result["audit"][0]["pre_state_sha256"]
+        )
+        self.assertEqual(
+            revisit_contract.cycle_state_sha256(updated),
+            result["audit"][0]["post_state_sha256"],
+        )
+        self.assertIs(result, revisit_contract.validate_cycle(result))
+
+    def test_with_audit_preserves_prefix_and_audit_text_cannot_change_state_hashes(self):
+        with_audit = getattr(revisit_model, "with_audit", None)
+        self.assertTrue(callable(with_audit), "with_audit helper is missing")
+        base = make_minimal_cycle()
+        first = with_audit(
+            base,
+            base,
+            command="start",
+            affected_ids=["RC-0001"],
+            timestamp="2026-07-15T03:00:00Z",
+        )
+        updated = copy.deepcopy(first)
+        updated["status"] = "ready_for_report"
+        tampered_audit_text = copy.deepcopy(updated)
+        tampered_audit_text["audit"][0]["command"] = "ignored audit-only text"
+
+        second = with_audit(
+            first,
+            updated,
+            command="mark-ready",
+            affected_ids=["RC-0001"],
+            timestamp="2026-07-15T03:05:00Z",
+        )
+        alternate = with_audit(
+            first,
+            tampered_audit_text,
+            command="different audit text",
+            affected_ids=["RC-0001", "REV-0002"],
+            timestamp="2026-07-15T03:06:00Z",
+        )
+
+        self.assertEqual(first["audit"], second["audit"][:-1])
+        self.assertEqual(first["audit"], alternate["audit"][:-1])
+        self.assertEqual(2, second["audit"][-1]["sequence"])
+        self.assertEqual(
+            first["audit"][-1]["post_state_sha256"],
+            second["audit"][-1]["pre_state_sha256"],
+        )
+        self.assertEqual(
+            second["audit"][-1]["post_state_sha256"],
+            alternate["audit"][-1]["post_state_sha256"],
+        )
+        self.assertEqual(
+            revisit_contract.cycle_state_sha256(second),
+            revisit_contract.cycle_state_sha256(alternate),
+        )
+        self.assertIs(second, revisit_contract.validate_cycle(second))
+        self.assertIs(alternate, revisit_contract.validate_cycle(alternate))
 
 
 class TestCycleSchema(unittest.TestCase):
@@ -1596,11 +2285,28 @@ class TestCycleSchema(unittest.TestCase):
             "empty_pointer",
             "validate_pointer",
             "canonical_semantic_bytes",
+            "canonical_value_bytes",
+            "canonical_document_bytes",
+            "sha256_bytes",
+            "sha256_file",
+            "pointer_path",
+            "cycle_directory",
+            "cycle_json_path",
+            "cycle_markdown_path",
+            "load_pointer",
+            "load_cycle",
+            "list_cycle_ids",
+            "persist_pointer",
+            "persist_cycle",
+            "RevisitPersistenceRollbackError",
+            "render_cycle_markdown",
             "semantic_sha256",
             "state_without_audit",
             "cycle_state_sha256",
             "intake_sha256",
             "validate_cycle",
+            "normalize_workspace_relative_path",
+            "resolve_workspace_path",
         }
         self.assertEqual(expected_names, set(revisit_contract.__all__))
         expected_values = {
