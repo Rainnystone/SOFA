@@ -14,6 +14,7 @@ from .model import (
     POINTER_FILENAME,
     RevisitContractError,
     validate_cycle,
+    validate_intake_request,
     validate_pointer,
 )
 from .render import render_cycle_markdown
@@ -50,6 +51,23 @@ def sha256_bytes(payload: bytes) -> str:
 
 def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
+
+
+def load_intake_request(path: str | Path) -> dict[str, Any]:
+    request_path = Path(path)
+    try:
+        payload = request_path.read_bytes()
+    except FileNotFoundError as exc:
+        raise RevisitContractError(
+            f"intake request is missing: {request_path}"
+        ) from exc
+    try:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RevisitContractError(
+            "intake request must be valid UTF-8 JSON"
+        ) from exc
+    return validate_intake_request(raw)
 
 
 def normalize_workspace_relative_path(value: str | Path) -> str:
@@ -103,6 +121,21 @@ def resolve_workspace_path(
             f"resolved path must end with {suffix}: {relative}"
         )
     return resolved
+
+
+def verify_workspace_artifact(
+    workspace: str | Path,
+    value: str | Path,
+    expected_sha256: str,
+) -> tuple[str, bytes]:
+    relative = normalize_workspace_relative_path(value)
+    resolved = resolve_workspace_path(workspace, relative)
+    if not resolved.is_file():
+        raise RevisitContractError(f"artifact is not a file: {relative}")
+    payload = resolved.read_bytes()
+    if sha256_bytes(payload) != expected_sha256:
+        raise RevisitContractError(f"artifact hash mismatch: {relative}")
+    return relative, payload
 
 
 def pointer_path(workspace: str | Path) -> Path:

@@ -112,7 +112,16 @@ def render_cycle_markdown(cycle: dict[str, Any]) -> str:
         ),
     )
 
-    lines.extend(("## Selected And Derived Claims", "", "### Selected Claims", ""))
+    lines.extend(
+        (
+            "## Selected And Derived Claims",
+            "",
+            "> Unselected historical claims are omitted and cannot support this cycle.",
+            "",
+            "### Selected Claims",
+            "",
+        )
+    )
     _append_table(
         lines,
         (

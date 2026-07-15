@@ -15,6 +15,7 @@ from unittest import mock
 import scripts.revisit_contract as revisit_contract
 import scripts.revisit_contract.model as revisit_model
 import scripts.revisit_cycle as revisit_cycle_cli
+from scripts.frontier_lifecycle import create_frontier, make_registry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVISIT_CYCLE_SCRIPT = REPO_ROOT / "scripts" / "revisit_cycle.py"
@@ -62,6 +63,163 @@ def make_registration_workspace(root: Path, *, mode: str = "ticker") -> tuple[Pa
     report = reports / "final.md"
     report.write_bytes(complete_ticker_report_bytes())
     return workspace, report
+
+
+def write_valid_revisit_request(root: Path, workspace: Path) -> Path:
+    claim_ledger = workspace / "claim_ledger.md"
+    claim_ledger.write_bytes(
+        b"# Claim Ledger\n\n## Claim C1\nCustomer qualification timing.\n"
+    )
+    request = {
+        "triggers": [
+            {
+                "kind": "downgrade",
+                "statement": (
+                    "The named qualification milestone moved beyond the prior "
+                    "watch window."
+                ),
+                "observed_at": "2026-07-14T10:00:00Z",
+                "evidence_refs": [
+                    {
+                        "kind": "source",
+                        "source_id": "src-001",
+                        "checked_at": "2026-07-14T10:00:00Z",
+                    }
+                ],
+            }
+        ],
+        "selected_claims": [
+            {
+                "statement": (
+                    "Customer qualification completes inside the prior watch window."
+                ),
+                "source_ref": {
+                    "path": "claim_ledger.md",
+                    "sha256": hashlib.sha256(claim_ledger.read_bytes()).hexdigest(),
+                    "locator": "Claim C1",
+                    "historical_claim_id": "C1",
+                },
+                "importance": "critical",
+                "selection_reasons": [
+                    "trigger_affected",
+                    "decision_load_bearing",
+                ],
+                "trigger_indexes": [1],
+                "inherited_grade": "B",
+                "inherited_confidence": "medium",
+                "inherited_evidence": [
+                    {
+                        "ref": {
+                            "kind": "source",
+                            "source_id": "src-001",
+                            "checked_at": "2026-07-14T10:00:00Z",
+                        },
+                        "freshness": "unknown",
+                        "checked_at": "2026-07-14T10:00:00Z",
+                        "reason": "The old source predates the fired trigger.",
+                    }
+                ],
+            }
+        ],
+    }
+    request_path = root / "revisit-request.json"
+    request_path.write_text(
+        json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return request_path
+
+
+def make_revisit_start_workspace(root: Path) -> tuple[Path, Path]:
+    workspace, report = make_registration_workspace(root)
+    report_payload = report.read_bytes()
+    pointer = revisit_contract.empty_pointer()
+    pointer["current_revision"] = {
+        "revision_id": "REV-0001",
+        "cycle_id": None,
+        "report_path": "reports/final.md",
+        "report_sha256": hashlib.sha256(report_payload).hexdigest(),
+        "action_class": "Watch with Trigger",
+        "validated_at": "2026-07-14T09:00:00Z",
+        "revision_of": None,
+    }
+    (workspace / revisit_contract.POINTER_FILENAME).write_bytes(
+        revisit_contract.canonical_document_bytes(pointer)
+    )
+    (workspace / revisit_contract.CYCLES_DIRNAME).mkdir()
+
+    framing = {
+        "schema_version": "1.0",
+        "subject_resolution": {
+            "confirmed_name": "Test Issuer",
+            "tickers": ["TEST"],
+            "exchange": "NASDAQ",
+            "resolution_method": "deterministic_quote",
+            "candidates": [],
+        },
+        "mode": "ticker",
+        "research_posture": "revisit",
+        "time_horizon": "6-12 months",
+        "market_scope": "US public market",
+        "risk_appetite": "moderate",
+        "output_expectation": "decision memo",
+        "report_language": "en",
+        "budget_appetite": "standard",
+        "clarifications": [],
+    }
+    (workspace / "framing_contract.json").write_text(
+        json.dumps(framing, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    registry = create_frontier(
+        make_registry("Test Issuer", "ticker"),
+        name="Qualification timing",
+        proposed_at_loop=1,
+        source="initial",
+        initial_status="Active",
+        ts="2026-07-01T00:00:00Z",
+    )
+    (workspace / "frontier_registry.json").write_text(
+        json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (workspace / "evidence_ledger.md").write_text(
+        "\n".join(
+            [
+                "# Evidence Ledger",
+                "",
+                "## Loop 2: F1 - Qualification timing",
+                "",
+                "Prior evidence.",
+                "",
+                "## Loop 7: F1 - Qualification timing",
+                "",
+                "Later evidence.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    source_excerpt = "Archived source excerpt for the qualification milestone.\n"
+    source_path = workspace / "sources" / "src-001.md"
+    source_path.parent.mkdir()
+    source_path.write_text(source_excerpt, encoding="utf-8")
+    source_record = {
+        "source_id": "src-001",
+        "url": "https://example.test/qualification",
+        "title": "Qualification milestone source",
+        "retrieved": "2026-07-14",
+        "grade": "B",
+        "excerpt_path": "sources/src-001.md",
+        "sha256": hashlib.sha256(source_excerpt.encode("utf-8")).hexdigest(),
+    }
+    (workspace / "sources_index.jsonl").write_text(
+        json.dumps(source_record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return workspace, write_valid_revisit_request(root, workspace)
 
 
 def run_revisit_cycle_cli(workspace: Path, *arguments: str, env=None):
@@ -698,6 +856,1196 @@ class TestRevisitCycleRegisterCurrentCli(unittest.TestCase):
             self.assertIn("reports/报告.md", result.stderr)
             self.assertNotIn("UnicodeEncodeError", result.stderr)
             self.assertEqual(before, snapshot_tree(workspace))
+
+
+class TestRevisitCycleStartCli(unittest.TestCase):
+    def run_invalid_request_case(self, mutate_request, expected_error):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            mutate_request(request)
+            request_path.write_text(
+                json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            workspace_before = snapshot_tree(workspace)
+            request_before = request_path.read_bytes()
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "start",
+                "--intake-file",
+                str(request_path),
+            )
+
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertRegex(result.stderr, expected_error)
+            self.assertEqual(workspace_before, snapshot_tree(workspace))
+            self.assertEqual(request_before, request_path.read_bytes())
+
+    def test_start_creates_immutable_intake_with_stable_ids_and_initial_resolution(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            pointer_before = (workspace / revisit_contract.POINTER_FILENAME).read_bytes()
+            request_before = request_path.read_bytes()
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "start",
+                "--intake-file",
+                str(request_path),
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                "REVISIT CYCLE STARTED: RC-0001 (candidate REV-0002)\n",
+                result.stdout,
+            )
+            cycle_path = workspace / "revisit_cycles" / "RC-0001.json"
+            mirror_path = workspace / "revisit_cycles" / "RC-0001.md"
+            cycle = json.loads(cycle_path.read_text(encoding="utf-8"))
+            self.assertIs(cycle, revisit_contract.validate_cycle(cycle))
+            self.assertEqual("RC-0001", cycle["cycle_id"])
+            self.assertEqual("REV-0002", cycle["candidate_revision_id"])
+            self.assertEqual("active", cycle["status"])
+            self.assertEqual(
+                ["RC-0001-TRG-01"],
+                [trigger["trigger_id"] for trigger in cycle["intake"]["triggers"]],
+            )
+            self.assertEqual(
+                ["RC-0001-CL-01"],
+                [
+                    claim["claim_id"]
+                    for claim in cycle["intake"]["selected_claims"]
+                ],
+            )
+            self.assertEqual(
+                ["RC-0001-TRG-01"],
+                cycle["intake"]["selected_claims"][0]["trigger_ids"],
+            )
+            self.assertNotIn(
+                "trigger_indexes", cycle["intake"]["selected_claims"][0]
+            )
+            self.assertEqual(
+                [
+                    {
+                        "claim_id": "RC-0001-CL-01",
+                        "status": "inherited-pending-reverification",
+                        "revised_statement": None,
+                        "current_evidence_refs": [],
+                        "counter_evidence_refs": [],
+                        "current_grade": None,
+                        "current_confidence": None,
+                        "bound_frontier_ids": [],
+                        "rationale": None,
+                        "missing_proof": None,
+                        "attempted_loop_ids": [],
+                        "attempted_search_refs": [],
+                        "verdict_impact": None,
+                        "split_child_ids": [],
+                    }
+                ],
+                cycle["claim_resolutions"],
+            )
+            self.assertEqual(
+                hashlib.sha256(
+                    (workspace / "framing_contract.json").read_bytes()
+                ).hexdigest(),
+                cycle["intake"]["framing"]["sha256"],
+            )
+            self.assertEqual(
+                {
+                    "subject_resolution",
+                    "research_posture",
+                    "time_horizon",
+                    "market_scope",
+                    "risk_appetite",
+                    "output_expectation",
+                    "report_language",
+                    "budget_appetite",
+                },
+                set(cycle["intake"]["framing"]["snapshot"]),
+            )
+            self.assertEqual(
+                {
+                    "revision_id",
+                    "report_path",
+                    "report_sha256",
+                    "action_class",
+                },
+                set(cycle["intake"]["base_revision"]),
+            )
+            self.assertEqual(
+                hashlib.sha256(
+                    (workspace / "frontier_registry.json").read_bytes()
+                ).hexdigest(),
+                cycle["intake"]["workspace_boundary"][
+                    "frontier_registry_sha256"
+                ],
+            )
+            self.assertEqual(
+                7,
+                cycle["intake"]["workspace_boundary"][
+                    "max_existing_loop_number"
+                ],
+            )
+            self.assertEqual(
+                revisit_contract.intake_sha256(cycle["intake"]),
+                cycle["intake_sha256"],
+            )
+            self.assertEqual(1, len(cycle["audit"]))
+            self.assertEqual(1, cycle["audit"][0]["sequence"])
+            self.assertEqual("start", cycle["audit"][0]["command"])
+            self.assertEqual(
+                revisit_contract.semantic_sha256(None),
+                cycle["audit"][0]["pre_state_sha256"],
+            )
+            self.assertEqual(
+                revisit_contract.cycle_state_sha256(cycle),
+                cycle["audit"][0]["post_state_sha256"],
+            )
+
+            serialized = cycle_path.read_text(encoding="utf-8")
+            mirror = mirror_path.read_text(encoding="utf-8")
+            self.assertNotIn(str(request_path), serialized)
+            self.assertNotIn("trigger_indexes", serialized)
+            self.assertNotIn("Archived source excerpt", serialized)
+            self.assertIn("RC-0001-TRG-01", mirror)
+            self.assertIn("RC-0001-CL-01", mirror)
+            self.assertIn(
+                "Unselected historical claims are omitted and cannot support this cycle.",
+                mirror,
+            )
+            self.assertEqual(1, mirror.count("Watch with Trigger"))
+            for action_class in set(revisit_contract.ACTION_CLASSES) - {
+                "Watch with Trigger"
+            }:
+                self.assertNotIn(action_class, mirror)
+            self.assertEqual(
+                pointer_before,
+                (workspace / revisit_contract.POINTER_FILENAME).read_bytes(),
+            )
+            self.assertEqual(request_before, request_path.read_bytes())
+
+    def test_start_preserves_request_order_and_validates_artifact_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            second_trigger = copy.deepcopy(request["triggers"][0])
+            second_trigger["statement"] = "A second fired trigger remains distinct."
+            request["triggers"].append(second_trigger)
+            second_claim = copy.deepcopy(request["selected_claims"][0])
+            second_claim["statement"] = "The second selected claim keeps request order."
+            second_claim["trigger_indexes"] = [2]
+            request["selected_claims"].append(second_claim)
+            request["triggers"][0]["evidence_refs"] = [
+                {
+                    "kind": "artifact",
+                    "path": "claim_ledger.md",
+                    "sha256": request["selected_claims"][0]["source_ref"]["sha256"],
+                    "locator": "Claim C1",
+                    "checked_at": "2026-07-14T10:00:00Z",
+                }
+            ]
+            request_path.write_text(
+                json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "start",
+                "--intake-file",
+                str(request_path),
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            cycle = revisit_contract.load_cycle(workspace, "RC-0001")
+            self.assertEqual(
+                ["RC-0001-TRG-01", "RC-0001-TRG-02"],
+                [item["trigger_id"] for item in cycle["intake"]["triggers"]],
+            )
+            self.assertEqual(
+                ["RC-0001-CL-01", "RC-0001-CL-02"],
+                [item["claim_id"] for item in cycle["intake"]["selected_claims"]],
+            )
+            self.assertEqual(
+                [["RC-0001-TRG-01"], ["RC-0001-TRG-02"]],
+                [item["trigger_ids"] for item in cycle["intake"]["selected_claims"]],
+            )
+            self.assertEqual(
+                "artifact",
+                cycle["intake"]["triggers"][0]["evidence_refs"][0]["kind"],
+            )
+            self.assertEqual(
+                "claim_ledger.md",
+                cycle["intake"]["triggers"][0]["evidence_refs"][0]["path"],
+            )
+            self.assertEqual(
+                ["RC-0001-CL-01", "RC-0001-CL-02"],
+                [item["claim_id"] for item in cycle["claim_resolutions"]],
+            )
+
+    def test_start_rejects_unsafe_and_symlink_escape_artifact_paths_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            outside = root / "outside.md"
+            outside.write_text("Outside authority.\n", encoding="utf-8")
+            outside_hash = hashlib.sha256(outside.read_bytes()).hexdigest()
+            for label, unsafe_path in (
+                ("parent", ".." + "/" + "outside.md"),
+                ("absolute", str(outside.resolve())),
+                ("windows", "C:" + "\\" + "outside.md"),
+                ("symlink", "outside-link.md"),
+            ):
+                with self.subTest(label=label):
+                    case_root = root / label
+                    case_root.mkdir()
+                    workspace, request_path = make_revisit_start_workspace(case_root)
+                    if label == "symlink":
+                        (workspace / unsafe_path).symlink_to(outside)
+                    request = json.loads(request_path.read_text(encoding="utf-8"))
+                    request["selected_claims"][0]["source_ref"].update(
+                        {"path": unsafe_path, "sha256": outside_hash}
+                    )
+                    request_path.write_text(
+                        json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    before = snapshot_tree(workspace)
+
+                    result = run_revisit_cycle_cli(
+                        workspace,
+                        "start",
+                        "--intake-file",
+                        str(request_path),
+                    )
+
+                    self.assertEqual(2, result.returncode, result.stderr)
+                    self.assertRegex(
+                        result.stderr,
+                        r"absolute workspace path is forbidden|forbidden '\.\.'|path escapes workspace",
+                    )
+                    self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_start_request_rejects_unknown_fields_at_every_owned_object_without_writes(self):
+        cases = (
+            (
+                "top level",
+                lambda request: request.update({"hidden": True}),
+                r"request unknown field.*hidden",
+            ),
+            (
+                "trigger",
+                lambda request: request["triggers"][0].update({"hidden": True}),
+                r"request\.triggers\[0\] unknown field.*hidden",
+            ),
+            (
+                "trigger evidence",
+                lambda request: request["triggers"][0]["evidence_refs"][0].update(
+                    {"hidden": True}
+                ),
+                r"request\.triggers\[0\]\.evidence_refs\[0\] unknown field.*hidden",
+            ),
+            (
+                "selected claim",
+                lambda request: request["selected_claims"][0].update(
+                    {"hidden": True}
+                ),
+                r"request\.selected_claims\[0\] unknown field.*hidden",
+            ),
+            (
+                "claim source ref",
+                lambda request: request["selected_claims"][0][
+                    "source_ref"
+                ].update({"hidden": True}),
+                r"request\.selected_claims\[0\]\.source_ref unknown field.*hidden",
+            ),
+            (
+                "inherited evidence",
+                lambda request: request["selected_claims"][0][
+                    "inherited_evidence"
+                ][0].update({"hidden": True}),
+                r"request\.selected_claims\[0\]\.inherited_evidence\[0\] unknown field.*hidden",
+            ),
+            (
+                "inherited evidence ref",
+                lambda request: request["selected_claims"][0][
+                    "inherited_evidence"
+                ][0]["ref"].update({"hidden": True}),
+                r"request\.selected_claims\[0\]\.inherited_evidence\[0\]\.ref unknown field.*hidden",
+            ),
+        )
+        for label, mutate, expected_error in cases:
+            with self.subTest(label=label):
+                self.run_invalid_request_case(mutate, expected_error)
+
+    def test_start_request_rejects_empty_required_arrays_without_writes(self):
+        cases = (
+            (
+                "triggers",
+                lambda request: request.__setitem__("triggers", []),
+                r"request\.triggers must not be empty",
+            ),
+            (
+                "selected claims",
+                lambda request: request.__setitem__("selected_claims", []),
+                r"request\.selected_claims must not be empty",
+            ),
+            (
+                "trigger evidence",
+                lambda request: request["triggers"][0].__setitem__(
+                    "evidence_refs", []
+                ),
+                r"request\.triggers\[0\]\.evidence_refs must not be empty",
+            ),
+            (
+                "selection reasons",
+                lambda request: request["selected_claims"][0].__setitem__(
+                    "selection_reasons", []
+                ),
+                r"selection_reasons must not be empty",
+            ),
+        )
+        for label, mutate, expected_error in cases:
+            with self.subTest(label=label):
+                self.run_invalid_request_case(mutate, expected_error)
+
+    def test_start_request_rejects_malformed_times_raw_urls_and_missing_sources_without_writes(self):
+        cases = (
+            (
+                "impossible observed date",
+                lambda request: request["triggers"][0].__setitem__(
+                    "observed_at", "2026-02-30"
+                ),
+                r"observed_at must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ",
+            ),
+            (
+                "noncanonical checked at",
+                lambda request: request["triggers"][0]["evidence_refs"][
+                    0
+                ].__setitem__("checked_at", "2026-07-14T10:00:00+00:00"),
+                r"checked_at must be YYYY-MM-DDTHH:MM:SSZ",
+            ),
+            (
+                "raw URL evidence",
+                lambda request: request["triggers"][0].__setitem__(
+                    "evidence_refs", ["https://example.test/raw"]
+                ),
+                r"evidence_refs\[0\] must be an object",
+            ),
+            (
+                "missing registered source",
+                lambda request: request["triggers"][0]["evidence_refs"][
+                    0
+                ].__setitem__("source_id", "src-999"),
+                r"source_id is not registered: src-999",
+            ),
+        )
+        for label, mutate, expected_error in cases:
+            with self.subTest(label=label):
+                self.run_invalid_request_case(mutate, expected_error)
+
+    def test_start_request_rejects_bad_artifacts_or_trigger_mapping_without_writes(self):
+        def artifact_ref(request, *, digest, locator="Claim C1"):
+            request["triggers"][0]["evidence_refs"] = [
+                {
+                    "kind": "artifact",
+                    "path": "claim_ledger.md",
+                    "sha256": digest,
+                    "locator": locator,
+                    "checked_at": "2026-07-14T10:00:00Z",
+                }
+            ]
+
+        cases = (
+            (
+                "artifact hash mismatch",
+                lambda request: artifact_ref(request, digest="0" * 64),
+                r"artifact hash mismatch: claim_ledger\.md",
+            ),
+            (
+                "artifact locator empty",
+                lambda request: artifact_ref(
+                    request,
+                    digest=request["selected_claims"][0]["source_ref"]["sha256"],
+                    locator="",
+                ),
+                r"locator must be non-empty text",
+            ),
+            (
+                "orphan trigger",
+                lambda request: request["triggers"].append(
+                    copy.deepcopy(request["triggers"][0])
+                ),
+                r"request trigger index 2 is not referenced by any selected claim",
+            ),
+            (
+                "trigger index out of range",
+                lambda request: request["selected_claims"][0].__setitem__(
+                    "trigger_indexes", [2]
+                ),
+                r"trigger_indexes.*out of range: 2",
+            ),
+            (
+                "boolean trigger index",
+                lambda request: request["selected_claims"][0].__setitem__(
+                    "trigger_indexes", [True]
+                ),
+                r"trigger_indexes.*integer >= 1",
+            ),
+            (
+                "unsupported selection reason",
+                lambda request: request["selected_claims"][0].__setitem__(
+                    "selection_reasons", ["trigger_affected", "because_i_said_so"]
+                ),
+                r"selection_reasons selection reason is unsupported",
+            ),
+            (
+                "trigger affected without mapping",
+                lambda request: request["selected_claims"][0].__setitem__(
+                    "trigger_indexes", []
+                ),
+                r"trigger_affected requires non-empty trigger_indexes",
+            ),
+        )
+        for label, mutate, expected_error in cases:
+            with self.subTest(label=label):
+                self.run_invalid_request_case(mutate, expected_error)
+
+    def test_start_rejects_report_framing_and_registry_drift_without_writes(self):
+        cases = (
+            (
+                "report hash drift",
+                lambda workspace: (workspace / "reports" / "final.md").write_bytes(
+                    complete_ticker_report_bytes() + b"drift\n"
+                ),
+                r"CURRENT_REPORT_HASH_DRIFT|registered report bytes do not match",
+            ),
+            (
+                "framing mode drift",
+                lambda workspace: self.rewrite_json_field(
+                    workspace / "framing_contract.json", "mode", "sector"
+                ),
+                r"framing contract.*mode|FRAMING_MODE_DRIFT",
+            ),
+            (
+                "framing posture drift",
+                lambda workspace: self.rewrite_json_field(
+                    workspace / "framing_contract.json",
+                    "research_posture",
+                    "fresh",
+                ),
+                r"framing contract research_posture must be revisit",
+            ),
+            (
+                "registry mode drift",
+                lambda workspace: self.rewrite_json_field(
+                    workspace / "frontier_registry.json", "mode", "sector"
+                ),
+                r"frontier registry mode must be ticker",
+            ),
+            (
+                "malformed loop header",
+                lambda workspace: (workspace / "evidence_ledger.md").write_text(
+                    "# Evidence Ledger\n\n## Loop X: F1 - Qualification timing\n",
+                    encoding="utf-8",
+                ),
+                r"malformed loop header",
+            ),
+        )
+        for label, mutate, expected_error in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    workspace, request_path = make_revisit_start_workspace(root)
+                    mutate(workspace)
+                    workspace_before = snapshot_tree(workspace)
+                    request_before = request_path.read_bytes()
+
+                    result = run_revisit_cycle_cli(
+                        workspace,
+                        "start",
+                        "--intake-file",
+                        str(request_path),
+                    )
+
+                    self.assertNotEqual(0, result.returncode, result.stderr)
+                    self.assertRegex(result.stderr, expected_error)
+                    self.assertEqual(workspace_before, snapshot_tree(workspace))
+                    self.assertEqual(request_before, request_path.read_bytes())
+
+    def test_start_rejects_concurrent_report_framing_and_registry_hash_drift_before_persistence(self):
+        target_names = (
+            "reports/final.md",
+            "framing_contract.json",
+            "frontier_registry.json",
+        )
+        real_create_cycle = revisit_cycle_cli.create_cycle
+        for target_name in target_names:
+            with self.subTest(target=target_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    workspace, request_path = make_revisit_start_workspace(root)
+                    target = workspace / target_name
+                    before = snapshot_tree(workspace)
+                    drifted_bytes = target.read_bytes() + b" "
+
+                    def create_then_drift(**kwargs):
+                        cycle = real_create_cycle(**kwargs)
+                        target.write_bytes(drifted_bytes)
+                        return cycle
+
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with mock.patch.object(
+                        revisit_cycle_cli,
+                        "create_cycle",
+                        side_effect=create_then_drift,
+                    ), mock.patch("sys.stdout", new=stdout), mock.patch(
+                        "sys.stderr", new=stderr
+                    ):
+                        result = revisit_cycle_cli.main(
+                            [
+                                str(workspace),
+                                "start",
+                                "--intake-file",
+                                str(request_path),
+                            ]
+                        )
+
+                    self.assertEqual(2, result, stderr.getvalue())
+                    self.assertIn(
+                        f"authority changed before cycle persistence: {target.name}",
+                        stderr.getvalue(),
+                    )
+                    after = snapshot_tree(workspace)
+                    relative_target = target.relative_to(workspace).as_posix()
+                    self.assertEqual(drifted_bytes, target.read_bytes())
+                    self.assertEqual(set(before), set(after))
+                    for relative, expected in before.items():
+                        if relative == relative_target:
+                            continue
+                        self.assertEqual(expected, after[relative], relative)
+                    self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
+
+    def test_start_rejects_active_ready_and_completed_unpublished_cycle_conflicts_without_writes(self):
+        for status in ("active", "ready_for_report", "completed"):
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    workspace, request_path = make_revisit_start_workspace(root)
+                    first = run_revisit_cycle_cli(
+                        workspace,
+                        "start",
+                        "--intake-file",
+                        str(request_path),
+                    )
+                    self.assertEqual(0, first.returncode, first.stderr)
+                    if status != "active":
+                        cycle_path = workspace / "revisit_cycles" / "RC-0001.json"
+                        previous = revisit_contract.load_cycle(workspace, "RC-0001")
+                        updated = copy.deepcopy(previous)
+                        updated["status"] = status
+                        if status == "completed":
+                            updated["completed_at"] = "2026-07-15T05:00:00Z"
+                        transitioned = revisit_model.with_audit(
+                            previous,
+                            updated,
+                            f"test-{status}",
+                            ["RC-0001"],
+                            "2026-07-15T05:00:00Z",
+                        )
+                        revisit_contract.persist_cycle(
+                            workspace,
+                            transitioned,
+                            expected_sha256=hashlib.sha256(
+                                cycle_path.read_bytes()
+                            ).hexdigest(),
+                        )
+                    before = snapshot_tree(workspace)
+
+                    result = run_revisit_cycle_cli(
+                        workspace,
+                        "start",
+                        "--intake-file",
+                        str(request_path),
+                    )
+
+                    self.assertEqual(2, result.returncode, result.stderr)
+                    if status == "completed":
+                        self.assertIn("completed-unpublished", result.stderr)
+                    else:
+                        self.assertIn(f"RC-0001 is {status}", result.stderr)
+                    self.assertEqual(before, snapshot_tree(workspace))
+
+    @staticmethod
+    def rewrite_json_field(path, field, value):
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document[field] = value
+        path.write_text(
+            json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
+class TestRevisitCycleAllocation(unittest.TestCase):
+    def test_allocation_uses_maximum_reserved_ids_without_filling_gaps(self):
+        pointer = revisit_contract.empty_pointer()
+        pointer["current_revision"] = make_revisit_revision()
+        pointer["current_revision"].update(
+            {
+                "revision_id": "REV-0003",
+                "cycle_id": "RC-0003",
+                "revision_of": "REV-0002",
+            }
+        )
+
+        aborted = make_minimal_cycle()
+        aborted["status"] = "aborted"
+        aborted["aborted_at"] = "2026-07-15T01:00:00Z"
+        aborted["abort_reason"] = "Evidence access ended."
+        aborted["candidate_revision_id"] = "REV-0002"
+
+        completed = make_minimal_cycle()
+        completed["cycle_id"] = "RC-0004"
+        completed["candidate_revision_id"] = "REV-0007"
+        completed["status"] = "completed"
+        completed["completed_at"] = "2026-07-15T02:00:00Z"
+
+        original_pointer = copy.deepcopy(pointer)
+        original_cycles = copy.deepcopy([aborted, completed])
+        allocate = getattr(
+            revisit_contract, "allocate_cycle_and_revision_ids", None
+        )
+        self.assertTrue(callable(allocate), "allocation helper is missing")
+
+        self.assertEqual(
+            ("RC-0005", "REV-0008"),
+            allocate(pointer, [aborted, completed]),
+        )
+        self.assertEqual(original_pointer, pointer)
+        self.assertEqual(original_cycles, [aborted, completed])
+
+    def test_allocation_rejects_cycle_or_revision_overflow(self):
+        allocate = getattr(
+            revisit_contract, "allocate_cycle_and_revision_ids", None
+        )
+        self.assertTrue(callable(allocate), "allocation helper is missing")
+        pointer = revisit_contract.empty_pointer()
+        pointer["current_revision"] = make_revisit_revision()
+
+        last_cycle = make_minimal_cycle()
+        last_cycle["cycle_id"] = "RC-9999"
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError, "cycle ID space is exhausted"
+        ):
+            allocate(pointer, [last_cycle])
+
+        pointer["current_revision"].update(
+            {
+                "revision_id": "REV-9999",
+                "cycle_id": "RC-9998",
+                "revision_of": "REV-9998",
+            }
+        )
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError, "revision ID space is exhausted"
+        ):
+            allocate(pointer, [])
+
+
+class TestRevisitCycleStatusCli(unittest.TestCase):
+    def make_status_workspace(self, root, condition):
+        workspace = root / "workspace"
+        workspace.mkdir()
+        pointer = revisit_contract.empty_pointer()
+        cycle = None
+
+        if condition != "empty":
+            pointer["current_revision"] = make_initial_revision()
+        if condition in {
+            "active",
+            "ready",
+            "aborted",
+            "published",
+            "completed-unpublished",
+        }:
+            cycle = make_minimal_cycle()
+        if condition == "ready":
+            cycle["status"] = "ready_for_report"
+        elif condition == "aborted":
+            cycle["status"] = "aborted"
+            cycle["aborted_at"] = "2026-07-15T03:00:00Z"
+            cycle["abort_reason"] = "The selected proof became unavailable."
+        elif condition in {"published", "completed-unpublished"}:
+            cycle["status"] = "completed"
+            cycle["completed_at"] = "2026-07-15T03:00:00Z"
+        if condition == "published":
+            pointer["current_revision"] = make_revisit_revision()
+
+        (workspace / revisit_contract.POINTER_FILENAME).write_bytes(
+            revisit_contract.canonical_document_bytes(pointer)
+        )
+        if cycle is not None:
+            revisit_contract.persist_cycle(
+                workspace, cycle, expected_sha256=None
+            )
+        return workspace
+
+    def test_status_is_deterministic_read_only_and_reports_all_operational_conditions(self):
+        cases = (
+            (
+                "empty",
+                None,
+                [],
+                "register-current --report REPORT --action-class ACTION_CLASS",
+            ),
+            (
+                "registered",
+                "REV-0001",
+                [],
+                "start --intake-file REQUEST",
+            ),
+            (
+                "active",
+                "REV-0001",
+                ["active"],
+                "abort RC-0001 --reason TEXT",
+            ),
+            (
+                "ready",
+                "REV-0001",
+                ["ready_for_report"],
+                "abort RC-0001 --reason TEXT",
+            ),
+            (
+                "aborted",
+                "REV-0001",
+                ["aborted"],
+                "start --intake-file REQUEST",
+            ),
+            (
+                "published",
+                "REV-0002",
+                ["completed"],
+                "start --intake-file REQUEST",
+            ),
+            (
+                "completed-unpublished",
+                "REV-0001",
+                ["completed-unpublished"],
+                "publish RC-0001",
+            ),
+        )
+        for condition, revision_id, statuses, next_command in cases:
+            with self.subTest(condition=condition):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace = self.make_status_workspace(
+                        Path(temp_dir), condition
+                    )
+                    before = snapshot_tree(workspace)
+
+                    first_json = run_revisit_cycle_cli(
+                        workspace, "status", "--json"
+                    )
+                    second_json = run_revisit_cycle_cli(
+                        workspace, "status", "--json"
+                    )
+                    text_result = run_revisit_cycle_cli(workspace, "status")
+
+                    self.assertEqual(0, first_json.returncode, first_json.stderr)
+                    self.assertEqual(0, second_json.returncode, second_json.stderr)
+                    self.assertEqual(0, text_result.returncode, text_result.stderr)
+                    self.assertEqual(first_json.stdout, second_json.stdout)
+                    self.assertTrue(first_json.stdout.endswith("\n"))
+                    summary = json.loads(first_json.stdout)
+                    self.assertEqual(
+                        {
+                            "schema_version",
+                            "mode",
+                            "current_revision",
+                            "cycles",
+                            "issues",
+                            "next_legal_command",
+                        },
+                        set(summary),
+                    )
+                    self.assertEqual(1, summary["schema_version"])
+                    self.assertEqual("ticker", summary["mode"])
+                    self.assertEqual([], summary["issues"])
+                    self.assertEqual(next_command, summary["next_legal_command"])
+                    self.assertEqual(
+                        revision_id,
+                        (
+                            summary["current_revision"]["revision_id"]
+                            if summary["current_revision"] is not None
+                            else None
+                        ),
+                    )
+                    self.assertEqual(
+                        statuses,
+                        [cycle["status"] for cycle in summary["cycles"]],
+                    )
+                    for cycle in summary["cycles"]:
+                        self.assertEqual(
+                            {
+                                "cycle_id",
+                                "candidate_revision_id",
+                                "status",
+                                "created_at",
+                                "completed_at",
+                                "aborted_at",
+                                "abort_reason",
+                            },
+                            set(cycle),
+                        )
+                    self.assertIn(
+                        f"NEXT LEGAL COMMAND: {next_command}",
+                        text_result.stdout,
+                    )
+                    for status in statuses:
+                        self.assertIn(f"STATUS: {status}", text_result.stdout)
+                    self.assertEqual(before, snapshot_tree(workspace))
+
+                    if condition == "completed-unpublished":
+                        persisted = json.loads(
+                            (
+                                workspace
+                                / "revisit_cycles"
+                                / "RC-0001.json"
+                            ).read_text(encoding="utf-8")
+                        )
+                        self.assertEqual("completed", persisted["status"])
+                        self.assertNotIn(
+                            "completed-unpublished",
+                            (workspace / "revisit_cycles" / "RC-0001.json")
+                            .read_text(encoding="utf-8"),
+                        )
+
+    def test_status_optional_cycle_filters_history_and_rejects_unknown_id_without_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self.make_status_workspace(Path(temp_dir), "aborted")
+            before = snapshot_tree(workspace)
+
+            selected = run_revisit_cycle_cli(
+                workspace, "status", "RC-0001", "--json"
+            )
+            missing = run_revisit_cycle_cli(
+                workspace, "status", "RC-9999", "--json"
+            )
+
+            self.assertEqual(0, selected.returncode, selected.stderr)
+            self.assertEqual(
+                ["RC-0001"],
+                [item["cycle_id"] for item in json.loads(selected.stdout)["cycles"]],
+            )
+            self.assertEqual(2, missing.returncode, missing.stderr)
+            self.assertIn("cycle authority is missing: RC-9999", missing.stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_lower_completed_revision_is_published_history_and_does_not_block_later_start(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, request_path = make_revisit_start_workspace(root)
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+            pointer["current_revision"].update(
+                {
+                    "revision_id": "REV-0003",
+                    "cycle_id": "RC-0002",
+                    "revision_of": "REV-0002",
+                }
+            )
+            pointer_path.write_bytes(
+                revisit_contract.canonical_document_bytes(pointer)
+            )
+            historical_bytes = {}
+            for cycle_id, candidate_revision_id in (
+                ("RC-0001", "REV-0002"),
+                ("RC-0002", "REV-0003"),
+            ):
+                cycle = make_minimal_cycle()
+                cycle["cycle_id"] = cycle_id
+                cycle["candidate_revision_id"] = candidate_revision_id
+                cycle["status"] = "completed"
+                cycle["completed_at"] = "2026-07-15T03:00:00Z"
+                revisit_contract.persist_cycle(
+                    workspace, cycle, expected_sha256=None
+                )
+                historical_bytes[cycle_id] = (
+                    (workspace / "revisit_cycles" / f"{cycle_id}.json").read_bytes(),
+                    (workspace / "revisit_cycles" / f"{cycle_id}.md").read_bytes(),
+                )
+            pointer_before = pointer_path.read_bytes()
+
+            status_result = run_revisit_cycle_cli(
+                workspace, "status", "--json"
+            )
+
+            self.assertEqual(0, status_result.returncode, status_result.stderr)
+            summary = json.loads(status_result.stdout)
+            self.assertEqual(
+                ["completed", "completed"],
+                [item["status"] for item in summary["cycles"]],
+            )
+            self.assertEqual(
+                "start --intake-file REQUEST", summary["next_legal_command"]
+            )
+
+            start_result = run_revisit_cycle_cli(
+                workspace,
+                "start",
+                "--intake-file",
+                str(request_path),
+            )
+
+            self.assertEqual(0, start_result.returncode, start_result.stderr)
+            third = revisit_contract.load_cycle(workspace, "RC-0003")
+            self.assertEqual("REV-0004", third["candidate_revision_id"])
+            self.assertEqual(pointer_before, pointer_path.read_bytes())
+            for cycle_id, (expected_json, expected_mirror) in historical_bytes.items():
+                self.assertEqual(
+                    expected_json,
+                    (workspace / "revisit_cycles" / f"{cycle_id}.json").read_bytes(),
+                )
+                self.assertEqual(
+                    expected_mirror,
+                    (workspace / "revisit_cycles" / f"{cycle_id}.md").read_bytes(),
+                )
+
+    def test_status_prints_utf8_under_legacy_ascii_process_encoding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = self.make_status_workspace(Path(temp_dir), "registered")
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+            pointer["current_revision"]["report_path"] = "reports/报告.md"
+            pointer_path.write_bytes(
+                revisit_contract.canonical_document_bytes(pointer)
+            )
+            before = snapshot_tree(workspace)
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "ascii"
+            env["LC_ALL"] = "C"
+
+            result = run_revisit_cycle_cli(workspace, "status", env=env)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("reports/报告.md", result.stdout)
+            self.assertNotIn("UnicodeEncodeError", result.stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+
+class TestRevisitCycleAbortCli(unittest.TestCase):
+    def start_cycle(self, root):
+        workspace, request_path = make_revisit_start_workspace(root)
+        result = run_revisit_cycle_cli(
+            workspace,
+            "start",
+            "--intake-file",
+            str(request_path),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return workspace, request_path
+
+    def transition_cycle_for_test(self, workspace, *, status):
+        cycle_path = workspace / "revisit_cycles" / "RC-0001.json"
+        previous = revisit_contract.load_cycle(workspace, "RC-0001")
+        updated = copy.deepcopy(previous)
+        updated["status"] = status
+        if status == "completed":
+            updated["completed_at"] = "2026-07-15T04:00:00Z"
+        transitioned = revisit_model.with_audit(
+            previous,
+            updated,
+            f"test-{status}",
+            ["RC-0001"],
+            "2026-07-15T04:00:00Z",
+        )
+        revisit_contract.persist_cycle(
+            workspace,
+            transitioned,
+            expected_sha256=hashlib.sha256(cycle_path.read_bytes()).hexdigest(),
+        )
+
+    def test_abort_accepts_active_and_ready_with_copy_on_write_audit(self):
+        for starting_status in ("active", "ready_for_report"):
+            with self.subTest(starting_status=starting_status):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, request_path = self.start_cycle(Path(temp_dir))
+                    if starting_status == "ready_for_report":
+                        self.transition_cycle_for_test(
+                            workspace, status="ready_for_report"
+                        )
+                    cycle_path = workspace / "revisit_cycles" / "RC-0001.json"
+                    mirror_path = workspace / "revisit_cycles" / "RC-0001.md"
+                    previous = revisit_contract.load_cycle(workspace, "RC-0001")
+                    pointer_before = (
+                        workspace / revisit_contract.POINTER_FILENAME
+                    ).read_bytes()
+                    request_before = request_path.read_bytes()
+
+                    result = run_revisit_cycle_cli(
+                        workspace,
+                        "abort",
+                        "RC-0001",
+                        "--reason",
+                        "The required primary proof became unavailable.",
+                    )
+
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual(
+                        "REVISIT CYCLE ABORTED: RC-0001\n", result.stdout
+                    )
+                    aborted = revisit_contract.load_cycle(workspace, "RC-0001")
+                    self.assertEqual("aborted", aborted["status"])
+                    self.assertRegex(
+                        aborted["aborted_at"],
+                        r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+                    )
+                    self.assertEqual(
+                        "The required primary proof became unavailable.",
+                        aborted["abort_reason"],
+                    )
+                    self.assertEqual(
+                        previous["audit"],
+                        aborted["audit"][: len(previous["audit"])],
+                    )
+                    self.assertEqual("abort", aborted["audit"][-1]["command"])
+                    self.assertEqual(
+                        ["RC-0001"], aborted["audit"][-1]["affected_ids"]
+                    )
+                    self.assertEqual(
+                        previous["audit"][-1]["post_state_sha256"],
+                        aborted["audit"][-1]["pre_state_sha256"],
+                    )
+                    self.assertEqual(
+                        revisit_contract.cycle_state_sha256(aborted),
+                        aborted["audit"][-1]["post_state_sha256"],
+                    )
+                    mirror = mirror_path.read_text(encoding="utf-8")
+                    self.assertIn("aborted", mirror)
+                    self.assertIn(
+                        "The required primary proof became unavailable.", mirror
+                    )
+                    self.assertTrue(cycle_path.is_file())
+                    self.assertTrue(mirror_path.is_file())
+                    self.assertEqual(
+                        pointer_before,
+                        (workspace / revisit_contract.POINTER_FILENAME).read_bytes(),
+                    )
+                    self.assertEqual(request_before, request_path.read_bytes())
+
+    def test_abort_rejects_empty_reason_and_terminal_cycles_without_writes(self):
+        reason_cases = ("", "   ", "bad\nreason")
+        for reason in reason_cases:
+            with self.subTest(reason=repr(reason)):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, _ = self.start_cycle(Path(temp_dir))
+                    before = snapshot_tree(workspace)
+
+                    result = run_revisit_cycle_cli(
+                        workspace,
+                        "abort",
+                        "RC-0001",
+                        "--reason",
+                        reason,
+                    )
+
+                    self.assertEqual(2, result.returncode, result.stderr)
+                    self.assertIn("abort reason must be non-empty", result.stderr)
+                    self.assertEqual(before, snapshot_tree(workspace))
+
+        for terminal_status in ("completed", "aborted"):
+            with self.subTest(terminal_status=terminal_status):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, _ = self.start_cycle(Path(temp_dir))
+                    if terminal_status == "completed":
+                        self.transition_cycle_for_test(
+                            workspace, status="completed"
+                        )
+                    else:
+                        first_abort = run_revisit_cycle_cli(
+                            workspace,
+                            "abort",
+                            "RC-0001",
+                            "--reason",
+                            "First explicit abort.",
+                        )
+                        self.assertEqual(0, first_abort.returncode, first_abort.stderr)
+                    before = snapshot_tree(workspace)
+
+                    result = run_revisit_cycle_cli(
+                        workspace,
+                        "abort",
+                        "RC-0001",
+                        "--reason",
+                        "Attempted terminal rewrite.",
+                    )
+
+                    self.assertEqual(2, result.returncode, result.stderr)
+                    self.assertIn(
+                        f"cannot abort cycle RC-0001 with status {terminal_status}",
+                        result.stderr,
+                    )
+                    self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_aborted_cycle_reserves_cycle_and_revision_ids_without_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, request_path = self.start_cycle(Path(temp_dir))
+            pointer_before = (
+                workspace / revisit_contract.POINTER_FILENAME
+            ).read_bytes()
+            first_abort = run_revisit_cycle_cli(
+                workspace,
+                "abort",
+                "RC-0001",
+                "--reason",
+                "First cycle stopped explicitly.",
+            )
+            self.assertEqual(0, first_abort.returncode, first_abort.stderr)
+            first_json = (workspace / "revisit_cycles" / "RC-0001.json").read_bytes()
+            first_mirror = (workspace / "revisit_cycles" / "RC-0001.md").read_bytes()
+
+            second_start = run_revisit_cycle_cli(
+                workspace,
+                "start",
+                "--intake-file",
+                str(request_path),
+            )
+
+            self.assertEqual(0, second_start.returncode, second_start.stderr)
+            second = revisit_contract.load_cycle(workspace, "RC-0002")
+            self.assertEqual("RC-0002", second["cycle_id"])
+            self.assertEqual("REV-0003", second["candidate_revision_id"])
+            self.assertEqual(
+                ["RC-0002-TRG-01"],
+                [item["trigger_id"] for item in second["intake"]["triggers"]],
+            )
+            self.assertEqual(
+                first_json,
+                (workspace / "revisit_cycles" / "RC-0001.json").read_bytes(),
+            )
+            self.assertEqual(
+                first_mirror,
+                (workspace / "revisit_cycles" / "RC-0001.md").read_bytes(),
+            )
+            self.assertEqual(
+                pointer_before,
+                (workspace / revisit_contract.POINTER_FILENAME).read_bytes(),
+            )
+            self.assertEqual(
+                {
+                    "RC-0001.json",
+                    "RC-0001.md",
+                    "RC-0002.json",
+                    "RC-0002.md",
+                },
+                {path.name for path in (workspace / "revisit_cycles").iterdir()},
+            )
 
 
 class TestPointerSchema(unittest.TestCase):
@@ -2245,12 +3593,12 @@ class TestCycleSchema(unittest.TestCase):
             (
                 ("intake", "triggers", 0, "evidence_refs", 0, "kind"),
                 "url",
-                "evidence kind is unsupported",
+                r"evidence_refs\[0\]\.kind must be source or artifact",
             ),
             (
                 ("intake", "triggers", 0, "evidence_refs", 0, "source_id"),
                 "src-001\n",
-                "source_id must not contain control characters",
+                "source_id must match src-NNN",
             ),
             (
                 ("intake", "triggers", 0, "evidence_refs", 0, "checked_at"),
@@ -2811,6 +4159,12 @@ class TestCycleSchema(unittest.TestCase):
             "CYCLE_KEYS",
             "RevisitIssue",
             "RevisitContractError",
+            "SOURCE_EVIDENCE_KEYS",
+            "ARTIFACT_EVIDENCE_KEYS",
+            "validate_evidence_ref",
+            "validate_intake_request",
+            "allocate_cycle_and_revision_ids",
+            "create_cycle",
             "empty_pointer",
             "validate_pointer",
             "canonical_semantic_bytes",

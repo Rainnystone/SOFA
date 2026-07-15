@@ -59,6 +59,7 @@ DERIVED_CLAIM_ID_RE = re.compile(
     r"^(?P<cycle>RC-[0-9]{4})-DC-(?P<number>[0-9]{2})$"
 )
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_ID_RE = re.compile(r"^src-[0-9]{3,}$")
 _UTC_TIMESTAMP_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
 )
@@ -82,6 +83,32 @@ CYCLE_KEYS = {
     "report_candidate",
     "audit",
 }
+SOURCE_EVIDENCE_KEYS = frozenset({"kind", "source_id", "checked_at"})
+ARTIFACT_EVIDENCE_KEYS = frozenset(
+    {"kind", "path", "sha256", "locator", "checked_at"}
+)
+_REQUEST_TRIGGER_KEYS = {
+    "kind",
+    "statement",
+    "observed_at",
+    "evidence_refs",
+}
+_REQUEST_CLAIM_KEYS = {
+    "statement",
+    "source_ref",
+    "importance",
+    "selection_reasons",
+    "trigger_indexes",
+    "inherited_grade",
+    "inherited_confidence",
+    "inherited_evidence",
+}
+_CLAIM_SOURCE_REF_KEYS = {"path", "sha256", "locator", "historical_claim_id"}
+_INHERITED_EVIDENCE_KEYS = {"ref", "freshness", "checked_at", "reason"}
+_CLAIM_RESOLUTION_STATES = (
+    "inherited-pending-reverification",
+    *CLAIM_TERMINAL_STATES,
+)
 
 
 @dataclass(frozen=True)
@@ -197,6 +224,12 @@ def _require_nullable_text(value: Any, path: str) -> str | None:
 def _require_sha256(value: Any, path: str) -> str:
     if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
         raise RevisitContractError(f"{path} must be a lowercase SHA-256")
+    return value
+
+
+def _require_source_id(value: Any, path: str) -> str:
+    if not isinstance(value, str) or _SOURCE_ID_RE.fullmatch(value) is None:
+        raise RevisitContractError(f"{path} must match src-NNN")
     return value
 
 
@@ -339,6 +372,160 @@ def intake_sha256(intake: dict[str, Any]) -> str:
     return semantic_sha256(intake)
 
 
+def allocate_cycle_and_revision_ids(
+    pointer: dict[str, Any], cycles: list[dict[str, Any]]
+) -> tuple[str, str]:
+    validate_pointer(pointer)
+    max_cycle_number = 0
+    max_revision_number = 0
+    current = pointer["current_revision"]
+    if current is not None:
+        revision_match = REVISION_ID_RE.fullmatch(current["revision_id"])
+        if revision_match is None:
+            raise RevisitContractError("current revision ID is invalid")
+        max_revision_number = int(revision_match.group("number"))
+
+    for cycle in cycles:
+        validate_cycle(cycle)
+        cycle_match = CYCLE_ID_RE.fullmatch(cycle["cycle_id"])
+        revision_match = REVISION_ID_RE.fullmatch(cycle["candidate_revision_id"])
+        if cycle_match is None or revision_match is None:
+            raise RevisitContractError("cycle contains an invalid reserved ID")
+        max_cycle_number = max(max_cycle_number, int(cycle_match.group("number")))
+        max_revision_number = max(
+            max_revision_number, int(revision_match.group("number"))
+        )
+
+    next_cycle_number = max_cycle_number + 1
+    next_revision_number = max_revision_number + 1
+    if next_cycle_number > 9999:
+        raise RevisitContractError("cycle ID space is exhausted")
+    if next_revision_number > 9999:
+        raise RevisitContractError("revision ID space is exhausted")
+    return (
+        f"RC-{next_cycle_number:04d}",
+        f"REV-{next_revision_number:04d}",
+    )
+
+
+def create_cycle(
+    *,
+    cycle_id: str,
+    candidate_revision_id: str,
+    base_revision: dict[str, Any],
+    framing_sha256: str,
+    framing_snapshot: dict[str, Any],
+    frontier_registry_sha256: str,
+    max_existing_loop_number: int,
+    request: dict[str, Any],
+    timestamp: str,
+) -> dict[str, Any]:
+    _require_cycle_id(cycle_id, "cycle_id")
+    _require_revision_id(candidate_revision_id, "candidate_revision_id")
+    _validate_revision(base_revision, "base_revision")
+    _require_sha256(framing_sha256, "framing_sha256")
+    _require_sha256(frontier_registry_sha256, "frontier_registry_sha256")
+    _require_strict_int(
+        max_existing_loop_number, "max_existing_loop_number"
+    )
+    _require_utc_timestamp(timestamp, "timestamp")
+    validate_intake_request(request)
+
+    triggers = []
+    trigger_ids = []
+    for index, request_trigger in enumerate(request["triggers"], start=1):
+        trigger_id = f"{cycle_id}-TRG-{index:02d}"
+        trigger_ids.append(trigger_id)
+        trigger = copy.deepcopy(request_trigger)
+        trigger["trigger_id"] = trigger_id
+        triggers.append(trigger)
+
+    selected_claims = []
+    claim_resolutions = []
+    for index, request_claim in enumerate(request["selected_claims"], start=1):
+        claim_id = f"{cycle_id}-CL-{index:02d}"
+        claim = copy.deepcopy(request_claim)
+        indexes = claim.pop("trigger_indexes")
+        claim["claim_id"] = claim_id
+        claim["trigger_ids"] = [trigger_ids[item - 1] for item in indexes]
+        selected_claims.append(claim)
+        claim_resolutions.append(
+            {
+                "claim_id": claim_id,
+                "status": "inherited-pending-reverification",
+                "revised_statement": None,
+                "current_evidence_refs": [],
+                "counter_evidence_refs": [],
+                "current_grade": None,
+                "current_confidence": None,
+                "bound_frontier_ids": [],
+                "rationale": None,
+                "missing_proof": None,
+                "attempted_loop_ids": [],
+                "attempted_search_refs": [],
+                "verdict_impact": None,
+                "split_child_ids": [],
+            }
+        )
+
+    intake = {
+        "base_revision": {
+            "revision_id": base_revision["revision_id"],
+            "report_path": base_revision["report_path"],
+            "report_sha256": base_revision["report_sha256"],
+            "action_class": base_revision["action_class"],
+        },
+        "framing": {
+            "path": "framing_contract.json",
+            "sha256": framing_sha256,
+            "snapshot": copy.deepcopy(framing_snapshot),
+        },
+        "workspace_boundary": {
+            "frontier_registry_sha256": frontier_registry_sha256,
+            "max_existing_loop_number": max_existing_loop_number,
+        },
+        "triggers": triggers,
+        "selected_claims": selected_claims,
+    }
+    cycle = {
+        "schema_version": SCHEMA_VERSION,
+        "cycle_id": cycle_id,
+        "candidate_revision_id": candidate_revision_id,
+        "status": "active",
+        "created_at": timestamp,
+        "completed_at": None,
+        "aborted_at": None,
+        "abort_reason": None,
+        "intake_sha256": intake_sha256(intake),
+        "intake": intake,
+        "frontier_bindings": [],
+        "claim_resolutions": claim_resolutions,
+        "derived_claims": [],
+        "decision_assessment": None,
+        "rerun_artifacts": [],
+        "report_candidate": None,
+        "audit": [],
+    }
+    affected_ids = [
+        cycle_id,
+        candidate_revision_id,
+        *trigger_ids,
+        *(claim["claim_id"] for claim in selected_claims),
+    ]
+    cycle["audit"] = [
+        {
+            "sequence": 1,
+            "timestamp": timestamp,
+            "command": "start",
+            "affected_ids": affected_ids,
+            "pre_state_sha256": semantic_sha256(None),
+            "post_state_sha256": cycle_state_sha256(cycle),
+        }
+    ]
+    validate_cycle(cycle)
+    return cycle
+
+
 def _require_object(value: Any, path: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RevisitContractError(f"{path} must be an object")
@@ -356,24 +543,130 @@ def _require_unique(values: list[str], path: str, label: str = "IDs") -> None:
         raise RevisitContractError(f"{path} must not contain duplicate {label}")
 
 
-def _validate_evidence_ref(value: Any, path: str) -> None:
-    raw = _require_object(value, path)
-    if raw.get("kind") == "source":
-        _require_exact_keys(raw, {"kind", "source_id", "checked_at"}, path)
-        _require_non_empty_text(raw["source_id"], f"{path}.source_id")
-        _require_utc_timestamp(raw["checked_at"], f"{path}.checked_at")
-    elif raw.get("kind") == "artifact":
-        _require_exact_keys(
-            raw,
-            {"kind", "path", "sha256", "locator", "checked_at"},
-            path,
-        )
+def validate_evidence_ref(ref: Any, path: str) -> dict[str, Any]:
+    raw = _require_object(ref, path)
+    kind = raw.get("kind")
+    if kind == "source":
+        _require_exact_keys(raw, set(SOURCE_EVIDENCE_KEYS), path)
+        _require_source_id(raw["source_id"], f"{path}.source_id")
+    elif kind == "artifact":
+        _require_exact_keys(raw, set(ARTIFACT_EVIDENCE_KEYS), path)
         _require_non_empty_text(raw["path"], f"{path}.path")
         _require_sha256(raw["sha256"], f"{path}.sha256")
         _require_non_empty_text(raw["locator"], f"{path}.locator")
-        _require_utc_timestamp(raw["checked_at"], f"{path}.checked_at")
     else:
-        raise RevisitContractError(f"{path} evidence kind is unsupported")
+        raise RevisitContractError(f"{path}.kind must be source or artifact")
+    _require_utc_timestamp(raw["checked_at"], f"{path}.checked_at")
+    return raw
+
+
+def _validate_evidence_ref(value: Any, path: str) -> None:
+    validate_evidence_ref(value, path)
+
+
+def validate_intake_request(raw: Any) -> dict[str, Any]:
+    path = "request"
+    request = _require_object(raw, path)
+    _require_exact_keys(request, {"triggers", "selected_claims"}, path)
+
+    triggers = _require_list(request["triggers"], f"{path}.triggers")
+    if not triggers:
+        raise RevisitContractError("request.triggers must not be empty")
+    if len(triggers) > 99:
+        raise RevisitContractError("request.triggers cannot exceed 99 entries")
+    for index, trigger_value in enumerate(triggers):
+        trigger_path = f"{path}.triggers[{index}]"
+        trigger = _require_object(trigger_value, trigger_path)
+        _require_exact_keys(trigger, _REQUEST_TRIGGER_KEYS, trigger_path)
+        if trigger["kind"] not in TRIGGER_KINDS:
+            raise RevisitContractError(f"{trigger_path} trigger kind is unsupported")
+        _require_non_empty_text(trigger["statement"], f"{trigger_path}.statement")
+        _require_observed_at(trigger["observed_at"], f"{trigger_path}.observed_at")
+        evidence_path = f"{trigger_path}.evidence_refs"
+        evidence_refs = _require_list(trigger["evidence_refs"], evidence_path)
+        if not evidence_refs:
+            raise RevisitContractError(f"{evidence_path} must not be empty")
+        for evidence_index, evidence in enumerate(evidence_refs):
+            validate_evidence_ref(evidence, f"{evidence_path}[{evidence_index}]")
+
+    claims = _require_list(request["selected_claims"], f"{path}.selected_claims")
+    if not claims:
+        raise RevisitContractError("request.selected_claims must not be empty")
+    if len(claims) > 99:
+        raise RevisitContractError("request.selected_claims cannot exceed 99 entries")
+    referenced_trigger_indexes: set[int] = set()
+    for index, claim_value in enumerate(claims):
+        claim_path = f"{path}.selected_claims[{index}]"
+        claim = _require_object(claim_value, claim_path)
+        _require_exact_keys(claim, _REQUEST_CLAIM_KEYS, claim_path)
+        _require_non_empty_text(claim["statement"], f"{claim_path}.statement")
+
+        source_path = f"{claim_path}.source_ref"
+        source = _require_object(claim["source_ref"], source_path)
+        _require_exact_keys(source, _CLAIM_SOURCE_REF_KEYS, source_path)
+        _require_non_empty_text(source["path"], f"{source_path}.path")
+        _require_sha256(source["sha256"], f"{source_path}.sha256")
+        _require_non_empty_text(source["locator"], f"{source_path}.locator")
+        _require_nullable_text(
+            source["historical_claim_id"], f"{source_path}.historical_claim_id"
+        )
+
+        if claim["importance"] not in CLAIM_IMPORTANCE:
+            raise RevisitContractError(f"{claim_path} claim importance is unsupported")
+        reasons_path = f"{claim_path}.selection_reasons"
+        reasons = _require_list(claim["selection_reasons"], reasons_path)
+        if not reasons:
+            raise RevisitContractError(f"{reasons_path} must not be empty")
+        for reason in reasons:
+            if reason not in SELECTION_REASONS:
+                raise RevisitContractError(
+                    f"{reasons_path} selection reason is unsupported"
+                )
+        _require_unique(reasons, reasons_path, "selection reasons")
+
+        indexes_path = f"{claim_path}.trigger_indexes"
+        trigger_indexes = _require_list(claim["trigger_indexes"], indexes_path)
+        if "trigger_affected" in reasons and not trigger_indexes:
+            raise RevisitContractError(
+                f"{claim_path} trigger_affected requires non-empty trigger_indexes"
+            )
+        for trigger_index in trigger_indexes:
+            trigger_index = _require_strict_int(trigger_index, indexes_path, 1)
+            if trigger_index > len(triggers):
+                raise RevisitContractError(
+                    f"{indexes_path} trigger index is out of range: {trigger_index}"
+                )
+            referenced_trigger_indexes.add(trigger_index)
+        _require_unique(trigger_indexes, indexes_path, "trigger indexes")
+
+        if claim["inherited_grade"] not in CURRENT_GRADES:
+            raise RevisitContractError(f"{claim_path}.inherited_grade is unsupported")
+        if claim["inherited_confidence"] not in CURRENT_CONFIDENCE:
+            raise RevisitContractError(
+                f"{claim_path}.inherited_confidence is unsupported"
+            )
+        inherited_path = f"{claim_path}.inherited_evidence"
+        inherited = _require_list(claim["inherited_evidence"], inherited_path)
+        for evidence_index, evidence_value in enumerate(inherited):
+            evidence_path = f"{inherited_path}[{evidence_index}]"
+            evidence = _require_object(evidence_value, evidence_path)
+            _require_exact_keys(
+                evidence, _INHERITED_EVIDENCE_KEYS, evidence_path
+            )
+            validate_evidence_ref(evidence["ref"], f"{evidence_path}.ref")
+            if evidence["freshness"] not in FRESHNESS:
+                raise RevisitContractError(f"{evidence_path}.freshness is unsupported")
+            _require_utc_timestamp(
+                evidence["checked_at"], f"{evidence_path}.checked_at"
+            )
+            _require_non_empty_text(evidence["reason"], f"{evidence_path}.reason")
+
+    for trigger_index in range(1, len(triggers) + 1):
+        if trigger_index not in referenced_trigger_indexes:
+            raise RevisitContractError(
+                f"request trigger index {trigger_index} is not referenced by any selected claim"
+            )
+    return request
 
 
 def _validate_intake(value: Any, cycle_id: str) -> None:
@@ -713,7 +1006,7 @@ def _validate_claims(raw: dict[str, Any]) -> None:
             raise RevisitContractError(
                 f"{path}.claim_id must reference a known same-cycle claim"
             )
-        if resolution["status"] not in CLAIM_TERMINAL_STATES:
+        if resolution["status"] not in _CLAIM_RESOLUTION_STATES:
             raise RevisitContractError(
                 f"{path} claim resolution status is unsupported"
             )
