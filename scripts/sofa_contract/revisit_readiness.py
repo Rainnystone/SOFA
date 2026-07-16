@@ -18,7 +18,6 @@ or owned by zero/multiple rows.
 
 from __future__ import annotations
 
-import copy
 import json
 import re
 from dataclasses import dataclass
