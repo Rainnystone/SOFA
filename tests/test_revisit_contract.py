@@ -26,6 +26,36 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 REVISIT_CYCLE_SCRIPT = REPO_ROOT / "scripts" / "revisit_cycle.py"
 
 
+def _can_create_symlink() -> bool:
+    """Probe whether the host can actually create a symbolic link.
+
+    ``hasattr(os, "symlink")`` is True on Windows but creating a link still
+    requires Developer Mode or administrator privileges, so the attribute test
+    alone lets symlink-based tests run and fail with ``OSError`` on unprivileged
+    Windows. This probe attempts a real throwaway link and returns False on any
+    ``OSError`` so ``skipUnless`` gates skip those tests honestly.
+    """
+    if not hasattr(os, "symlink"):
+        return False
+    directory = tempfile.mkdtemp()
+    try:
+        target = os.path.join(directory, "target.txt")
+        link = os.path.join(directory, "link.txt")
+        open(target, "w", encoding="utf-8").close()
+        try:
+            os.symlink(target, link)
+        except OSError:
+            return False
+        return True
+    finally:
+        import shutil
+
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+CAN_SYMLINK = _can_create_symlink()
+
+
 def complete_ticker_report_bytes() -> bytes:
     return (
         "\n".join(
@@ -210,7 +240,7 @@ def make_revisit_start_workspace(root: Path) -> tuple[Path, Path]:
     source_excerpt = "Archived source excerpt for the qualification milestone.\n"
     source_path = workspace / "sources" / "src-001.md"
     source_path.parent.mkdir()
-    source_path.write_text(source_excerpt, encoding="utf-8")
+    source_path.write_bytes(source_excerpt.encode("utf-8"))
     source_record = {
         "source_id": "src-001",
         "url": "https://example.test/qualification",
@@ -220,9 +250,8 @@ def make_revisit_start_workspace(root: Path) -> tuple[Path, Path]:
         "excerpt_path": "sources/src-001.md",
         "sha256": hashlib.sha256(source_excerpt.encode("utf-8")).hexdigest(),
     }
-    (workspace / "sources_index.jsonl").write_text(
-        json.dumps(source_record, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    (workspace / "sources_index.jsonl").write_bytes(
+        (json.dumps(source_record, ensure_ascii=False) + "\n").encode("utf-8")
     )
     return workspace, write_valid_revisit_request(root, workspace)
 
@@ -240,7 +269,7 @@ def make_task5_mutation_workspace(root: Path) -> tuple[Path, str]:
 
     excerpt = "Current source excerpt for the revised qualification window.\n"
     excerpt_path = workspace / "sources" / "src-002.md"
-    excerpt_path.write_text(excerpt, encoding="utf-8")
+    excerpt_path.write_bytes(excerpt.encode("utf-8"))
     source_record = {
         "source_id": "src-002",
         "url": "https://example.test/revised-qualification",
@@ -1407,7 +1436,7 @@ class TestRevisitCycleCliBootstrap(unittest.TestCase):
 
 
 class TestRevisitCycleRegisterCurrentCli(unittest.TestCase):
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_register_current_rejects_report_retarget_between_owner_and_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, report = make_registration_workspace(Path(temp_dir))
@@ -1453,7 +1482,7 @@ class TestRevisitCycleRegisterCurrentCli(unittest.TestCase):
             self.assertFalse((workspace / revisit_contract.POINTER_FILENAME).exists())
             self.assertFalse((workspace / revisit_contract.CYCLES_DIRNAME).exists())
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_register_current_rejects_equal_byte_report_retarget_after_validation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, report = make_registration_workspace(Path(temp_dir))
@@ -2169,6 +2198,8 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                 ("symlink", "outside-link.md"),
             ):
                 with self.subTest(label=label):
+                    if label == "symlink" and not CAN_SYMLINK:
+                        self.skipTest("requires symbolic links")
                     case_root = root / label
                     case_root.mkdir()
                     workspace, request_path = make_revisit_start_workspace(case_root)
@@ -2640,7 +2671,7 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                     self.assertEqual(drifted_bytes, target.read_bytes())
                     self.assertEqual([], list((workspace / "revisit_cycles").iterdir()))
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_source_excerpt_snapshot_preserves_canonical_lexical_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2667,7 +2698,7 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                 lexical_paths,
             )
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_start_rejects_equal_byte_source_retarget_after_validation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2726,7 +2757,7 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                 (workspace / "revisit_cycles" / "RC-0001.md").exists()
             )
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_start_rejects_registry_retarget_between_owner_and_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -6997,7 +7028,7 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                 self.assertEqual(prior_cycle, cycle_path.read_bytes())
                 self.assertEqual(prior_mirror, mirror_path.read_bytes())
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_check_rejects_intake_authority_retarget_without_cycle_writes(self):
         for relative_path in ("framing_contract.json", "claim_ledger.md"):
             with (
@@ -7301,13 +7332,13 @@ class TestRevisitDerivedClaimMutation(unittest.TestCase):
     ):
         self._assert_worker_delivery_artifact_rejected(alias=False)
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_emergent_claim_rejects_delivery_alias_as_artifact_evidence_without_writes(
         self,
     ):
         self._assert_worker_delivery_artifact_rejected(alias=True)
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_emergent_dispatch_delivery_keeps_declared_lexical_identity(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -8445,6 +8476,7 @@ class TestRevisitStorePaths(unittest.TestCase):
                     suffix=".md",
                 )
 
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_resolve_workspace_path_rejects_internal_symlink_parent_and_suffix_change(
         self,
     ):
@@ -8452,11 +8484,13 @@ class TestRevisitStorePaths(unittest.TestCase):
             "other", "authority.json", "resolved path must be under reports/"
         )
 
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_resolve_workspace_path_rejects_internal_symlink_parent_change(self):
         self.assert_internal_symlink_target_rejected(
             "other", "authority.md", "resolved path must be under reports/"
         )
 
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_resolve_workspace_path_rejects_internal_symlink_suffix_change(self):
         self.assert_internal_symlink_target_rejected(
             "reports", "authority.json", "resolved path must end with .md"
@@ -8584,6 +8618,7 @@ class TestRevisitStorePaths(unittest.TestCase):
                 ),
             )
 
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_resolve_workspace_path_rejects_symlink_escape(self):
         resolve_workspace_path = getattr(
             revisit_contract, "resolve_workspace_path", None
@@ -9393,7 +9428,7 @@ class TestRevisitPersistence(unittest.TestCase):
                 (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md").exists()
             )
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_snapshot_rejects_same_byte_target_change_before_cycle_persistence(self):
         persist_cycle = self.required_callable("persist_cycle")
         cycle = make_minimal_cycle()
@@ -9449,7 +9484,7 @@ class TestRevisitPersistence(unittest.TestCase):
                 (workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.md").exists()
             )
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_snapshot_rejects_same_byte_target_change_after_cycle_persistence(self):
         persist_cycle = self.required_callable("persist_cycle")
         cycle = make_minimal_cycle()

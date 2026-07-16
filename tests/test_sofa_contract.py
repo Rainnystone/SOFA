@@ -1521,25 +1521,26 @@ def write_dossier_ready_workspace(workspace: Path) -> None:
 
 def write_complete_ticker_report(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "# Final Report",
-                "Conclusion: research status is Watch with Trigger.",
-                "Confidence: medium.",
-                "Time horizon: 12 months.",
-                "Top supporting evidence: evidence_ledger.md#loop-1.",
-                "Strongest counter evidence: customer qualification risk.",
-                "Evidence map: evidence_ledger.md.",
-                "Financial bridge: revenue bridge is constrained by qualification timing.",
-                "Catalyst clock: next filing and customer update.",
-                "Red-team results: unresolved substitution risk.",
-                "Invalidation triggers: lost customer qualification.",
-                "Watch protocol: monitor customer updates.",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+    path.write_bytes(
+        (
+            "\n".join(
+                [
+                    "# Final Report",
+                    "Conclusion: research status is Watch with Trigger.",
+                    "Confidence: medium.",
+                    "Time horizon: 12 months.",
+                    "Top supporting evidence: evidence_ledger.md#loop-1.",
+                    "Strongest counter evidence: customer qualification risk.",
+                    "Evidence map: evidence_ledger.md.",
+                    "Financial bridge: revenue bridge is constrained by qualification timing.",
+                    "Catalyst clock: next filing and customer update.",
+                    "Red-team results: unresolved substitution risk.",
+                    "Invalidation triggers: lost customer qualification.",
+                    "Watch protocol: monitor customer updates.",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8")
     )
 
 
@@ -2005,9 +2006,8 @@ class TestTickerCurrentReportPointer(unittest.TestCase):
             workspace = Path(temp_dir)
             report = workspace / "reports" / "revision-0002.md"
             write_complete_ticker_report(report)
-            report.write_text(
-                report.read_text(encoding="utf-8") + metadata + "\n",
-                encoding="utf-8",
+            report.write_bytes(
+                report.read_bytes() + (metadata + "\n").encode("utf-8")
             )
 
             exact = evaluate_module.evaluate_specific_ticker_report(
@@ -2017,9 +2017,8 @@ class TestTickerCurrentReportPointer(unittest.TestCase):
             )
             self.assertTrue(exact.passed, [issue.display() for issue in exact.failures])
 
-            report.write_text(
-                report.read_text(encoding="utf-8") + metadata + "\n",
-                encoding="utf-8",
+            report.write_bytes(
+                report.read_bytes() + (metadata + "\n").encode("utf-8")
             )
             duplicated = evaluate_module.evaluate_specific_ticker_report(
                 workspace,
