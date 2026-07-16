@@ -897,6 +897,7 @@ def derive_frontier_binding_legality_issue(
     bound_at = binding["bound_at"]
     final_at_binding_index = None
     after_binding = False
+    previous_timestamp = None
     for index, transition in enumerate(lifecycle):
         if (
             not isinstance(transition, dict)
@@ -906,6 +907,15 @@ def derive_frontier_binding_legality_issue(
                 f"frontier {frontier_id} lifecycle transition {index + 1} "
                 "requires a valid UTC timestamp"
             )
+        if (
+            previous_timestamp is not None
+            and transition["ts"] < previous_timestamp
+        ):
+            return invalid(
+                f"frontier {frontier_id} lifecycle timestamps must be "
+                "nondecreasing"
+            )
+        previous_timestamp = transition["ts"]
         if transition["ts"] <= bound_at:
             if after_binding:
                 return invalid(

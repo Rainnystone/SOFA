@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import sys
 import unicodedata
 from datetime import datetime, timezone
@@ -367,13 +368,15 @@ def _load_json_object(path: str | Path, label: str) -> dict:
 def _validate_source_ids(
     workspace: Path, requested_source_ids: set[str]
 ) -> tuple[set[str], tuple[PreparedAuthoritySnapshot, ...]]:
-    if not requested_source_ids:
-        return set(), ()
     source_index_path = workspace / "sources_index.jsonl"
+    if not requested_source_ids and not source_index_path.exists():
+        return set(), ()
     source_index_generation = _read_authority_generation(
         workspace,
         source_index_path,
     )
+    if not requested_source_ids:
+        return set(), (source_index_generation.snapshot,)
     preliminary = evaluate_index(workspace)
     _require_authority_generation(
         source_index_generation,
@@ -571,6 +574,8 @@ def _read_dispatch_delivery_generation(
 
 def _capture_dispatch_delivery_generations(
     workspace: Path,
+    *,
+    captured_paths: set[Path] | None = None,
 ) -> tuple[_AuthorityGeneration, ...]:
     # The evaluator remains the sole owner of malformed or ineligible dispatch
     # verdicts. This transaction layer binds the raw log, every named delivered
@@ -580,10 +585,19 @@ def _capture_dispatch_delivery_generations(
     dispatch_generation = _read_authority_generation(workspace, dispatch_path)
     records = _decode_dispatch_generation(dispatch_generation, strict=False)
     generations = [dispatch_generation]
-    seen_paths = set()
+    seen_paths = set(captured_paths or ())
+    seen_paths.add(dispatch_generation.snapshot.lexical_path)
     for record in records:
         if record.get("status") != "delivered":
             continue
+        raw_delivery = record.get("delivery_path")
+        if isinstance(raw_delivery, str) and raw_delivery:
+            candidate = Path(raw_delivery)
+            lexical_delivery = (
+                candidate if candidate.is_absolute() else workspace / candidate
+            )
+            if Path(os.path.abspath(os.fspath(lexical_delivery))) in seen_paths:
+                continue
         generation = _read_dispatch_delivery_generation(
             workspace,
             record,
@@ -598,7 +612,7 @@ def _capture_dispatch_delivery_generations(
         seen_paths.add(generation.snapshot.lexical_path)
         generations.append(generation)
     for output_path in find_worker_outputs(workspace):
-        lexical = Path(output_path)
+        lexical = Path(os.path.abspath(os.fspath(output_path)))
         if lexical in seen_paths:
             continue
         generation = _read_authority_generation(workspace, lexical)
@@ -610,6 +624,18 @@ def _capture_dispatch_delivery_generations(
             "after dispatch delivery generation capture",
         )
     return tuple(generations)
+
+
+def _add_authority_snapshot(
+    authority_union: dict[Path, PreparedAuthoritySnapshot],
+    snapshot: PreparedAuthoritySnapshot,
+) -> None:
+    existing = authority_union.get(snapshot.lexical_path)
+    if existing is not None and existing != snapshot:
+        raise RevisitContractError(
+            f"conflicting snapshot authority: {snapshot.lexical_path.name}"
+        )
+    authority_union[snapshot.lexical_path] = snapshot
 
 
 def _validate_emergent_dispatch(
@@ -1322,14 +1348,28 @@ def _command_check_in_transaction(
         for reference in evidence_references
         if reference.get("kind") == "source"
     }
+    source_index_path = workspace / "sources_index.jsonl"
     _, source_snapshots = _validate_source_ids(
         workspace,
         requested_source_ids,
     )
+    source_index_was_absent = not source_snapshots
 
-    authority_generations = list(
-        _capture_dispatch_delivery_generations(workspace)
+    authority_union: dict[Path, PreparedAuthoritySnapshot] = {}
+    for snapshot in (
+        pointer_generation.snapshot,
+        report_authority,
+        cycle_generation.snapshot,
+        *source_snapshots,
+    ):
+        _add_authority_snapshot(authority_union, snapshot)
+
+    dispatch_generations = _capture_dispatch_delivery_generations(
+        workspace,
+        captured_paths=set(authority_union),
     )
+    for generation in dispatch_generations:
+        _add_authority_snapshot(authority_union, generation.snapshot)
     required_authority_paths = [
         workspace / "state.json",
         workspace / "frontier_registry.json",
@@ -1347,17 +1387,14 @@ def _command_check_in_transaction(
             if reference.get("kind") == "artifact"
         ),
     ]
-    seen_paths = {
-        generation.snapshot.lexical_path
-        for generation in authority_generations
-    }
     for path in required_authority_paths:
-        lexical = Path(path)
-        if lexical in seen_paths:
+        lexical = Path(os.path.abspath(os.fspath(path)))
+        if lexical in authority_union:
             continue
-        seen_paths.add(lexical)
-        authority_generations.append(
-            _read_authority_generation(workspace, lexical)
+        generation = _read_authority_generation(workspace, lexical)
+        _add_authority_snapshot(
+            authority_union,
+            generation.snapshot,
         )
 
     evaluation = evaluate_revisit_report(
@@ -1365,24 +1402,15 @@ def _command_check_in_transaction(
         args.cycle,
         require_candidate=False,
     )
-    _require_authority_generation(
-        pointer_generation, "after revisit report evaluation"
-    )
-    _require_authority_generation(
-        cycle_generation, "after revisit report evaluation"
-    )
-    for generation in authority_generations:
-        _require_authority_generation(
-            generation, "after revisit report evaluation"
-        )
-    prepared_authorities = (report_authority, *source_snapshots)
     _require_snapshot_generations(
-        {
-            snapshot.lexical_path: snapshot
-            for snapshot in prepared_authorities
-        },
+        authority_union,
         "after revisit report evaluation",
     )
+    if source_index_was_absent and source_index_path.exists():
+        raise RevisitContractError(
+            "authority appeared after source cache generation capture: "
+            "sources_index.jsonl"
+        )
     for warning in evaluation.warnings:
         print(warning.display(), file=sys.stderr)
     if not evaluation.passed:
@@ -1406,10 +1434,10 @@ def _command_check_in_transaction(
         workspace,
         updated,
         expected_sha256=cycle_generation.snapshot.expected_sha256,
-        authority_snapshots=(
-            pointer_generation.snapshot,
-            *prepared_authorities,
-            *(generation.snapshot for generation in authority_generations),
+        authority_snapshots=tuple(
+            snapshot
+            for lexical_path, snapshot in authority_union.items()
+            if lexical_path != cycle_generation.snapshot.lexical_path
         ),
     )
     print(f"REVISIT CYCLE READY: {args.cycle}")

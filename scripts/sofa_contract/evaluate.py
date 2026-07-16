@@ -34,12 +34,14 @@ except ImportError:
 try:
     from source_cache import (
         SOURCE_INDEX_FILENAME,
+        SourceCacheEvaluation,
         evaluate_index,
         has_registered_source_id_reference,
     )
 except ImportError:
     from scripts.source_cache import (
         SOURCE_INDEX_FILENAME,
+        SourceCacheEvaluation,
         evaluate_index,
         has_registered_source_id_reference,
     )
@@ -216,6 +218,36 @@ def evaluate_specific_ticker_report(
     return result
 
 
+def _check_revisit_ticker_mode(
+    workspace: Path,
+    result: ContractResult,
+) -> bool:
+    try:
+        state = read_json_file(workspace / "state.json")
+    except (OSError, ValueError) as exc:
+        result.fail(
+            code="REVISIT_CYCLE_MALFORMED",
+            message=str(exc),
+            path="state.json",
+        )
+        return False
+    if isinstance(state, dict) and state.get("mode") == "sector":
+        result.fail(
+            code="REVISIT_UNSUPPORTED_MODE",
+            message="revisit_report is unavailable for Sector workspaces",
+            path="state.json",
+        )
+        return False
+    if not isinstance(state, dict) or state.get("mode") != "ticker":
+        result.fail(
+            code="REVISIT_CYCLE_MALFORMED",
+            message="revisit_report requires state.json with mode=ticker",
+            path="state.json",
+        )
+        return False
+    return True
+
+
 def evaluate_revisit_report(
     workspace: Path | str,
     cycle_id: str,
@@ -224,28 +256,7 @@ def evaluate_revisit_report(
     del require_candidate
     root = Path(workspace)
     result = ContractResult()
-    try:
-        state = read_json_file(root / "state.json")
-    except (OSError, ValueError) as exc:
-        result.fail(
-            code="REVISIT_CYCLE_MALFORMED",
-            message=str(exc),
-            path="state.json",
-        )
-        return result
-    if isinstance(state, dict) and state.get("mode") == "sector":
-        result.fail(
-            code="REVISIT_UNSUPPORTED_MODE",
-            message="revisit_report is unavailable for Sector workspaces",
-            path="state.json",
-        )
-        return result
-    if not isinstance(state, dict) or state.get("mode") != "ticker":
-        result.fail(
-            code="REVISIT_CYCLE_MALFORMED",
-            message="revisit_report requires state.json with mode=ticker",
-            path="state.json",
-        )
+    if not _check_revisit_ticker_mode(root, result):
         return result
     try:
         pointer = load_pointer(root)
@@ -300,6 +311,8 @@ def evaluate_revisit_report(
         )
 
     source_evaluation = evaluate_index(root)
+    if (root / SOURCE_INDEX_FILENAME).exists():
+        _append_source_cache_evaluation(result, source_evaluation)
     source_ids = {str(record["source_id"]) for record in source_evaluation.records}
     source_context_valid = not source_evaluation.issues
     for trigger_index, trigger in enumerate(cycle["intake"]["triggers"]):
@@ -493,6 +506,8 @@ def _revisit_evidence_ref_valid(
 
 def _evaluate_discovered_revisit_report(workspace: Path) -> ContractResult:
     result = ContractResult()
+    if not _check_revisit_ticker_mode(workspace, result):
+        return result
     try:
         pointer = load_pointer(workspace)
         cycles = [
@@ -1021,6 +1036,13 @@ def _check_source_cache(workspace: Path, result: ContractResult) -> None:
     if not (workspace / SOURCE_INDEX_FILENAME).exists():
         return
     evaluation = evaluate_index(workspace)
+    _append_source_cache_evaluation(result, evaluation)
+
+
+def _append_source_cache_evaluation(
+    result: ContractResult,
+    evaluation: SourceCacheEvaluation,
+) -> None:
     for issue in evaluation.issues:
         result.fail(code=issue.code, message=issue.message, path=issue.location)
     for warning in evaluation.warnings:

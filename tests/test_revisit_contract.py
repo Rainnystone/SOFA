@@ -4561,9 +4561,7 @@ class TestRevisitFrontierBindingMutation(unittest.TestCase):
     def _make_old_active_reactivated(workspace: Path) -> str:
         registry_path = workspace / "frontier_registry.json"
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        registry["frontiers"][0]["lifecycle"][-1]["ts"] = (
-            "2026-07-14T09:00:00Z"
-        )
+        registry["frontiers"][0]["lifecycle"].pop()
         registry_path.write_text(
             json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -5157,6 +5155,294 @@ class TestRevisitClaimBindingAndFreshnessFacts(unittest.TestCase):
 
 
 class TestRevisitPreReportEvaluation(unittest.TestCase):
+    def make_artifact_only_ready_workspace(
+        self, root: Path
+    ) -> tuple[Path, str]:
+        evidence_dir = root / "workspace" / "evidence"
+        evidence_dir.mkdir(parents=True)
+        trigger_path = evidence_dir / "trigger.md"
+        current_path = evidence_dir / "current.md"
+        trigger_payload = b"Observed qualification timing trigger.\n"
+        current_payload = b"Current qualification timing support.\n"
+        trigger_path.write_bytes(trigger_payload)
+        current_path.write_bytes(current_payload)
+        workspace, cycle_id = make_task6_ready_workspace(
+            root,
+            current_ref={
+                "kind": "artifact",
+                "path": "evidence/current.md",
+                "sha256": hashlib.sha256(current_payload).hexdigest(),
+                "locator": "Current qualification timing support",
+                "checked_at": "2026-07-14T12:00:00Z",
+            },
+        )
+        cycle = revisit_contract.load_cycle(workspace, cycle_id)
+        cycle["intake"]["triggers"][0]["evidence_refs"] = [
+            {
+                "kind": "artifact",
+                "path": "evidence/trigger.md",
+                "sha256": hashlib.sha256(trigger_payload).hexdigest(),
+                "locator": "Observed qualification timing trigger",
+                "checked_at": "2026-07-14T10:00:00Z",
+            }
+        ]
+        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        attach_valid_audit(cycle)
+        revisit_contract.persist_cycle(
+            workspace,
+            cycle,
+            expected_sha256=revisit_contract.sha256_file(
+                workspace / "revisit_cycles" / f"{cycle_id}.json"
+            ),
+        )
+        return workspace, cycle_id
+
+    def assert_revisit_failure(self, make_workspace, expected_code: str) -> None:
+        evaluators = (
+            (
+                "direct",
+                lambda workspace, cycle_id: sofa_evaluate.evaluate_revisit_report(
+                    workspace, cycle_id
+                ),
+            ),
+            (
+                "profile",
+                lambda workspace, _cycle_id: sofa_evaluate.evaluate_workspace(
+                    workspace,
+                    sofa_evaluate.ContractProfile(
+                        mode="ticker", target="revisit_report"
+                    ),
+                ),
+            ),
+        )
+        for evaluator_name, evaluate in evaluators:
+            with (
+                self.subTest(evaluator=evaluator_name),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                workspace, cycle_id = make_workspace(Path(temp_dir))
+
+                result = evaluate(workspace, cycle_id)
+
+                self.assertFalse(result.passed)
+                self.assertIn(
+                    expected_code,
+                    [issue.code for issue in result.failures],
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_workspace(Path(temp_dir))
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_cycle = cycle_path.read_bytes()
+            prior_mirror = mirror_path.read_bytes()
+
+            result = run_revisit_cycle_cli(workspace, "check", cycle_id)
+
+            self.assertEqual(1, result.returncode, result.stderr)
+            self.assertIn(expected_code, result.stderr)
+            self.assertEqual(prior_cycle, cycle_path.read_bytes())
+            self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    def assert_artifact_only_source_cache_failure(
+        self,
+        write_invalid_index,
+        expected_code: str,
+    ) -> None:
+        def make_workspace(root: Path) -> tuple[Path, str]:
+            workspace, cycle_id = self.make_artifact_only_ready_workspace(root)
+            write_invalid_index(workspace / "sources_index.jsonl")
+            return workspace, cycle_id
+
+        self.assert_revisit_failure(make_workspace, expected_code)
+
+    def test_artifact_only_revisit_rejects_malformed_present_source_cache(self):
+        def write_invalid_index(index_path: Path) -> None:
+            index_path.write_text("{not valid json\n", encoding="utf-8")
+
+        self.assert_artifact_only_source_cache_failure(
+            write_invalid_index,
+            "SOURCE_INDEX_MALFORMED",
+        )
+
+    def test_artifact_only_revisit_rejects_unrelated_invalid_source_cache(self):
+        def write_invalid_index(index_path: Path) -> None:
+            invalid_record = {
+                "source_id": "src-999",
+                "url": "https://example.test/unrelated",
+                "title": "Unrelated missing excerpt",
+                "retrieved": "2026-07-14",
+                "grade": "B",
+                "excerpt_path": "sources/src-999.md",
+                "sha256": "a" * 64,
+            }
+            index_path.write_text(
+                json.dumps(invalid_record, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+        self.assert_artifact_only_source_cache_failure(
+            write_invalid_index,
+            "SOURCE_EXCERPT_MISSING",
+        )
+
+    def test_artifact_only_revisit_allows_absent_source_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = self.make_artifact_only_ready_workspace(
+                Path(temp_dir)
+            )
+            (workspace / "sources_index.jsonl").unlink()
+
+            direct = sofa_evaluate.evaluate_revisit_report(workspace, cycle_id)
+            profile = sofa_evaluate.evaluate_workspace(
+                workspace,
+                sofa_evaluate.ContractProfile(
+                    mode="ticker", target="revisit_report"
+                ),
+            )
+            checked = run_revisit_cycle_cli(workspace, "check", cycle_id)
+
+            self.assertTrue(
+                direct.passed,
+                [issue.display() for issue in direct.failures],
+            )
+            self.assertTrue(
+                profile.passed,
+                [issue.display() for issue in profile.failures],
+            )
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            self.assertEqual(
+                "ready_for_report",
+                revisit_contract.load_cycle(workspace, cycle_id)["status"],
+            )
+
+    def assert_artifact_only_source_index_race_rejected(
+        self,
+        *,
+        starts_absent: bool,
+        mutate_before_evaluate: bool,
+        expected_message: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = self.make_artifact_only_ready_workspace(
+                Path(temp_dir)
+            )
+            source_index = workspace / "sources_index.jsonl"
+            original_index = source_index.read_bytes()
+            changed_index = (
+                original_index
+                if starts_absent
+                else original_index + b"\n"
+            )
+            if starts_absent:
+                source_index.unlink()
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_cycle = cycle_path.read_bytes()
+            prior_mirror = mirror_path.read_bytes()
+            real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+
+            def mutate_index() -> None:
+                source_index.write_bytes(changed_index)
+
+            def evaluate_with_index_race(*args, **kwargs):
+                if mutate_before_evaluate:
+                    mutate_index()
+                evaluation = real_evaluate(*args, **kwargs)
+                if not mutate_before_evaluate:
+                    mutate_index()
+                return evaluation
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_revisit_report",
+                    side_effect=evaluate_with_index_race,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [str(workspace), "check", cycle_id]
+                )
+
+            self.assertEqual(2, result, stderr.getvalue())
+            self.assertRegex(stderr.getvalue(), expected_message)
+            self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+            self.assertEqual(changed_index, source_index.read_bytes())
+            self.assertEqual(prior_cycle, cycle_path.read_bytes())
+            self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    def test_artifact_only_check_generation_binds_present_source_index(self):
+        self.assert_artifact_only_source_index_race_rejected(
+            starts_absent=False,
+            mutate_before_evaluate=False,
+            expected_message="authority changed",
+        )
+
+    def test_artifact_only_check_rejects_source_index_missing_to_appearance(self):
+        self.assert_artifact_only_source_index_race_rejected(
+            starts_absent=True,
+            mutate_before_evaluate=True,
+            expected_message="authority appeared",
+        )
+
+    def test_reactivated_binding_rejects_decreasing_pre_binding_timestamps(self):
+        def make_workspace(root: Path) -> tuple[Path, str]:
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            registry_path = workspace / "frontier_registry.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            lifecycle = registry["frontiers"][0]["lifecycle"]
+            active_index = max(
+                index
+                for index, transition_row in enumerate(lifecycle)
+                if transition_row.get("to") == "Active"
+            )
+            lifecycle[active_index - 1]["ts"] = "2026-07-14T11:15:00Z"
+            lifecycle[active_index]["ts"] = "2026-07-14T11:00:00Z"
+            registry_path.write_text(
+                json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            return workspace, cycle_id
+
+        self.assert_revisit_failure(
+            make_workspace,
+            "REVISIT_FRONTIER_BINDING_INVALID",
+        )
+
+    def test_added_binding_rejects_decreasing_pre_binding_timestamps(self):
+        def make_workspace(root: Path) -> tuple[Path, str]:
+            workspace, cycle_id, frontier_id = make_task6_added_ready_workspace(
+                root
+            )
+            registry_path = workspace / "frontier_registry.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            frontier = next(
+                row
+                for row in registry["frontiers"]
+                if row["id"] == frontier_id
+            )
+            post_binding_review = copy.deepcopy(frontier["lifecycle"][-1])
+            frontier["lifecycle"][-1]["ts"] = "2026-07-14T11:15:00Z"
+            list_final_active = copy.deepcopy(frontier["lifecycle"][0])
+            list_final_active["ts"] = "2026-07-14T10:30:00Z"
+            frontier["lifecycle"].extend(
+                [list_final_active, post_binding_review]
+            )
+            registry_path.write_text(
+                json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            return workspace, cycle_id
+
+        self.assert_revisit_failure(
+            make_workspace,
+            "REVISIT_FRONTIER_BINDING_INVALID",
+        )
+
     def assert_bound_at_state_drift_rejected(self, make_workspace) -> None:
         evaluators = (
             (
@@ -5778,6 +6064,29 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                 [issue.code for issue in result.failures],
             )
 
+    def test_revisit_profile_rejects_ordinary_sector_before_pointer_discovery(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _ = make_registration_workspace(
+                Path(temp_dir),
+                mode="sector",
+            )
+
+            result = sofa_evaluate.evaluate_workspace(
+                workspace,
+                sofa_evaluate.ContractProfile(
+                    mode="ticker", target="revisit_report"
+                ),
+            )
+
+            self.assertFalse(result.passed)
+            self.assertEqual(
+                ["REVISIT_UNSUPPORTED_MODE"],
+                [issue.code for issue in result.failures],
+            )
+            self.assertEqual("state.json", result.failures[0].path)
+
     def test_direct_and_profile_reject_missing_or_unknown_ticker_state(self):
         evaluators = (
             (
@@ -6271,6 +6580,91 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             self.assertEqual(expected_persisted, set(persisted_paths))
             self.assertEqual(len(persisted_paths), len(set(persisted_paths)))
             self.assertEqual(prior_cycle_sha256, persisted_expected_sha256)
+
+    def test_check_deduplicates_source_excerpt_artifact_authority_union(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_payload = (
+                b"Archived source excerpt for the qualification milestone.\n"
+            )
+            workspace, cycle_id = make_task6_ready_workspace(
+                Path(temp_dir),
+                current_ref={
+                    "kind": "artifact",
+                    "path": "sources/src-001.md",
+                    "sha256": hashlib.sha256(source_payload).hexdigest(),
+                    "locator": "Qualification milestone excerpt",
+                    "checked_at": "2026-07-14T12:00:00Z",
+                },
+            )
+
+            def relative_path(snapshot):
+                return snapshot.lexical_path.relative_to(
+                    snapshot.workspace
+                ).as_posix()
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_read_authority_generation",
+                    wraps=revisit_cycle_cli._read_authority_generation,
+                ) as read_spy,
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_require_authority_generation",
+                    wraps=revisit_cycle_cli._require_authority_generation,
+                ) as generation_check_spy,
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_require_snapshot_generations",
+                    wraps=revisit_cycle_cli._require_snapshot_generations,
+                ) as snapshot_check_spy,
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "persist_cycle",
+                    wraps=revisit_cycle_cli.persist_cycle,
+                ) as persist_spy,
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [str(workspace), "check", cycle_id]
+                )
+
+            self.assertEqual(0, result, stderr.getvalue())
+            captured_paths = [
+                Path(os.path.abspath(os.fspath(call.args[1])))
+                .relative_to(workspace.resolve())
+                .as_posix()
+                for call in read_spy.call_args_list
+            ]
+            post_evaluation_paths = [
+                relative_path(call.args[0].snapshot)
+                for call in generation_check_spy.call_args_list
+                if call.args[1] == "after revisit report evaluation"
+            ]
+            for call in snapshot_check_spy.call_args_list:
+                if call.args[1] != "after revisit report evaluation":
+                    continue
+                post_evaluation_paths.extend(
+                    relative_path(snapshot)
+                    for snapshot in call.args[0].values()
+                )
+            persisted_paths = [
+                relative_path(snapshot)
+                for snapshot in persist_spy.call_args.kwargs[
+                    "authority_snapshots"
+                ]
+            ]
+            for phase, paths in (
+                ("capture", captured_paths),
+                ("post-evaluation recheck", post_evaluation_paths),
+                ("persistence", persisted_paths),
+            ):
+                with self.subTest(phase=phase):
+                    self.assertEqual(len(paths), len(set(paths)), paths)
+                    self.assertEqual(1, paths.count("sources/src-001.md"))
 
     def test_check_rejects_delivered_worker_path_drift_before_ready_persistence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
