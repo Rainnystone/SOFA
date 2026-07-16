@@ -4567,13 +4567,21 @@ class TestRevisitFrontierBindingMutation(unittest.TestCase):
                 "reactivated previous state",
                 self._make_wrong_previous_reactivated,
                 "reactivated",
-                r"immediately follow Continued",
+                # Task 6.2 strict registry validation rejects this at load time:
+                # the Continued review decision has no matching lifecycle
+                # transition, surfacing as the raw LifecycleError on the CLI
+                # before the revisit binding check runs.
+                r"has no matching lifecycle transition",
             ),
             (
                 "reactivated missing post-cycle Active",
                 self._make_old_active_reactivated,
                 "reactivated",
-                r"post-cycle Active transition",
+                # Task 6.2 strict registry validation rejects this at load time:
+                # status 'Active' no longer matches the final lifecycle 'to'
+                # after the pop, surfacing as the raw LifecycleError on the CLI
+                # before the revisit binding check runs.
+                r"status 'Active' must equal final lifecycle to 'Continued'",
             ),
             (
                 "added before boundary",
@@ -5495,10 +5503,14 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             )
             return workspace, cycle_id
 
+        # Task 6.2 strict registry validation now rejects these incoherent
+        # review/lifecycle rows at load time, surfacing as
+        # REVISIT_CYCLE_MALFORMED (evaluator path) before the revisit review
+        # floor check runs.
         self.assert_revisit_failure(
             make_workspace,
-            "REVISIT_REVIEW_FLOOR_MISSING",
-            expected_path="cycle.frontier_bindings[0]",
+            "REVISIT_CYCLE_MALFORMED",
+            expected_path="revisit_cycles/RC-0001.json",
         )
 
     def test_revisit_rejects_review_without_matching_lifecycle_transition(self):
@@ -5689,9 +5701,14 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             )
             return workspace, cycle_id
 
+        # Task 6.2 strict registry validation now rejects the decreasing
+        # lifecycle timestamps at load time, surfacing as
+        # REVISIT_CYCLE_MALFORMED (evaluator path) before the revisit binding
+        # check runs.
         self.assert_revisit_failure(
             make_workspace,
-            "REVISIT_FRONTIER_BINDING_INVALID",
+            "REVISIT_CYCLE_MALFORMED",
+            expected_path="revisit_cycles/RC-0001.json",
         )
 
     def test_added_binding_rejects_decreasing_pre_binding_timestamps(self):
@@ -5719,9 +5736,14 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             )
             return workspace, cycle_id
 
+        # Task 6.2 strict registry validation now rejects the decreasing
+        # lifecycle timestamps at load time, surfacing as
+        # REVISIT_CYCLE_MALFORMED (evaluator path) before the revisit binding
+        # check runs.
         self.assert_revisit_failure(
             make_workspace,
-            "REVISIT_FRONTIER_BINDING_INVALID",
+            "REVISIT_CYCLE_MALFORMED",
+            expected_path="revisit_cycles/RC-0001.json",
         )
 
     def assert_bound_at_state_drift_rejected(self, make_workspace) -> None:
@@ -6114,8 +6136,15 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                     result = evaluate(workspace, cycle_id)
 
                     self.assertFalse(result.passed)
+                    # Task 6.2 strict registry validation now rejects these
+                    # incoherent lifecycle rows at load time, surfacing as
+                    # REVISIT_CYCLE_MALFORMED before the revisit binding
+                    # history-drift check runs. The timestamp drift yields a
+                    # "ts must be non-decreasing" message and the
+                    # preceding_state drift yields a "has no matching
+                    # lifecycle transition" message, both under this code.
                     self.assertIn(
-                        "REVISIT_FRONTIER_BINDING_INVALID",
+                        "REVISIT_CYCLE_MALFORMED",
                         [issue.code for issue in result.failures],
                     )
 
