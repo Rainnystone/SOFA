@@ -477,8 +477,30 @@ def write_task6_search_and_dispatch(
             delivery_path = f"{directory}/{loop_id}_{suffix}.md"
             absolute = workspace / delivery_path
             absolute.parent.mkdir(exist_ok=True)
+            delivery_lines = [
+                f"# {role}",
+                "",
+                "Method cards loaded: "
+                + (
+                    "supply-chain-mapping, customer-graph-discovery."
+                    if role == "frontier_scout"
+                    else "red-team, supply-chain-mapping, "
+                    "customer-graph-discovery."
+                ),
+                "",
+            ]
+            delivery_lines.extend(
+                [
+                    "Sources consulted: accepted source trace for "
+                    f"{loop_id}.",
+                    "",
+                ]
+            )
+            delivery_lines.append(
+                f"Cycle-relative delivery for {loop_id}."
+            )
             absolute.write_text(
-                f"# {role}\n\nCycle-relative delivery for {loop_id}.\n",
+                "\n".join(delivery_lines) + "\n",
                 encoding="utf-8",
             )
             dispatch_records.append(
@@ -5197,7 +5219,13 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
         )
         return workspace, cycle_id
 
-    def assert_revisit_failure(self, make_workspace, expected_code: str) -> None:
+    def assert_revisit_failure(
+        self,
+        make_workspace,
+        expected_code: str,
+        *,
+        expected_path: str | None = None,
+    ) -> None:
         evaluators = (
             (
                 "direct",
@@ -5229,6 +5257,13 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                     expected_code,
                     [issue.code for issue in result.failures],
                 )
+                if expected_path is not None:
+                    matching_issue = next(
+                        issue
+                        for issue in result.failures
+                        if issue.code == expected_code
+                    )
+                    self.assertEqual(expected_path, matching_issue.path)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, cycle_id = make_workspace(Path(temp_dir))
@@ -5236,13 +5271,228 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
             prior_cycle = cycle_path.read_bytes()
             prior_mirror = mirror_path.read_bytes()
+            prior_workspace = snapshot_tree(workspace)
 
             result = run_revisit_cycle_cli(workspace, "check", cycle_id)
 
             self.assertEqual(1, result.returncode, result.stderr)
             self.assertIn(expected_code, result.stderr)
+            if expected_path is not None:
+                self.assertIn(f"[{expected_path}]", result.stderr)
             self.assertEqual(prior_cycle, cycle_path.read_bytes())
             self.assertEqual(prior_mirror, mirror_path.read_bytes())
+            self.assertEqual(prior_workspace, snapshot_tree(workspace))
+
+    def assert_invalid_worker_output_rejected(
+        self,
+        relative_path: str,
+        mutate_output,
+        expected_code: str,
+    ) -> None:
+        def make_workspace(root: Path) -> tuple[Path, str]:
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            output_path = workspace / relative_path
+            output_path.write_text(
+                mutate_output(output_path.read_text(encoding="utf-8")),
+                encoding="utf-8",
+            )
+            return workspace, cycle_id
+
+        self.assert_revisit_failure(make_workspace, expected_code)
+
+    def test_revisit_rejects_delivered_worker_missing_method_cards(self):
+        self.assert_invalid_worker_output_rejected(
+            "challenges/loop_8_challenge.md",
+            lambda text: text.replace(
+                "Method cards loaded: red-team, supply-chain-mapping, "
+                "customer-graph-discovery.\n\n",
+                "",
+                1,
+            ),
+            "WORKER_METHOD_CARDS_MISSING",
+        )
+
+    def test_revisit_rejects_scout_missing_source_trace(self):
+        self.assert_invalid_worker_output_rejected(
+            "scouts/loop_8_scout.md",
+            lambda text: text.replace(
+                "Sources consulted: accepted source trace for loop_8.\n\n",
+                "",
+                1,
+            ),
+            "WORKER_SOURCE_TRACE_MISSING",
+        )
+
+    def test_revisit_rejects_scout_forbidden_conclusion(self):
+        self.assert_invalid_worker_output_rejected(
+            "scouts/loop_8_scout.md",
+            lambda text: text + "\nAction Class: buy.\n",
+            "SCOUT_FORBIDDEN_CONCLUSION",
+        )
+
+    def make_ready_with_drifted_artifact_ref(
+        self,
+        root: Path,
+        *,
+        reference_field: str,
+        resolution_status: str = "confirmed",
+    ) -> tuple[Path, str]:
+        evidence_dir = root / "workspace" / "evidence"
+        evidence_dir.mkdir(parents=True)
+        references = []
+        for label in ("drifted", "valid"):
+            relative_path = f"evidence/{reference_field}-{label}.md"
+            payload = (
+                f"Exact {reference_field} evidence intended to remain {label}.\n"
+            ).encode("utf-8")
+            (root / "workspace" / relative_path).write_bytes(payload)
+            references.append(
+                {
+                    "kind": "artifact",
+                    "path": relative_path,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "locator": f"Exact {reference_field} evidence {label}",
+                    "checked_at": "2026-07-14T12:00:00Z",
+                }
+            )
+
+        workspace, cycle_id = make_task6_ready_workspace(root)
+        cycle = revisit_contract.load_cycle(workspace, cycle_id)
+        if reference_field == "trigger":
+            cycle["intake"]["triggers"][0]["evidence_refs"] = references
+            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        else:
+            resolution = cycle["claim_resolutions"][0]
+            resolution["status"] = resolution_status
+            if resolution_status == "weakened":
+                resolution["revised_statement"] = (
+                    "Customer qualification completes only after the prior "
+                    "watch window."
+                )
+                resolution["counter_evidence_refs"] = [
+                    {
+                        "kind": "source",
+                        "source_id": "src-001",
+                        "checked_at": "2026-07-14T12:00:00Z",
+                    }
+                ]
+            elif resolution_status == "refuted":
+                resolution["revised_statement"] = None
+                resolution["current_evidence_refs"] = []
+                resolution["current_grade"] = None
+                resolution["current_confidence"] = None
+                resolution["rationale"] = (
+                    "Current counter-evidence defeats the proposition."
+                )
+                cycle["decision_assessment"]["supporting_claim_ids"] = []
+            resolution[reference_field] = references
+        attach_valid_audit(cycle)
+        revisit_contract.persist_cycle(
+            workspace,
+            cycle,
+            expected_sha256=revisit_contract.sha256_file(
+                workspace / "revisit_cycles" / f"{cycle_id}.json"
+            ),
+        )
+        drifted_path = workspace / references[0]["path"]
+        drifted_path.write_bytes(drifted_path.read_bytes() + b"drift\n")
+        return workspace, cycle_id
+
+    def test_revisit_rejects_one_drifted_trigger_ref_among_valid_siblings(self):
+        self.assert_revisit_failure(
+            lambda root: self.make_ready_with_drifted_artifact_ref(
+                root,
+                reference_field="trigger",
+            ),
+            "REVISIT_TRIGGER_EVIDENCE_MISSING",
+            expected_path="cycle.intake.triggers[0].evidence_refs[0]",
+        )
+
+    def test_revisit_rejects_one_drifted_current_ref_among_valid_siblings(self):
+        for resolution_status in ("confirmed", "weakened"):
+            with self.subTest(resolution_status=resolution_status):
+                self.assert_revisit_failure(
+                    lambda root: self.make_ready_with_drifted_artifact_ref(
+                        root,
+                        reference_field="current_evidence_refs",
+                        resolution_status=resolution_status,
+                    ),
+                    "REVISIT_FRESHNESS_SUPPORT_INVALID",
+                    expected_path=(
+                        "cycle.claim_resolutions[0].current_evidence_refs[0]"
+                    ),
+                )
+
+    def test_revisit_rejects_drifted_refuted_counter_evidence(self):
+        self.assert_revisit_failure(
+            lambda root: self.make_ready_with_drifted_artifact_ref(
+                root,
+                reference_field="counter_evidence_refs",
+                resolution_status="refuted",
+            ),
+            "REVISIT_COUNTER_EVIDENCE_INVALID",
+            expected_path=(
+                "cycle.claim_resolutions[0].counter_evidence_refs[0]"
+            ),
+        )
+
+    def test_revisit_rejects_drifted_weakened_counter_evidence(self):
+        self.assert_revisit_failure(
+            lambda root: self.make_ready_with_drifted_artifact_ref(
+                root,
+                reference_field="counter_evidence_refs",
+                resolution_status="weakened",
+            ),
+            "REVISIT_COUNTER_EVIDENCE_INVALID",
+            expected_path=(
+                "cycle.claim_resolutions[0].counter_evidence_refs[0]"
+            ),
+        )
+
+    def assert_review_lifecycle_incoherence_rejected(
+        self,
+        mutate_frontier,
+    ) -> None:
+        def make_workspace(root: Path) -> tuple[Path, str]:
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            registry_path = workspace / "frontier_registry.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            mutate_frontier(registry["frontiers"][0])
+            registry_path.write_text(
+                json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            return workspace, cycle_id
+
+        self.assert_revisit_failure(
+            make_workspace,
+            "REVISIT_REVIEW_FLOOR_MISSING",
+            expected_path="cycle.frontier_bindings[0]",
+        )
+
+    def test_revisit_rejects_review_without_matching_lifecycle_transition(self):
+        def remove_post_binding_review_transition(frontier: dict) -> None:
+            self.assertEqual("Continued", frontier["status"])
+            self.assertEqual("Continued", frontier["lifecycle"][-1]["to"])
+            frontier["lifecycle"].pop()
+
+        self.assert_review_lifecycle_incoherence_rejected(
+            remove_post_binding_review_transition
+        )
+
+    def test_revisit_rejects_review_lifecycle_loop_mismatch(self):
+        def move_post_binding_review_transition(frontier: dict) -> None:
+            self.assertEqual("Continued", frontier["status"])
+            self.assertEqual("Continued", frontier["lifecycle"][-1]["to"])
+            self.assertEqual(
+                frontier["review_decisions"][-1]["at_loop"],
+                frontier["lifecycle"][-1]["at_loop"],
+            )
+            frontier["lifecycle"][-1]["at_loop"] = 9
+
+        self.assert_review_lifecycle_incoherence_rejected(
+            move_post_binding_review_transition
+        )
 
     def assert_artifact_only_source_cache_failure(
         self,

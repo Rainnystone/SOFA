@@ -316,19 +316,21 @@ def evaluate_revisit_report(
     source_ids = {str(record["source_id"]) for record in source_evaluation.records}
     source_context_valid = not source_evaluation.issues
     for trigger_index, trigger in enumerate(cycle["intake"]["triggers"]):
-        if not any(
-            _revisit_evidence_ref_valid(
+        for reference_index, reference in enumerate(trigger["evidence_refs"]):
+            if _revisit_evidence_ref_valid(
                 root,
                 reference,
                 source_ids=source_ids,
                 source_context_valid=source_context_valid,
-            )
-            for reference in trigger["evidence_refs"]
-        ):
+            ):
+                continue
             result.fail(
                 code="REVISIT_TRIGGER_EVIDENCE_MISSING",
-                message="fired trigger has no currently valid registered evidence reference",
-                path=f"cycle.intake.triggers[{trigger_index}].evidence_refs",
+                message="fired trigger evidence reference is not currently valid",
+                path=(
+                    f"cycle.intake.triggers[{trigger_index}]"
+                    f".evidence_refs[{reference_index}]"
+                ),
                 evidence=trigger["trigger_id"],
             )
 
@@ -348,12 +350,14 @@ def evaluate_revisit_report(
             path="cycle.decision_assessment",
         )
 
+    revisit_profile = ContractProfile(mode="ticker", target="revisit_report")
     dispatch_records = _check_dispatch_log(
         root,
         read_text_file(root / "research_workflow.md"),
-        ContractProfile(mode="ticker", target="revisit_report"),
+        revisit_profile,
         result,
     )
+    _check_worker_outputs(root, revisit_profile, result)
     for issue in _derive_revisit_frontier_floor_issues(
         root,
         cycle,
@@ -375,26 +379,52 @@ def evaluate_revisit_report(
             evidence=issue.evidence,
         )
     for resolution_index, resolution in enumerate(cycle["claim_resolutions"]):
-        if resolution["status"] not in {"confirmed", "weakened"}:
-            continue
-        if any(
-            _revisit_evidence_ref_valid(
-                root,
-                reference,
-                source_ids=source_ids,
-                source_context_valid=source_context_valid,
-            )
-            for reference in resolution["current_evidence_refs"]
-        ):
-            continue
-        result.fail(
-            code="REVISIT_FRESHNESS_SUPPORT_INVALID",
-            message="positive claim support has no currently valid exact evidence reference",
-            path=(
-                f"cycle.claim_resolutions[{resolution_index}].current_evidence_refs"
-            ),
-            evidence=resolution["claim_id"],
-        )
+        status = resolution["status"]
+        if status in {"confirmed", "weakened"}:
+            for reference_index, reference in enumerate(
+                resolution["current_evidence_refs"]
+            ):
+                if _revisit_evidence_ref_valid(
+                    root,
+                    reference,
+                    source_ids=source_ids,
+                    source_context_valid=source_context_valid,
+                ):
+                    continue
+                result.fail(
+                    code="REVISIT_FRESHNESS_SUPPORT_INVALID",
+                    message=(
+                        "positive claim support evidence reference is not "
+                        "currently valid"
+                    ),
+                    path=(
+                        f"cycle.claim_resolutions[{resolution_index}]"
+                        f".current_evidence_refs[{reference_index}]"
+                    ),
+                    evidence=resolution["claim_id"],
+                )
+        if status in {"weakened", "refuted"}:
+            for reference_index, reference in enumerate(
+                resolution["counter_evidence_refs"]
+            ):
+                if _revisit_evidence_ref_valid(
+                    root,
+                    reference,
+                    source_ids=source_ids,
+                    source_context_valid=source_context_valid,
+                ):
+                    continue
+                result.fail(
+                    code="REVISIT_COUNTER_EVIDENCE_INVALID",
+                    message=(
+                        "claim counter-evidence reference is not currently valid"
+                    ),
+                    path=(
+                        f"cycle.claim_resolutions[{resolution_index}]"
+                        f".counter_evidence_refs[{reference_index}]"
+                    ),
+                    evidence=resolution["claim_id"],
+                )
     return result
 
 
@@ -736,6 +766,25 @@ def _valid_search_coverage(workspace: Path) -> tuple[set[str], bool]:
     return loop_ids, has_any_valid
 
 
+def _revisit_review_lifecycle_coherent(
+    frontier: dict,
+    review_decision: dict,
+    *,
+    bound_at: str,
+) -> bool:
+    lifecycle = frontier.get("lifecycle", [])
+    if not lifecycle or not isinstance(lifecycle[-1], dict):
+        return False
+    final_transition = lifecycle[-1]
+    return (
+        frontier.get("status") == final_transition.get("to")
+        and final_transition.get("to") == review_decision.get("decision")
+        and isinstance(final_transition.get("ts"), str)
+        and final_transition["ts"] > bound_at
+        and final_transition.get("at_loop") == review_decision.get("at_loop")
+    )
+
+
 def _derive_revisit_frontier_floor_issues(
     workspace: Path,
     cycle: dict,
@@ -888,7 +937,11 @@ def _derive_revisit_frontier_floor_issues(
         review_complete = (
             int(frontier.get("review_count", 0)) >= baseline_reviews + 1
             and bool(matching_reviews)
-            and frontier.get("status") == matching_reviews[-1]["decision"]
+            and _revisit_review_lifecycle_coherent(
+                frontier,
+                matching_reviews[-1],
+                bound_at=binding["bound_at"],
+            )
         )
         if not review_complete:
             issues.append(
