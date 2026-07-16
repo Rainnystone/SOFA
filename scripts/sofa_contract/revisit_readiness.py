@@ -18,8 +18,11 @@ or owned by zero/multiple rows.
 
 from __future__ import annotations
 
+import copy
 import json
+import re
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -51,9 +54,13 @@ try:
         derive_freshness_issues,
         evaluate_history,
         list_cycle_ids,
+        mark_ready_for_report,
+        persist_cycle,
         sha256_bytes,
+        workspace_transaction,
     )
-    from revisit_contract.model import validate_cycle, validate_pointer
+    from revisit_contract.model import validate_cycle, validate_pointer, with_audit
+    from revisit_contract.store import RevisitPersistenceRollbackError
 except ImportError:
     from scripts.revisit_contract import (
         RevisitContractError,
@@ -61,9 +68,17 @@ except ImportError:
         derive_freshness_issues,
         evaluate_history,
         list_cycle_ids,
+        mark_ready_for_report,
+        persist_cycle,
         sha256_bytes,
+        workspace_transaction,
     )
-    from scripts.revisit_contract.model import validate_cycle, validate_pointer
+    from scripts.revisit_contract.model import (
+        validate_cycle,
+        validate_pointer,
+        with_audit,
+    )
+    from scripts.revisit_contract.store import RevisitPersistenceRollbackError
 
 try:
     from revisit_contract.generation import (
@@ -136,6 +151,50 @@ class _PreparedRevisitReadiness:
     cycle: dict | None
     cycle_sha256: str | None
     closure: GenerationClosure
+
+
+class RevisitCheckEffect(str, Enum):
+    """The three atomic effects of ``check_revisit_readiness``.
+
+    * ``BLOCKED`` -- semantic or drift failure; zero writes.
+    * ``TRANSITIONED`` -- active->ready; exactly one ``check`` audit entry.
+    * ``UNCHANGED_READY`` -- already ready; byte-preserving no-op (no audit).
+    """
+
+    BLOCKED = "blocked"
+    TRANSITIONED = "transitioned"
+    UNCHANGED_READY = "unchanged_ready"
+
+
+@dataclass(frozen=True)
+class RevisitCheckOutcome:
+    """Result of ``check_revisit_readiness``.
+
+    ``cycle_id`` is the globally selected eligible id, or ``None`` when
+    malformed history prevents selection.
+    """
+
+    result: ContractResult
+    cycle_id: str | None
+    effect: RevisitCheckEffect
+
+
+# Canonical UTC seconds: ``YYYY-MM-DDTHH:MM:SSZ``. Invalid caller timestamps
+# are programming/API errors (raised, never translated to a ContractResult).
+_CANONICAL_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+)
+
+
+def _validate_canonical_timestamp(timestamp: str) -> str:
+    if not isinstance(timestamp, str) or _CANONICAL_TIMESTAMP_RE.fullmatch(
+        timestamp
+    ) is None:
+        raise ValueError(
+            "timestamp must be canonical UTC seconds (YYYY-MM-DDTHH:MM:SSZ): "
+            f"{timestamp!r}"
+        )
+    return timestamp
 
 
 def _json_from_bytes(payload: bytes | None, path: str) -> Any:
@@ -1000,9 +1059,124 @@ def evaluate_revisit_readiness(
     return result
 
 
+def check_revisit_readiness(
+    workspace: Path | str,
+    cycle_id: str,
+    *,
+    timestamp: str,
+) -> RevisitCheckOutcome:
+    """Evaluate the same policy as ``evaluate_revisit_readiness`` and atomically
+    mark an active cycle ready.
+
+    Acquires the existing re-entrant ``workspace_transaction`` around
+    preparation + effect + persistence so the observed-read closure and the
+    persistence boundary share one locked workspace.
+
+    * ``BLOCKED`` = semantic or drift failure (zero writes).
+    * ``TRANSITIONED`` = active->ready, one ``check`` audit at ``timestamp``.
+    * ``UNCHANGED_READY`` = already ready, byte-preserving no-op (no audit).
+
+    ``timestamp`` must be canonical UTC seconds; an invalid value is a
+    programming/API error (raised). ``RevisitPersistenceRollbackError``
+    propagates (catastrophic, NOT converted to a ContractResult).
+    """
+    _validate_canonical_timestamp(timestamp)
+    result = ContractResult()
+    with workspace_transaction(workspace) as locked_workspace:
+        session = ObservedReadSession(locked_workspace)
+        prepared = _prepare_revisit_readiness(session, result, cycle_id)
+        closure = prepared.closure
+
+        # Recheck the closure once after preparation. Any boundary change is a
+        # BLOCKED drift (zero writes). The store rechecks again (with the two
+        # cycle/mirror exclusions) before and after the write.
+        try:
+            closure.require_unchanged()
+        except AuthorityDriftError as exc:
+            result.fail(
+                code="REVISIT_AUTHORITY_DRIFT",
+                message=str(exc),
+                path=exc.drift.relative_path,
+            )
+            return RevisitCheckOutcome(
+                result=result,
+                cycle_id=prepared.cycle_id,
+                effect=RevisitCheckEffect.BLOCKED,
+            )
+
+        # Malformed history or semantic failure -> BLOCKED with zero writes.
+        if not result.passed:
+            return RevisitCheckOutcome(
+                result=result,
+                cycle_id=prepared.cycle_id,
+                effect=RevisitCheckEffect.BLOCKED,
+            )
+
+        cycle = prepared.cycle
+        if cycle is None or prepared.cycle_sha256 is None:
+            # Selection succeeded but the cycle payload itself was unusable.
+            return RevisitCheckOutcome(
+                result=result,
+                cycle_id=prepared.cycle_id,
+                effect=RevisitCheckEffect.BLOCKED,
+            )
+
+        if cycle["status"] == "ready_for_report":
+            # Byte-preserving no-op: recheck the complete unexcluded closure
+            # exactly once (already done above) and return without rendering,
+            # writing, or appending an audit entry.
+            return RevisitCheckOutcome(
+                result=result,
+                cycle_id=prepared.cycle_id,
+                effect=RevisitCheckEffect.UNCHANGED_READY,
+            )
+
+        # TRANSITIONED: active -> ready_for_report with one ``check`` audit at
+        # the supplied timestamp. Persistence delegates to ``persist_cycle``
+        # with the frozen closure so the store rechecks the non-excluded
+        # closure before+after the write and derives the cycle/mirror
+        # exclusions itself.
+        proposed = mark_ready_for_report(cycle)
+        updated = with_audit(
+            cycle,
+            proposed,
+            "check",
+            [prepared.cycle_id],
+            timestamp,
+        )
+        try:
+            persist_cycle(
+                locked_workspace,
+                updated,
+                expected_sha256=prepared.cycle_sha256,
+                generation_closure=closure,
+            )
+        except AuthorityDriftError as exc:
+            # Handled post-write drift: the store restored exact prior bytes;
+            # surface as BLOCKED with a REVISIT_AUTHORITY_DRIFT failure.
+            result.fail(
+                code="REVISIT_AUTHORITY_DRIFT",
+                message=str(exc),
+                path=exc.drift.relative_path,
+            )
+            return RevisitCheckOutcome(
+                result=result,
+                cycle_id=prepared.cycle_id,
+                effect=RevisitCheckEffect.BLOCKED,
+            )
+        return RevisitCheckOutcome(
+            result=result,
+            cycle_id=prepared.cycle_id,
+            effect=RevisitCheckEffect.TRANSITIONED,
+        )
+
+
 # Import helpers only to expose them for the read-only seam and tests.
 __all__ = [
-    "ReadinessPlanError",
     "REVISIT_REQUIREMENT_IDS",
+    "ReadinessPlanError",
+    "RevisitCheckEffect",
+    "RevisitCheckOutcome",
+    "check_revisit_readiness",
     "evaluate_revisit_readiness",
 ]

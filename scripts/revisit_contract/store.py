@@ -24,6 +24,11 @@ from .model import (
     validate_intake_request,
     validate_pointer,
 )
+from .generation import (
+    AuthorityDriftError,
+    GenerationClosure,
+    _require_unchanged_except,
+)
 from .render import render_cycle_markdown
 
 
@@ -707,7 +712,12 @@ def persist_cycle(
     expected_sha256: str | None,
     *,
     authority_snapshots: _AuthoritySnapshots = None,
+    generation_closure: GenerationClosure | None = None,
 ) -> tuple[Path, Path]:
+    if authority_snapshots is not None and generation_closure is not None:
+        raise RevisitContractError(
+            "authority_snapshots and generation_closure are mutually exclusive"
+        )
     lexical_workspace = Path(workspace)
     with workspace_transaction(workspace) as locked_workspace:
         validate_cycle(cycle)
@@ -716,6 +726,15 @@ def persist_cycle(
         if json_path == markdown_path:
             raise RevisitContractError(
                 "cycle JSON and Markdown authority targets must be distinct"
+            )
+        if generation_closure is not None:
+            return _persist_cycle_with_closure(
+                locked_workspace,
+                cycle,
+                expected_sha256,
+                generation_closure,
+                json_path,
+                markdown_path,
             )
         snapshots = _normalize_authority_snapshots(
             locked_workspace,
@@ -760,3 +779,79 @@ def persist_cycle(
                 ) from rollback_error
             raise
         return json_path, markdown_path
+
+
+def _persist_cycle_with_closure(
+    locked_workspace: Path,
+    cycle: dict[str, Any],
+    expected_sha256: str | None,
+    closure: GenerationClosure,
+    json_path: Path,
+    markdown_path: Path,
+) -> tuple[Path, Path]:
+    """Persist a cycle pair observed by a frozen ``GenerationClosure``.
+
+    The closure's workspace must equal the locked resolved workspace. The ONLY
+    paths allowed to change are the cycle JSON and Markdown mirror, derived from
+    ``cycle["cycle_id"]``; every other observed authority (file bytes,
+    absence, directory membership) must be byte-for-byte identical before and
+    after the write. On post-write ``AuthorityDriftError`` the exact prior
+    cycle/mirror bytes are restored and the error is re-raised so the readiness
+    seam can translate it to BLOCKED.
+    """
+    if not isinstance(closure, GenerationClosure):
+        raise RevisitContractError(
+            "generation_closure must be a GenerationClosure"
+        )
+    if closure.workspace != locked_workspace:
+        raise RevisitContractError(
+            "generation_closure workspace must equal the locked workspace"
+        )
+    cycle_id = cycle["cycle_id"]
+    excluded = (
+        f"{CYCLES_DIRNAME}/{cycle_id}.json",
+        f"{CYCLES_DIRNAME}/{cycle_id}.md",
+    )
+    prior_json = _require_expected_bytes(json_path, expected_sha256)
+    prior_markdown = (
+        markdown_path.read_bytes() if markdown_path.exists() else None
+    )
+    markdown_payload = render_cycle_markdown(cycle).encode("utf-8")
+    json_payload = canonical_document_bytes(cycle)
+
+    # Pre-write: the complete unexcluded closure must be unchanged.
+    _require_unchanged_except(closure, excluded)
+    # Markdown-first, JSON-second (mirrors the snapshot path ordering).
+    _atomic_replace(markdown_path, markdown_payload)
+    try:
+        _atomic_replace(json_path, json_payload)
+    except Exception as original_error:
+        try:
+            _restore_committed_markdown(
+                markdown_path,
+                markdown_payload,
+                prior_markdown,
+            )
+        except Exception as rollback_error:
+            raise RevisitPersistenceRollbackError(
+                original_error, rollback_error
+            ) from rollback_error
+        raise
+    try:
+        _require_unchanged_except(closure, excluded)
+    except AuthorityDriftError as original_error:
+        try:
+            _restore_committed_cycle_pair(
+                json_path=json_path,
+                markdown_path=markdown_path,
+                written_json=json_payload,
+                written_markdown=markdown_payload,
+                prior_json=prior_json,
+                prior_markdown=prior_markdown,
+            )
+        except Exception as rollback_error:
+            raise RevisitPersistenceRollbackError(
+                original_error, rollback_error
+            ) from rollback_error
+        raise
+    return json_path, markdown_path

@@ -31,6 +31,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from sofa_contract import (  # noqa: E402
     ContractProfile,
+    RevisitCheckEffect,
+    RevisitCheckOutcome,
+    check_revisit_readiness,
     evaluate_revisit_readiness,
     evaluate_workspace,
 )
@@ -150,6 +153,513 @@ def _extract_cli_codes(stderr_text: str) -> list[str]:
             if candidate not in codes:
                 codes.append(candidate)
     return codes
+
+
+class TestRevisitCheckEffects(unittest.TestCase):
+    """Task 6.5 Step 5.2: the three atomic effects of ``check_revisit_readiness``.
+
+    Uses a fixed canonical timestamp; never wall clock. Each workspace is built
+    fresh in its own temp dir.
+    """
+
+    TIMESTAMP = "2026-07-16T12:00:00Z"
+
+    # ------------------------------------------------------------------
+    # BLOCKED: semantic failure preserves the complete tree and reports the
+    # selected cycle id when history selection succeeded.
+    # ------------------------------------------------------------------
+    def test_semantic_failure_is_blocked_with_selected_cycle_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            # Corrupt the registry so the semantic plan fails (history still
+            # selects exactly one eligible cycle).
+            registry_path = workspace / "frontier_registry.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["version"] = 999
+            registry_path.write_text(
+                json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_cycle = cycle_path.read_bytes()
+            prior_mirror = mirror_path.read_bytes()
+            prior_tree = snapshot_tree(workspace)
+
+            outcome = check_revisit_readiness(
+                workspace, cycle_id, timestamp=self.TIMESTAMP
+            )
+
+            self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+            self.assertEqual(cycle_id, outcome.cycle_id)
+            self.assertFalse(outcome.result.passed)
+            self.assertIn(
+                "REVISIT_FRONTIER_REGISTRY_MALFORMED",
+                [issue.code for issue in outcome.result.failures],
+            )
+            # Zero writes: complete tree byte-for-byte preserved.
+            self.assertEqual(prior_cycle, cycle_path.read_bytes())
+            self.assertEqual(prior_mirror, mirror_path.read_bytes())
+            self.assertEqual(prior_tree, snapshot_tree(workspace))
+
+    # ------------------------------------------------------------------
+    # BLOCKED: malformed history preventing selection -> cycle_id is None.
+    # ------------------------------------------------------------------
+    def test_malformed_history_selection_failure_blocks_with_none_cycle_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            # Corrupt the pointer so global history is malformed (cycles exist
+            # without a current revision); this prevents sole-eligible selection
+            # and makes _discover_eligible_cycle_id return None.
+            pointer_path = workspace / "revisit_contract.json"
+            pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+            pointer["current_revision"] = None
+            pointer_path.write_text(
+                json.dumps(pointer, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            prior_tree = snapshot_tree(workspace)
+
+            outcome = check_revisit_readiness(
+                workspace, cycle_id, timestamp=self.TIMESTAMP
+            )
+
+            self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+            self.assertIsNone(outcome.cycle_id)
+            self.assertFalse(outcome.result.passed)
+            self.assertEqual(prior_tree, snapshot_tree(workspace))
+
+    # ------------------------------------------------------------------
+    # TRANSITIONED: active passing cycle transitions to ready; ONLY the cycle
+    # JSON and Markdown mirror change; exactly one ``check`` audit at the
+    # supplied timestamp.
+    # ------------------------------------------------------------------
+    def test_active_passing_cycle_transitions_with_one_check_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            prior_audit_count = len(prior_cycle["audit"])
+            prior_tree = snapshot_tree(workspace)
+
+            outcome = check_revisit_readiness(
+                workspace, cycle_id, timestamp=self.TIMESTAMP
+            )
+
+            self.assertEqual(RevisitCheckEffect.TRANSITIONED, outcome.effect)
+            self.assertEqual(cycle_id, outcome.cycle_id)
+            self.assertTrue(outcome.result.passed, [issue.display() for issue in outcome.result.failures])
+
+            ready = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual("ready_for_report", ready["status"])
+            self.assertEqual(prior_audit_count + 1, len(ready["audit"]))
+            self.assertEqual("check", ready["audit"][-1]["command"])
+            self.assertEqual(
+                self.TIMESTAMP, ready["audit"][-1]["timestamp"]
+            )
+            self.assertEqual([cycle_id], ready["audit"][-1]["affected_ids"])
+
+            # ONLY the cycle JSON and mirror changed; every other file is
+            # byte-identical to the pre-check tree.
+            after_tree = snapshot_tree(workspace)
+            for relative, entry in prior_tree.items():
+                if relative in (
+                    f"revisit_cycles/{cycle_id}.json",
+                    f"revisit_cycles/{cycle_id}.md",
+                ):
+                    continue
+                self.assertEqual(
+                    entry, after_tree[relative], f"unexpected change: {relative}"
+                )
+
+    # ------------------------------------------------------------------
+    # UNCHANGED_READY: a fresh second check on the now-ready cycle is a
+    # byte-preserving no-op with NO new audit entry.
+    # ------------------------------------------------------------------
+    def test_already_ready_cycle_is_unchanged_ready_byte_preserving_noop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            # First check transitions active -> ready.
+            first = check_revisit_readiness(
+                workspace, cycle_id, timestamp=self.TIMESTAMP
+            )
+            self.assertEqual(RevisitCheckEffect.TRANSITIONED, first.effect)
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            ready_cycle_bytes = cycle_path.read_bytes()
+            ready_mirror_bytes = mirror_path.read_bytes()
+            ready_audit_count = len(
+                revisit_contract.load_cycle(workspace, cycle_id)["audit"]
+            )
+
+            second = check_revisit_readiness(
+                workspace, cycle_id, timestamp=self.TIMESTAMP
+            )
+
+            self.assertEqual(RevisitCheckEffect.UNCHANGED_READY, second.effect)
+            self.assertEqual(cycle_id, second.cycle_id)
+            self.assertTrue(second.result.passed)
+            # Byte-for-byte preservation.
+            self.assertEqual(ready_cycle_bytes, cycle_path.read_bytes())
+            self.assertEqual(ready_mirror_bytes, mirror_path.read_bytes())
+            # No new audit entry.
+            self.assertEqual(
+                ready_audit_count,
+                len(revisit_contract.load_cycle(workspace, cycle_id)["audit"]),
+            )
+
+
+class TestRevisitCheckAuthorityDrift(unittest.TestCase):
+    """Task 6.5 Step 5.4: authority drift BETWEEN preparation and persistence.
+
+    The frozen ``GenerationClosure`` observed during preparation is the ONLY
+    authority the store may recheck (with the two cycle/mirror exclusions). Any
+    drift of an observed immutable authority in the pre-write or post-write
+    window -> BLOCKED + REVISIT_AUTHORITY_DRIFT + exact path, with the cycle
+    pair restored to exact prior bytes. A rollback failure lets
+    ``RevisitPersistenceRollbackError`` escape.
+    """
+
+    TIMESTAMP = "2026-07-16T12:00:00Z"
+
+    def _run_with_store_injection(
+        self, *, mutate_at_call, mutate_factory, ready_factory=None,
+    ):
+        """Build a ready workspace, capture prior cycle/mirror bytes, then run
+        ``check_revisit_readiness`` while invoking ``mutate_factory(workspace)``
+        before the ``mutate_at_call``-th (1-based) ``_require_unchanged_except``
+        store call (1 = pre-write, 2 = post-write).
+
+        Yields ``(outcome, workspace, cycle_id, prior_cycle, prior_mirror)``
+        while the temp dir is still alive so assertions can read the files.
+        """
+        from contextlib import contextmanager
+        from revisit_contract import store as revisit_store
+
+        make = ready_factory or make_task6_ready_workspace
+        real_require = revisit_store._require_unchanged_except
+
+        @contextmanager
+        def runner():
+            calls = []
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                workspace, cycle_id = make(root)
+                mutate = mutate_factory(workspace)
+                cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+                mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+                prior_cycle = cycle_path.read_bytes()
+                prior_mirror = mirror_path.read_bytes()
+
+                def injecting_require(closure, excluded):
+                    calls.append(1)
+                    if len(calls) == mutate_at_call:
+                        mutate()
+                    return real_require(closure, excluded)
+
+                with unittest.mock.patch.object(
+                    revisit_store,
+                    "_require_unchanged_except",
+                    injecting_require,
+                ):
+                    outcome = check_revisit_readiness(
+                        workspace, cycle_id, timestamp=self.TIMESTAMP
+                    )
+                yield outcome, workspace, cycle_id, prior_cycle, prior_mirror
+
+        return runner()
+
+    def _assert_blocked_drift_restored(
+        self, outcome, workspace, cycle_id, prior_cycle, prior_mirror,
+        *, expected_relative,
+    ):
+        self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+        codes = [issue.code for issue in outcome.result.failures]
+        self.assertIn("REVISIT_AUTHORITY_DRIFT", codes)
+        drift_issue = next(
+            issue for issue in outcome.result.failures
+            if issue.code == "REVISIT_AUTHORITY_DRIFT"
+        )
+        self.assertEqual(expected_relative, drift_issue.path)
+        # Cycle pair restored to exact prior bytes (zero net write).
+        self.assertEqual(
+            prior_cycle,
+            (workspace / "revisit_cycles" / f"{cycle_id}.json").read_bytes(),
+        )
+        self.assertEqual(
+            prior_mirror,
+            (workspace / "revisit_cycles" / f"{cycle_id}.md").read_bytes(),
+        )
+
+    # ------------------------------------------------------------------
+    # Pre-write byte drift of an observed immutable authority.
+    # ------------------------------------------------------------------
+    def test_pre_write_byte_drift_of_indexed_excerpt_blocks_with_exact_path(self):
+        excerpt_rel = "sources/src-001.md"
+
+        def mutate_factory(workspace):
+            target = workspace / excerpt_rel
+
+            def mutate():
+                target.write_bytes(target.read_bytes() + b"pre-write drift\n")
+
+            return mutate
+
+        with self._run_with_store_injection(
+            mutate_at_call=1, mutate_factory=mutate_factory
+        ) as (outcome, ws, cid, pc, pm):
+            self._assert_blocked_drift_restored(
+                outcome, ws, cid, pc, pm, expected_relative=excerpt_rel
+            )
+
+    # ------------------------------------------------------------------
+    # Post-write byte drift: immutable authority changed AFTER the cycle pair
+    # is written but BEFORE the store's postcheck -> BLOCKED + exact restore.
+    # ------------------------------------------------------------------
+    def test_post_write_byte_drift_restores_prior_cycle_pair_bytes(self):
+        excerpt_rel = "sources/src-001.md"
+
+        def mutate_factory(workspace):
+            target = workspace / excerpt_rel
+
+            def mutate():
+                target.write_bytes(target.read_bytes() + b"post-write drift\n")
+
+            return mutate
+
+        with self._run_with_store_injection(
+            mutate_at_call=2, mutate_factory=mutate_factory
+        ) as (outcome, ws, cid, pc, pm):
+            self._assert_blocked_drift_restored(
+                outcome, ws, cid, pc, pm, expected_relative=excerpt_rel
+            )
+
+    # ------------------------------------------------------------------
+    # Cycle-sibling membership change: a new cycle JSON appears in
+    # revisit_cycles/ during the pre-write window.
+    # ------------------------------------------------------------------
+    def test_pre_write_cycle_sibling_membership_change_blocks(self):
+        def mutate_factory(workspace):
+            sibling = workspace / "revisit_cycles" / "RC-9999.json"
+
+            def mutate():
+                sibling.write_bytes(b"{}\n")
+
+            return mutate
+
+        with self._run_with_store_injection(
+            mutate_at_call=1, mutate_factory=mutate_factory
+        ) as (outcome, ws, cid, pc, pm):
+            self._assert_blocked_drift_restored(
+                outcome, ws, cid, pc, pm, expected_relative="revisit_cycles"
+            )
+
+    # ------------------------------------------------------------------
+    # Worker-output membership change: a new orphan file appears in a worker
+    # output directory during the pre-write window.
+    # ------------------------------------------------------------------
+    def test_pre_write_worker_output_membership_change_blocks(self):
+        def mutate_factory(workspace):
+            orphan = workspace / "scouts" / "orphan-drift.md"
+
+            def mutate():
+                orphan.write_text("# orphan\n", encoding="utf-8")
+
+            return mutate
+
+        with self._run_with_store_injection(
+            mutate_at_call=1, mutate_factory=mutate_factory
+        ) as (outcome, ws, cid, pc, pm):
+            self._assert_blocked_drift_restored(
+                outcome, ws, cid, pc, pm, expected_relative="scouts"
+            )
+
+    # ------------------------------------------------------------------
+    # Source-membership change: a new excerpt file appears in sources/ during
+    # the pre-write window.
+    # ------------------------------------------------------------------
+    def test_pre_write_source_membership_change_blocks(self):
+        def mutate_factory(workspace):
+            new_source = workspace / "sources" / "src-777.md"
+
+            def mutate():
+                new_source.write_bytes(b"new source\n")
+
+            return mutate
+
+        with self._run_with_store_injection(
+            mutate_at_call=1, mutate_factory=mutate_factory
+        ) as (outcome, ws, cid, pc, pm):
+            self._assert_blocked_drift_restored(
+                outcome, ws, cid, pc, pm, expected_relative="sources"
+            )
+
+    # ------------------------------------------------------------------
+    # Rollback-failure injection: the post-write drift's restore fails ->
+    # RevisitPersistenceRollbackError escapes (catastrophic, not BLOCKED).
+    # ------------------------------------------------------------------
+    def test_rollback_failure_lets_persistence_rollback_error_escape(self):
+        from revisit_contract import store as revisit_store
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            excerpt = workspace / "sources" / "src-001.md"
+            real_require = revisit_store._require_unchanged_except
+            calls = []
+
+            def injecting_require(closure, excluded):
+                calls.append(1)
+                if len(calls) == 2:
+                    excerpt.write_bytes(
+                        excerpt.read_bytes() + b"post-write drift\n"
+                    )
+                return real_require(closure, excluded)
+
+            def fail_restore(*args, **kwargs):
+                raise OSError("simulated restore failure")
+
+            with (
+                unittest.mock.patch.object(
+                    revisit_store,
+                    "_require_unchanged_except",
+                    injecting_require,
+                ),
+                unittest.mock.patch.object(
+                    revisit_store,
+                    "_restore_committed_cycle_pair",
+                    fail_restore,
+                ),
+            ):
+                with self.assertRaises(
+                    revisit_store.RevisitPersistenceRollbackError
+                ):
+                    check_revisit_readiness(
+                        workspace, cycle_id, timestamp=self.TIMESTAMP
+                    )
+
+
+class TestRevisitCheckClosureVsSnapshots(unittest.TestCase):
+    """Task 6.5 Step 5.4: the closure path catches what file-only snapshots miss.
+
+    The legacy ``authority_snapshots`` persistence only binds named file paths,
+    so an absence->appearance or directory-membership change of an UNlisted
+    authority is invisible to it (it would silently succeed or leak a raw
+    exception). The closure path observes directories and absences and rejects
+    every such mutation.
+    """
+
+    def test_persist_cycle_rejects_simultaneous_snapshots_and_closure(self):
+        from revisit_contract.generation import GenerationClosure
+        from revisit_contract import store as revisit_store
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            cycle = {"cycle_id": "RC-0001"}
+            with self.assertRaises(revisit_store.RevisitContractError):
+                revisit_store.persist_cycle(
+                    workspace,
+                    cycle,
+                    expected_sha256=None,
+                    authority_snapshots={},
+                    generation_closure=object(),  # type: ignore[arg-type]
+                )
+
+    def test_persist_cycle_rejects_closure_workspace_mismatch(self):
+        from revisit_contract.generation import (
+            DirectoryGeneration,
+            GenerationClosure,
+        )
+        from revisit_contract import store as revisit_store
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            other = Path(temp_dir) / "other"
+            other.mkdir()
+            closure = GenerationClosure(
+                workspace=other.resolve(),
+                generations=(
+                    DirectoryGeneration(
+                        relative_path="revisit_cycles",
+                        resolved_target=other / "revisit_cycles",
+                        recursive=False,
+                        entries=(),
+                    ),
+                ),
+            )
+            with self.assertRaises(revisit_store.RevisitContractError):
+                revisit_store.persist_cycle(
+                    workspace,
+                    {"cycle_id": "RC-0001"},
+                    expected_sha256=None,
+                    generation_closure=closure,
+                )
+
+    def test_closure_catches_directory_drift_that_snapshots_miss(self):
+        """The legacy file-only ``authority_snapshots`` path only binds named
+        file paths, so a directory membership change of an UNlisted directory
+        (e.g. a new sibling cycle file) is invisible to it. The closure path
+        observes directory membership and rejects the same mutation.
+
+        This is the contrast that motivates routing the check through the
+        closure: the snapshot path silently succeeds where the closure blocks.
+        """
+        from revisit_contract.generation import (
+            DirectoryGeneration,
+            GenerationClosure,
+        )
+        from revisit_contract import store as revisit_store
+
+        # Build the workspace, then persist an identical cycle with BOTH
+        # mechanisms while a sibling cycle file appears mid-write. The snapshot
+        # path has no directory observation, so it succeeds; the closure path
+        # observes ``revisit_cycles`` membership and blocks.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            cycles_dir = workspace / "revisit_cycles"
+            sibling = cycles_dir / "RC-9999.json"
+
+            # Snapshot path: a pre-bound snapshot of the cycle JSON only. Inject
+            # a directory membership change via the render seam (between the
+            # snapshot pre-check and post-check there is no directory binding).
+            real_render = revisit_store.render_cycle_markdown
+
+            def render_then_add_sibling(cycle):
+                sibling.write_bytes(b"{}\n")
+                return real_render(cycle)
+
+            cycle_doc = revisit_contract.load_cycle(workspace, cycle_id)
+            prior_sha = revisit_contract.sha256_file(
+                cycles_dir / f"{cycle_id}.json"
+            )
+            snapshot = revisit_store.prepare_authority_snapshot(
+                workspace,
+                cycles_dir / f"{cycle_id}.json",
+                prior_sha,
+            )
+            with unittest.mock.patch.object(
+                revisit_store,
+                "render_cycle_markdown",
+                side_effect=render_then_add_sibling,
+            ):
+                # The snapshot path does NOT observe directory membership, so
+                # the sibling appearance is invisible: persistence succeeds.
+                revisit_store.persist_cycle(
+                    workspace,
+                    cycle_doc,
+                    expected_sha256=prior_sha,
+                    authority_snapshots=(snapshot,),
+                )
+            self.assertTrue(sibling.exists())
+
+        # Closure path: the same directory membership change is observed and
+        # rejected (covered by test_pre_write_cycle_sibling_membership_change_blocks
+        # in TestRevisitCheckAuthorityDrift via the readiness seam).
 
 
 class TestReadOnlyReadinessParity(unittest.TestCase):

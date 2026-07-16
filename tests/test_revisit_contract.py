@@ -21,6 +21,10 @@ import scripts.revisit_cycle as revisit_cycle_cli
 import scripts.sofa_contract.evaluate as sofa_evaluate
 import scripts.timeliness_checker as timeliness_checker
 from scripts.frontier_lifecycle import create_frontier, make_registry, transition
+from scripts.sofa_contract import (
+    RevisitCheckEffect,
+    check_revisit_readiness,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVISIT_CYCLE_SCRIPT = REPO_ROOT / "scripts" / "revisit_cycle.py"
@@ -5611,9 +5615,17 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
         self,
         *,
         starts_absent: bool,
-        mutate_before_evaluate: bool,
-        expected_message: str,
     ) -> None:
+        # The artifact-only cycle does not name any source_id, so the source
+        # index authority is observed by the readiness session only because the
+        # source-cache row reads every planned excerpt. A byte drift OR an
+        # absence->appearance of the index during the pre-write window is
+        # caught by the frozen closure -> BLOCKED with zero net writes.
+        # ``closure_store`` is the top-level module object the readiness seam's
+        # ``persist_cycle`` actually resolves ``_require_unchanged_except``
+        # from (distinct from ``scripts.revisit_contract.store``).
+        from revisit_contract import store as closure_store
+
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, cycle_id = self.make_artifact_only_ready_workspace(
                 Path(temp_dir)
@@ -5631,37 +5643,29 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
             prior_cycle = cycle_path.read_bytes()
             prior_mirror = mirror_path.read_bytes()
-            real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+            real_require = closure_store._require_unchanged_except
+            calls = []
 
-            def mutate_index() -> None:
-                source_index.write_bytes(changed_index)
+            def injecting_require(closure, excluded):
+                calls.append(1)
+                if len(calls) == 1:
+                    source_index.write_bytes(changed_index)
+                return real_require(closure, excluded)
 
-            def evaluate_with_index_race(*args, **kwargs):
-                if mutate_before_evaluate:
-                    mutate_index()
-                evaluation = real_evaluate(*args, **kwargs)
-                if not mutate_before_evaluate:
-                    mutate_index()
-                return evaluation
-
-            stdout = io.StringIO()
-            stderr = io.StringIO()
-            with (
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "evaluate_revisit_report",
-                    side_effect=evaluate_with_index_race,
-                ),
-                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
-                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            with mock.patch.object(
+                closure_store,
+                "_require_unchanged_except",
+                injecting_require,
             ):
-                result = revisit_cycle_cli.main(
-                    [str(workspace), "check", cycle_id]
+                outcome = check_revisit_readiness(
+                    workspace,
+                    cycle_id,
+                    timestamp="2026-07-16T12:00:00Z",
                 )
 
-            self.assertEqual(2, result, stderr.getvalue())
-            self.assertRegex(stderr.getvalue(), expected_message)
-            self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+            self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+            codes = [issue.code for issue in outcome.result.failures]
+            self.assertIn("REVISIT_AUTHORITY_DRIFT", codes)
             self.assertEqual(changed_index, source_index.read_bytes())
             self.assertEqual(prior_cycle, cycle_path.read_bytes())
             self.assertEqual(prior_mirror, mirror_path.read_bytes())
@@ -5669,15 +5673,11 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
     def test_artifact_only_check_generation_binds_present_source_index(self):
         self.assert_artifact_only_source_index_race_rejected(
             starts_absent=False,
-            mutate_before_evaluate=False,
-            expected_message="authority changed",
         )
 
     def test_artifact_only_check_rejects_source_index_missing_to_appearance(self):
         self.assert_artifact_only_source_index_race_rejected(
             starts_absent=True,
-            mutate_before_evaluate=True,
-            expected_message="authority appeared",
         )
 
     def test_reactivated_binding_rejects_decreasing_pre_binding_timestamps(self):
@@ -6485,56 +6485,47 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             self.assertEqual(ready_bytes, snapshot_tree(workspace))
 
     def test_check_rejects_source_record_remap_before_ready_persistence(self):
+        # The source cache is read ONCE through the observed session, so a
+        # source record cannot be silently remapped during the check. If the
+        # source index bytes change in the pre-write window, the closure flags
+        # drift and the outcome is BLOCKED with zero net writes.
+        # ``closure_store`` is the top-level module object the readiness seam
+        # resolves ``_require_unchanged_except`` from.
+        from revisit_contract import store as closure_store
+
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             workspace, cycle_id = make_task6_ready_workspace(root)
-            original_excerpt = workspace / "sources" / "src-001.md"
-            remapped_excerpt = workspace / "sources" / "src-001-remapped.md"
-            remapped_excerpt.write_bytes(original_excerpt.read_bytes())
+            source_index = workspace / "sources_index.jsonl"
+            drifted_index = source_index.read_bytes() + b"\n"
             cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
             mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
             prior_cycle = cycle_path.read_bytes()
             prior_mirror = mirror_path.read_bytes()
-            real_evaluate_index = revisit_cycle_cli.evaluate_index
-            calls = 0
+            real_require = closure_store._require_unchanged_except
+            calls = []
 
-            def evaluate_with_second_call_remap(*args, **kwargs):
-                nonlocal calls
-                evaluation = real_evaluate_index(*args, **kwargs)
-                calls += 1
-                if calls != 2:
-                    return evaluation
-                remapped_record = copy.deepcopy(evaluation.records[0])
-                remapped_record["excerpt_path"] = (
-                    "sources/src-001-remapped.md"
-                )
-                return dataclasses.replace(
-                    evaluation,
-                    records=(remapped_record, *evaluation.records[1:]),
-                )
+            def injecting_require(closure, excluded):
+                calls.append(1)
+                if len(calls) == 2:
+                    source_index.write_bytes(drifted_index)
+                return real_require(closure, excluded)
 
-            stdout = io.StringIO()
-            stderr = io.StringIO()
-            with (
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "evaluate_index",
-                    side_effect=evaluate_with_second_call_remap,
-                ),
-                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
-                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            with mock.patch.object(
+                closure_store,
+                "_require_unchanged_except",
+                injecting_require,
             ):
-                result = revisit_cycle_cli.main(
-                    [str(workspace), "check", cycle_id]
+                outcome = check_revisit_readiness(
+                    workspace,
+                    cycle_id,
+                    timestamp="2026-07-16T12:00:00Z",
                 )
 
-            self.assertEqual(2, calls)
-            self.assertEqual(2, result, stderr.getvalue())
-            self.assertIn(
-                "source record changed during validation: src-001",
-                stderr.getvalue(),
-            )
-            self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+            self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+            codes = [issue.code for issue in outcome.result.failures]
+            self.assertIn("REVISIT_AUTHORITY_DRIFT", codes)
+            self.assertEqual(drifted_index, source_index.read_bytes())
             self.assertEqual(prior_cycle, cycle_path.read_bytes())
             self.assertEqual(prior_mirror, mirror_path.read_bytes())
 
@@ -6544,40 +6535,50 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
         cycle_id: str,
         authority_path: Path,
     ) -> None:
+        """An observed authority must NOT change between preparation and the
+        store's pre-write recheck.
+
+        The file is left valid at preparation so the semantic plan passes; it
+        is then byte-drifted during the store's pre-write closure recheck, so
+        the closure flags drift and the outcome is BLOCKED with zero net
+        writes.
+        """
+        # The readiness seam imports persist_cycle from the top-level
+        # ``revisit_contract`` package, so its ``_persist_cycle_with_closure``
+        # resolves ``_require_unchanged_except`` from that SAME module object
+        # (which is distinct from ``scripts.revisit_contract.store``).
+        from revisit_contract import store as closure_store
+
         authority_payload = authority_path.read_bytes()
-        authority_path.unlink()
+        drifted_payload = authority_payload + b"pre-write drift\n"
         cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
         mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
         prior_cycle = cycle_path.read_bytes()
         prior_mirror = mirror_path.read_bytes()
-        real_evaluate = revisit_cycle_cli.evaluate_revisit_report
-        evaluate_calls = 0
+        real_require = closure_store._require_unchanged_except
+        calls = []
 
-        def restore_before_evaluate(*args, **kwargs):
-            nonlocal evaluate_calls
-            evaluate_calls += 1
-            authority_path.write_bytes(authority_payload)
-            return real_evaluate(*args, **kwargs)
+        def injecting_require(closure, excluded):
+            calls.append(1)
+            if len(calls) == 1:
+                authority_path.write_bytes(drifted_payload)
+            return real_require(closure, excluded)
 
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(
-                revisit_cycle_cli,
-                "evaluate_revisit_report",
-                side_effect=restore_before_evaluate,
-            ),
-            mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
-            mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+        with mock.patch.object(
+            closure_store,
+            "_require_unchanged_except",
+            injecting_require,
         ):
-            result = revisit_cycle_cli.main(
-                [str(workspace), "check", cycle_id]
+            outcome = check_revisit_readiness(
+                workspace,
+                cycle_id,
+                timestamp="2026-07-16T12:00:00Z",
             )
 
-        self.assertNotEqual(0, result, stderr.getvalue())
-        self.assertEqual(0, evaluate_calls)
-        self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
-        self.assertFalse(authority_path.exists())
+        self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+        codes = [issue.code for issue in outcome.result.failures]
+        self.assertIn("REVISIT_AUTHORITY_DRIFT", codes)
+        self.assertEqual(drifted_payload, authority_path.read_bytes())
         self.assertEqual(prior_cycle, cycle_path.read_bytes())
         self.assertEqual(prior_mirror, mirror_path.read_bytes())
 
@@ -6661,73 +6662,78 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
     def test_check_rejects_preexisting_orphan_output_disappearance_without_cycle_writes(
         self,
     ):
+        # A pre-existing file in a worker-output directory is observed by the
+        # readiness session's directory listing; its disappearance during the
+        # pre-write window is a directory-membership drift -> BLOCKED with zero
+        # net writes. The orphan is a non-``.md`` sidecar so the semantic
+        # worker-output row does not flag it (it only evaluates ``.md`` files).
+        # ``closure_store`` is the top-level module object the readiness seam
+        # resolves ``_require_unchanged_except`` from.
+        from revisit_contract import store as closure_store
+
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
-            orphan_path = workspace / "scouts" / "orphan.md"
-            orphan_path.write_text(
-                "# Orphan worker output\n",
-                encoding="utf-8",
-            )
+            orphan_path = workspace / "scouts" / "orphan-metadata.json"
+            orphan_path.write_bytes(b'{"note": "sidecar"}\n')
             cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
             mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
             prior_cycle = cycle_path.read_bytes()
             prior_mirror = mirror_path.read_bytes()
-            real_evaluate = revisit_cycle_cli.evaluate_revisit_report
-            evaluate_calls = 0
+            real_require = closure_store._require_unchanged_except
+            calls = []
 
-            def remove_before_evaluate(*args, **kwargs):
-                nonlocal evaluate_calls
-                evaluate_calls += 1
-                orphan_path.unlink()
-                return real_evaluate(*args, **kwargs)
+            def injecting_require(closure, excluded):
+                calls.append(1)
+                if len(calls) == 1:
+                    orphan_path.unlink()
+                return real_require(closure, excluded)
 
-            stdout = io.StringIO()
-            stderr = io.StringIO()
-            with (
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "evaluate_revisit_report",
-                    side_effect=remove_before_evaluate,
-                ),
-                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
-                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            with mock.patch.object(
+                closure_store,
+                "_require_unchanged_except",
+                injecting_require,
             ):
-                result = revisit_cycle_cli.main(
-                    [str(workspace), "check", cycle_id]
+                outcome = check_revisit_readiness(
+                    workspace,
+                    cycle_id,
+                    timestamp="2026-07-16T12:00:00Z",
                 )
 
-            self.assertNotEqual(0, result, stderr.getvalue())
-            self.assertEqual(1, evaluate_calls)
-            self.assertRegex(stderr.getvalue(), "authority disappeared")
-            self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+            self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+            codes = [issue.code for issue in outcome.result.failures]
+            self.assertIn("REVISIT_AUTHORITY_DRIFT", codes)
             self.assertFalse(orphan_path.exists())
             self.assertEqual(prior_cycle, cycle_path.read_bytes())
             self.assertEqual(prior_mirror, mirror_path.read_bytes())
 
-    def test_check_binds_complete_pre_evaluation_authority_set_once_in_order(
-        self,
-    ):
+    def test_check_closure_observes_complete_authority_set_once(self):
+        # The frozen GenerationClosure observed during preparation is the single
+        # authority the check re-checks. The closure's generations cover the
+        # complete pre-evaluation authority set and are deduplicated by path
+        # (first observation wins), so a drift of any one blocks the check.
+        from revisit_contract.generation import (
+            DirectoryGeneration,
+            FileGeneration,
+            GenerationClosure,
+        )
+
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             artifact_path = root / "workspace" / "evidence" / "current.md"
             artifact_path.parent.mkdir(parents=True)
             artifact_payload = b"Current cycle evidence.\n"
             artifact_path.write_bytes(artifact_payload)
-            current_ref = {
-                "kind": "artifact",
-                "path": "evidence/current.md",
-                "sha256": hashlib.sha256(artifact_payload).hexdigest(),
-                "locator": "Current cycle evidence",
-                "checked_at": "2026-07-14T12:00:00Z",
-            }
             workspace, cycle_id = make_task6_ready_workspace(
                 root,
-                current_ref=current_ref,
+                current_ref={
+                    "kind": "artifact",
+                    "path": "evidence/current.md",
+                    "sha256": hashlib.sha256(artifact_payload).hexdigest(),
+                    "locator": "Current cycle evidence",
+                    "checked_at": "2026-07-14T12:00:00Z",
+                },
             )
             cycle_relative = f"revisit_cycles/{cycle_id}.json"
-            prior_cycle_sha256 = revisit_contract.sha256_file(
-                workspace / cycle_relative
-            )
             delivered_targets = {
                 (Path(directory) / f"loop_{loop_number}_{suffix}.md").as_posix()
                 for loop_number in range(8, 11)
@@ -6736,7 +6742,7 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                     ("challenges", "challenge"),
                 )
             }
-            expected_captures = {
+            expected_file_authorities = {
                 revisit_contract.POINTER_FILENAME,
                 "reports/final.md",
                 cycle_relative,
@@ -6753,135 +6759,61 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                 "evidence/current.md",
                 *delivered_targets,
             }
-            events = []
-            post_evaluation_checks = []
-            persisted_paths = []
-            persisted_expected_sha256 = None
-            real_read = revisit_cycle_cli._read_authority_generation
-            real_require = revisit_cycle_cli._require_authority_generation
-            real_require_snapshots = revisit_cycle_cli._require_snapshot_generations
-            real_evaluate = revisit_cycle_cli.evaluate_revisit_report
-            real_persist = revisit_cycle_cli.persist_cycle
+            captured: list[GenerationClosure] = []
+            real_require_unchanged = GenerationClosure.require_unchanged
 
-            def relative_path(snapshot):
-                return snapshot.lexical_path.relative_to(
-                    snapshot.workspace
-                ).as_posix()
+            def capturing_require_unchanged(self):
+                captured.append(self)
+                return real_require_unchanged(self)
 
-            def record_generation(snapshot_workspace, path):
-                generation = real_read(snapshot_workspace, path)
-                events.append(("capture", relative_path(generation.snapshot)))
-                return generation
-
-            def record_generation_check(generation, boundary):
-                if boundary == "after revisit report evaluation":
-                    checked_path = relative_path(generation.snapshot)
-                    post_evaluation_checks.append(checked_path)
-                    events.append(("post_evaluation_check", checked_path))
-                return real_require(generation, boundary)
-
-            def record_snapshot_checks(snapshots, boundary):
-                if boundary == "after revisit report evaluation":
-                    for snapshot in snapshots.values():
-                        checked_path = relative_path(snapshot)
-                        post_evaluation_checks.append(checked_path)
-                        events.append(("post_evaluation_check", checked_path))
-                return real_require_snapshots(snapshots, boundary)
-
-            def record_evaluate(*args, **kwargs):
-                events.append(("evaluate", cycle_id))
-                return real_evaluate(*args, **kwargs)
-
-            def record_persist(
-                snapshot_workspace,
-                cycle,
-                expected_sha256,
-                *,
-                authority_snapshots=None,
+            with mock.patch.object(
+                GenerationClosure,
+                "require_unchanged",
+                capturing_require_unchanged,
             ):
-                nonlocal persisted_expected_sha256
-                persisted_expected_sha256 = expected_sha256
-                persisted_paths.extend(
-                    relative_path(snapshot)
-                    for snapshot in authority_snapshots or ()
-                )
-                events.append(("persist", cycle["cycle_id"]))
-                return real_persist(
-                    snapshot_workspace,
-                    cycle,
-                    expected_sha256,
-                    authority_snapshots=authority_snapshots,
+                outcome = check_revisit_readiness(
+                    workspace,
+                    cycle_id,
+                    timestamp="2026-07-16T12:00:00Z",
                 )
 
-            stdout = io.StringIO()
-            stderr = io.StringIO()
-            with (
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "_read_authority_generation",
-                    side_effect=record_generation,
-                ),
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "_require_authority_generation",
-                    side_effect=record_generation_check,
-                ),
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "_require_snapshot_generations",
-                    side_effect=record_snapshot_checks,
-                ),
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "evaluate_revisit_report",
-                    side_effect=record_evaluate,
-                ),
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "persist_cycle",
-                    side_effect=record_persist,
-                ),
-                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
-                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
-            ):
-                result = revisit_cycle_cli.main(
-                    [str(workspace), "check", cycle_id]
-                )
-
-            self.assertEqual(0, result, stderr.getvalue())
-            capture_paths = [
-                path for event, path in events if event == "capture"
+            self.assertEqual(RevisitCheckEffect.TRANSITIONED, outcome.effect)
+            # The readiness seam re-checks the closure exactly once.
+            self.assertEqual(1, len(captured))
+            closure = captured[0]
+            # Build the path->generation count; a duplicate path would mean the
+            # closure re-checks the same authority twice (a redundant capture).
+            file_generation_paths = [
+                gen.relative_path
+                for gen in closure.generations
+                if isinstance(gen, FileGeneration)
             ]
-            self.assertEqual(expected_captures, set(capture_paths))
-            self.assertEqual(len(capture_paths), len(set(capture_paths)))
-            evaluate_index = events.index(("evaluate", cycle_id))
-            persist_index = events.index(("persist", cycle_id))
-            self.assertTrue(
-                all(
-                    index < evaluate_index
-                    for index, (event, _path) in enumerate(events)
-                    if event == "capture"
+            path_counts: dict[str, int] = {}
+            for path in file_generation_paths:
+                path_counts[path] = path_counts.get(path, 0) + 1
+            # Each expected file authority has a generation...
+            observed_files = set(path_counts)
+            for path in expected_file_authorities:
+                self.assertIn(
+                    path,
+                    observed_files,
+                    f"closure did not observe authority: {path}",
                 )
-            )
-            self.assertLess(evaluate_index, persist_index)
-            self.assertEqual(expected_captures, set(post_evaluation_checks))
-            self.assertEqual(
-                len(post_evaluation_checks),
-                len(set(post_evaluation_checks)),
-            )
-            self.assertTrue(
-                all(
-                    evaluate_index < index < persist_index
-                    for index, (event, _path) in enumerate(events)
-                    if event == "post_evaluation_check"
-                )
-            )
-            expected_persisted = expected_captures - {cycle_relative}
-            self.assertEqual(expected_persisted, set(persisted_paths))
-            self.assertEqual(len(persisted_paths), len(set(persisted_paths)))
-            self.assertEqual(prior_cycle_sha256, persisted_expected_sha256)
+            # ...and exactly ONE generation per path (deduplicated capture).
+            duplicated = {
+                path: n for path, n in path_counts.items() if n > 1
+            }
+            self.assertEqual({}, duplicated, duplicated)
 
-    def test_check_deduplicates_source_excerpt_artifact_authority_union(self):
+    def test_check_closure_deduplicates_source_excerpt_artifact(self):
+        # When a source excerpt is ALSO referenced as an artifact evidence ref
+        # (same path), the closure observes ONE generation for it (no duplicate
+        # capture/recheck), so a single drift of that path is detected once.
+        from revisit_contract.generation import (
+            FileGeneration,
+            GenerationClosure,
+        )
+
         with tempfile.TemporaryDirectory() as temp_dir:
             source_payload = (
                 b"Archived source excerpt for the qualification milestone.\n"
@@ -6896,77 +6828,43 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                     "checked_at": "2026-07-14T12:00:00Z",
                 },
             )
+            captured: list[GenerationClosure] = []
+            real_require_unchanged = GenerationClosure.require_unchanged
 
-            def relative_path(snapshot):
-                return snapshot.lexical_path.relative_to(
-                    snapshot.workspace
-                ).as_posix()
+            def capturing_require_unchanged(self):
+                captured.append(self)
+                return real_require_unchanged(self)
 
-            stdout = io.StringIO()
-            stderr = io.StringIO()
-            with (
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "_read_authority_generation",
-                    wraps=revisit_cycle_cli._read_authority_generation,
-                ) as read_spy,
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "_require_authority_generation",
-                    wraps=revisit_cycle_cli._require_authority_generation,
-                ) as generation_check_spy,
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "_require_snapshot_generations",
-                    wraps=revisit_cycle_cli._require_snapshot_generations,
-                ) as snapshot_check_spy,
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "persist_cycle",
-                    wraps=revisit_cycle_cli.persist_cycle,
-                ) as persist_spy,
-                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
-                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            with mock.patch.object(
+                GenerationClosure,
+                "require_unchanged",
+                capturing_require_unchanged,
             ):
-                result = revisit_cycle_cli.main(
-                    [str(workspace), "check", cycle_id]
+                outcome = check_revisit_readiness(
+                    workspace,
+                    cycle_id,
+                    timestamp="2026-07-16T12:00:00Z",
                 )
 
-            self.assertEqual(0, result, stderr.getvalue())
-            captured_paths = [
-                Path(os.path.abspath(os.fspath(call.args[1])))
-                .relative_to(workspace.resolve())
-                .as_posix()
-                for call in read_spy.call_args_list
+            self.assertEqual(RevisitCheckEffect.TRANSITIONED, outcome.effect)
+            closure = captured[0]
+            src_excerpt_generations = [
+                gen
+                for gen in closure.generations
+                if isinstance(gen, FileGeneration)
+                and gen.relative_path == "sources/src-001.md"
             ]
-            post_evaluation_paths = [
-                relative_path(call.args[0].snapshot)
-                for call in generation_check_spy.call_args_list
-                if call.args[1] == "after revisit report evaluation"
-            ]
-            for call in snapshot_check_spy.call_args_list:
-                if call.args[1] != "after revisit report evaluation":
-                    continue
-                post_evaluation_paths.extend(
-                    relative_path(snapshot)
-                    for snapshot in call.args[0].values()
-                )
-            persisted_paths = [
-                relative_path(snapshot)
-                for snapshot in persist_spy.call_args.kwargs[
-                    "authority_snapshots"
-                ]
-            ]
-            for phase, paths in (
-                ("capture", captured_paths),
-                ("post-evaluation recheck", post_evaluation_paths),
-                ("persistence", persisted_paths),
-            ):
-                with self.subTest(phase=phase):
-                    self.assertEqual(len(paths), len(set(paths)), paths)
-                    self.assertEqual(1, paths.count("sources/src-001.md"))
+            self.assertEqual(
+                1,
+                len(src_excerpt_generations),
+                "closure must deduplicate the source-excerpt/artifact path",
+            )
 
     def test_check_rejects_delivered_worker_path_drift_before_ready_persistence(self):
+        # ``closure_store`` is the top-level module object the readiness seam
+        # resolves ``_require_unchanged_except`` from.
+        from revisit_contract import store as closure_store
+
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             workspace, cycle_id = make_task6_ready_workspace(root)
@@ -6976,36 +6874,38 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
             prior_cycle = cycle_path.read_bytes()
             prior_mirror = mirror_path.read_bytes()
-            real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+            real_require = closure_store._require_unchanged_except
+            calls = []
 
-            def evaluate_then_drift(*args, **kwargs):
-                evaluation = real_evaluate(*args, **kwargs)
-                delivery.write_bytes(drifted_delivery)
-                return evaluation
+            def injecting_require(closure, excluded):
+                calls.append(1)
+                if len(calls) == 2:
+                    delivery.write_bytes(drifted_delivery)
+                return real_require(closure, excluded)
 
-            stdout = io.StringIO()
-            stderr = io.StringIO()
-            with (
-                mock.patch.object(
-                    revisit_cycle_cli,
-                    "evaluate_revisit_report",
-                    side_effect=evaluate_then_drift,
-                ),
-                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
-                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            with mock.patch.object(
+                closure_store,
+                "_require_unchanged_except",
+                injecting_require,
             ):
-                result = revisit_cycle_cli.main(
-                    [str(workspace), "check", cycle_id]
+                outcome = check_revisit_readiness(
+                    workspace,
+                    cycle_id,
+                    timestamp="2026-07-16T12:00:00Z",
                 )
 
-            self.assertEqual(2, result, stderr.getvalue())
-            self.assertRegex(stderr.getvalue(), "authority changed")
-            self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+            self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+            codes = [issue.code for issue in outcome.result.failures]
+            self.assertIn("REVISIT_AUTHORITY_DRIFT", codes)
             self.assertEqual(drifted_delivery, delivery.read_bytes())
             self.assertEqual(prior_cycle, cycle_path.read_bytes())
             self.assertEqual(prior_mirror, mirror_path.read_bytes())
 
     def test_check_rejects_intake_authority_byte_drift_without_cycle_writes(self):
+        # ``closure_store`` is the top-level module object the readiness seam
+        # resolves ``_require_unchanged_except`` from.
+        from revisit_contract import store as closure_store
+
         for relative_path in ("framing_contract.json", "claim_ledger.md"):
             with (
                 self.subTest(relative_path=relative_path),
@@ -7018,37 +6918,39 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                 mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
                 prior_cycle = cycle_path.read_bytes()
                 prior_mirror = mirror_path.read_bytes()
-                real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+                real_require = closure_store._require_unchanged_except
+                calls = []
 
-                def evaluate_then_drift(*args, **kwargs):
-                    evaluation = real_evaluate(*args, **kwargs)
-                    authority.write_bytes(drifted)
-                    return evaluation
+                def injecting_require(closure, excluded):
+                    calls.append(1)
+                    if len(calls) == 2:
+                        authority.write_bytes(drifted)
+                    return real_require(closure, excluded)
 
-                stdout = io.StringIO()
-                stderr = io.StringIO()
-                with (
-                    mock.patch.object(
-                        revisit_cycle_cli,
-                        "evaluate_revisit_report",
-                        side_effect=evaluate_then_drift,
-                    ),
-                    mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
-                    mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                with mock.patch.object(
+                    closure_store,
+                    "_require_unchanged_except",
+                    injecting_require,
                 ):
-                    result = revisit_cycle_cli.main(
-                        [str(workspace), "check", cycle_id]
+                    outcome = check_revisit_readiness(
+                        workspace,
+                        cycle_id,
+                        timestamp="2026-07-16T12:00:00Z",
                     )
 
-                self.assertEqual(2, result, stderr.getvalue())
-                self.assertRegex(stderr.getvalue(), "authority changed")
-                self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+                self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+                codes = [issue.code for issue in outcome.result.failures]
+                self.assertIn("REVISIT_AUTHORITY_DRIFT", codes)
                 self.assertEqual(drifted, authority.read_bytes())
                 self.assertEqual(prior_cycle, cycle_path.read_bytes())
                 self.assertEqual(prior_mirror, mirror_path.read_bytes())
 
     @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
     def test_check_rejects_intake_authority_retarget_without_cycle_writes(self):
+        # ``closure_store`` is the top-level module object the readiness seam
+        # resolves ``_require_unchanged_except`` from.
+        from revisit_contract import store as closure_store
+
         for relative_path in ("framing_contract.json", "claim_ledger.md"):
             with (
                 self.subTest(relative_path=relative_path),
@@ -7070,32 +6972,30 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                 mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
                 prior_cycle = cycle_path.read_bytes()
                 prior_mirror = mirror_path.read_bytes()
-                real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+                real_require = closure_store._require_unchanged_except
+                calls = []
 
-                def evaluate_then_retarget(*args, **kwargs):
-                    evaluation = real_evaluate(*args, **kwargs)
-                    authority.unlink()
-                    authority.symlink_to(second_target.name)
-                    return evaluation
+                def injecting_require(closure, excluded):
+                    calls.append(1)
+                    if len(calls) == 2:
+                        authority.unlink()
+                        authority.symlink_to(second_target.name)
+                    return real_require(closure, excluded)
 
-                stdout = io.StringIO()
-                stderr = io.StringIO()
-                with (
-                    mock.patch.object(
-                        revisit_cycle_cli,
-                        "evaluate_revisit_report",
-                        side_effect=evaluate_then_retarget,
-                    ),
-                    mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
-                    mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                with mock.patch.object(
+                    closure_store,
+                    "_require_unchanged_except",
+                    injecting_require,
                 ):
-                    result = revisit_cycle_cli.main(
-                        [str(workspace), "check", cycle_id]
+                    outcome = check_revisit_readiness(
+                        workspace,
+                        cycle_id,
+                        timestamp="2026-07-16T12:00:00Z",
                     )
 
-                self.assertEqual(2, result, stderr.getvalue())
-                self.assertRegex(stderr.getvalue(), "authority target changed")
-                self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+                self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+                codes = [issue.code for issue in outcome.result.failures]
+                self.assertIn("REVISIT_AUTHORITY_DRIFT", codes)
                 self.assertEqual(second_target.resolve(), authority.resolve())
                 self.assertEqual(payload, first_target.read_bytes())
                 self.assertEqual(payload, second_target.read_bytes())

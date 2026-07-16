@@ -30,7 +30,6 @@ from revisit_contract import (
     list_cycle_ids,
     load_cycle,
     load_pointer,
-    mark_ready_for_report,
     persist_cycle,
     persist_pointer,
     resolve_claim,
@@ -47,7 +46,6 @@ from revisit_contract.store import (
     _AuthorityGeneration,
     _read_authority_generation,
     _require_authority_generation,
-    _require_snapshot_generations,
     load_intake_request,
     normalize_workspace_relative_path,
     resolve_workspace_path,
@@ -58,14 +56,9 @@ from framing_contract.model import normalize_contract
 from frontier_lifecycle import LOOP_HEADER_RE, derive_loop_counts, get_frontier
 from frontier_review import read_registry_snapshot
 from source_cache import evaluate_index
-from sofa_contract.evaluate import (
-    evaluate_revisit_report,
-    evaluate_specific_ticker_report,
-)
-from sofa_contract.workspace import (
-    find_worker_outputs,
-    read_specific_markdown_report,
-)
+from sofa_contract import check_revisit_readiness
+from sofa_contract.evaluate import evaluate_specific_ticker_report
+from sofa_contract.workspace import read_specific_markdown_report
 
 
 def _configure_utf8_stdio() -> None:
@@ -570,72 +563,6 @@ def _read_dispatch_delivery_generation(
             f"dispatch {dispatch_id} delivery path is missing or not a file: {relative}"
         )
     return _read_authority_generation(workspace, lexical_delivery)
-
-
-def _capture_dispatch_delivery_generations(
-    workspace: Path,
-    *,
-    captured_paths: set[Path] | None = None,
-) -> tuple[_AuthorityGeneration, ...]:
-    # The evaluator remains the sole owner of malformed or ineligible dispatch
-    # verdicts. This transaction layer binds the raw log, every named delivered
-    # target that could appear during evaluation, and every pre-existing worker
-    # output consumed by the global orphan-output check.
-    dispatch_path = workspace / "dispatch_log.jsonl"
-    dispatch_generation = _read_authority_generation(workspace, dispatch_path)
-    records = _decode_dispatch_generation(dispatch_generation, strict=False)
-    generations = [dispatch_generation]
-    seen_paths = set(captured_paths or ())
-    seen_paths.add(dispatch_generation.snapshot.lexical_path)
-    for record in records:
-        if record.get("status") != "delivered":
-            continue
-        raw_delivery = record.get("delivery_path")
-        if isinstance(raw_delivery, str) and raw_delivery:
-            candidate = Path(raw_delivery)
-            lexical_delivery = (
-                candidate if candidate.is_absolute() else workspace / candidate
-            )
-            if Path(os.path.abspath(os.fspath(lexical_delivery))) in seen_paths:
-                continue
-        generation = _read_dispatch_delivery_generation(
-            workspace,
-            record,
-            strict=False,
-            missing_is_error=True,
-        )
-        if (
-            generation is None
-            or generation.snapshot.lexical_path in seen_paths
-        ):
-            continue
-        seen_paths.add(generation.snapshot.lexical_path)
-        generations.append(generation)
-    for output_path in find_worker_outputs(workspace):
-        lexical = Path(os.path.abspath(os.fspath(output_path)))
-        if lexical in seen_paths:
-            continue
-        generation = _read_authority_generation(workspace, lexical)
-        seen_paths.add(generation.snapshot.lexical_path)
-        generations.append(generation)
-    for generation in generations:
-        _require_authority_generation(
-            generation,
-            "after dispatch delivery generation capture",
-        )
-    return tuple(generations)
-
-
-def _add_authority_snapshot(
-    authority_union: dict[Path, PreparedAuthoritySnapshot],
-    snapshot: PreparedAuthoritySnapshot,
-) -> None:
-    existing = authority_union.get(snapshot.lexical_path)
-    if existing is not None and existing != snapshot:
-        raise RevisitContractError(
-            f"conflicting snapshot authority: {snapshot.lexical_path.name}"
-        )
-    authority_union[snapshot.lexical_path] = snapshot
 
 
 def _validate_emergent_dispatch(
@@ -1305,147 +1232,20 @@ def command_bind_frontier(args: argparse.Namespace) -> int:
         return _command_bind_frontier_in_transaction(args, workspace)
 
 
-def _command_check_in_transaction(
-    args: argparse.Namespace, workspace: Path
-) -> int:
-    _load_ticker_state(workspace, "check")
-    pointer_generation = _read_authority_generation(
-        workspace, workspace / POINTER_FILENAME
-    )
-    pointer = load_pointer(workspace)
-    _require_authority_generation(
-        pointer_generation, "after pointer validation"
-    )
-    _, _, _, report_authority = _require_current_report(workspace, pointer)
-
-    cycle_path = cycle_json_path(workspace, args.cycle)
-    cycle_generation = _read_authority_generation(workspace, cycle_path)
-    cycle = load_cycle(workspace, args.cycle)
-    _require_authority_generation(
-        cycle_generation, "after cycle validation"
-    )
-    if cycle["status"] not in {"active", "ready_for_report"}:
-        raise RevisitContractError(
-            f"check requires active or ready cycle {args.cycle}; "
-            f"current status is {cycle['status']}"
-        )
-
-    evidence_references = (
-        *(
-            ref
-            for trigger in cycle["intake"]["triggers"]
-            for ref in trigger["evidence_refs"]
-        ),
-        *(
-            ref
-            for resolution in cycle["claim_resolutions"]
-            for field in ("current_evidence_refs", "counter_evidence_refs")
-            for ref in resolution[field]
-        ),
-    )
-    requested_source_ids = {
-        reference["source_id"]
-        for reference in evidence_references
-        if reference.get("kind") == "source"
-    }
-    source_index_path = workspace / "sources_index.jsonl"
-    _, source_snapshots = _validate_source_ids(
-        workspace,
-        requested_source_ids,
-    )
-    source_index_was_absent = not source_snapshots
-
-    authority_union: dict[Path, PreparedAuthoritySnapshot] = {}
-    for snapshot in (
-        pointer_generation.snapshot,
-        report_authority,
-        cycle_generation.snapshot,
-        *source_snapshots,
-    ):
-        _add_authority_snapshot(authority_union, snapshot)
-
-    dispatch_generations = _capture_dispatch_delivery_generations(
-        workspace,
-        captured_paths=set(authority_union),
-    )
-    for generation in dispatch_generations:
-        _add_authority_snapshot(authority_union, generation.snapshot)
-    required_authority_paths = [
-        workspace / "state.json",
-        workspace / "frontier_registry.json",
-        workspace / "evidence_ledger.md",
-        workspace / "search_log.jsonl",
-        workspace / "research_workflow.md",
-        workspace / cycle["intake"]["framing"]["path"],
-        *(
-            workspace / claim["source_ref"]["path"]
-            for claim in cycle["intake"]["selected_claims"]
-        ),
-        *(
-            workspace / reference["path"]
-            for reference in evidence_references
-            if reference.get("kind") == "artifact"
-        ),
-    ]
-    for path in required_authority_paths:
-        lexical = Path(os.path.abspath(os.fspath(path)))
-        if lexical in authority_union:
-            continue
-        generation = _read_authority_generation(workspace, lexical)
-        _add_authority_snapshot(
-            authority_union,
-            generation.snapshot,
-        )
-
-    evaluation = evaluate_revisit_report(
-        workspace,
+def command_check(args: argparse.Namespace) -> int:
+    outcome = check_revisit_readiness(
+        Path(args.workspace),
         args.cycle,
+        timestamp=_utc_now_seconds(),
     )
-    _require_snapshot_generations(
-        authority_union,
-        "after revisit report evaluation",
-    )
-    if source_index_was_absent and source_index_path.exists():
-        raise RevisitContractError(
-            "authority appeared after source cache generation capture: "
-            "sources_index.jsonl"
-        )
-    for warning in evaluation.warnings:
+    for warning in outcome.result.warnings:
         print(warning.display(), file=sys.stderr)
-    if not evaluation.passed:
-        for failure in evaluation.failures:
+    if not outcome.result.passed:
+        for failure in outcome.result.failures:
             print(failure.display(), file=sys.stderr)
         return 1
-    if cycle["status"] == "ready_for_report":
-        print(f"REVISIT CYCLE READY: {args.cycle}")
-        return 0
-
-    timestamp = _utc_now_seconds()
-    proposed = mark_ready_for_report(cycle)
-    updated = with_audit(
-        cycle,
-        proposed,
-        "check",
-        [args.cycle],
-        timestamp,
-    )
-    persist_cycle(
-        workspace,
-        updated,
-        expected_sha256=cycle_generation.snapshot.expected_sha256,
-        authority_snapshots=tuple(
-            snapshot
-            for lexical_path, snapshot in authority_union.items()
-            if lexical_path != cycle_generation.snapshot.lexical_path
-        ),
-    )
-    print(f"REVISIT CYCLE READY: {args.cycle}")
+    print(f"REVISIT CYCLE READY: {outcome.cycle_id}")
     return 0
-
-
-def command_check(args: argparse.Namespace) -> int:
-    with workspace_transaction(Path(args.workspace)) as workspace:
-        return _command_check_in_transaction(args, workspace)
 
 
 def _command_register_current_in_transaction(
