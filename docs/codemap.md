@@ -44,6 +44,8 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 | `scripts/framing_contract/` + `scripts/framing_intake.py` | `tests/test_framing_contract.py`, `tests/test_cli_utf8_stdout.py` | Stage 0 framing intent contract authority: schema, field vocabulary, completeness evaluation, JSON authority, Markdown mirror, mutation CLI, and research-posture vocabulary. Consumed by `sofa_contract` for the stage_0 gate. |
 | `scripts/source_cache/` + `scripts/archive_source.py` | `tests/test_source_cache.py`, `tests/test_cli_utf8_stdout.py` | Workspace source cache authority: index schema, append-only archival, hash dedupe, validation issue codes, source-id pattern, and bibliography rendering. Consumed by `sofa_contract` and `dispatch_assembly`. |
 | `scripts/sofa_contract/` | `tests/test_sofa_contract.py` | Shared compliance contract package for structured pass/fail/warn results and DSV4P-hardening checks; consumes `workspace_contract` for workspace shape facts and `worker_role_catalog` for role-specific dispatch and worker-output checks. |
+| `scripts/sofa_contract/revisit_readiness.py` | `tests/test_revisit_readiness.py` | Sole thirteen-row revisit readiness composition and atomic `check` orchestration; direct/profile/check share one global history, one ordered semantic plan, and one observed-read generation closure. Exports `evaluate_revisit_readiness`, `check_revisit_readiness`, `RevisitCheckEffect`, `RevisitCheckOutcome`. |
+| `scripts/revisit_contract/generation.py` | `tests/test_revisit_generation.py` | Observed-read file/absence/directory generations and immutable closure verification; caches first observation per lexical path and per `(relative_path, recursive)` directory key. Short-lived, in-memory only; consumed by readiness composition and persistence. |
 | `scripts/frontier_lifecycle.py` | `tests/test_frontier_lifecycle.py` | Pure registry/lifecycle model: v2/v3 validation, explicit v2 adoption, layer binding, stable-ID loop facts, transitions, review due, portfolio limits, frontier layer coverage and advisories, and rendering. |
 | `scripts/frontier_review.py` | `tests/test_frontier_review_cli.py`, `tests/test_cli_utf8_stdout.py` | Parser and mutation orchestrator for lifecycle, `set-layers`, and `bind-layer`; owns shared render-before-write and two-file registry/workflow persistence. |
 | `scripts/loop_enforcer.py` | `tests/test_frontier_lifecycle.py`, `tests/test_frontier_gate.py` | Validate ledger loop headers against registry IDs from supplied canonical documents; direct standalone reads remain supported. |
@@ -138,6 +140,14 @@ For lifecycle coverage:
 
 ```bash
 python scripts/run_coverage.py
+```
+
+For revisit readiness and the observed-read generation primitive:
+
+```bash
+python -B -m unittest tests.test_revisit_generation
+python -B -m unittest tests.test_revisit_readiness
+python -B -m unittest tests.test_revisit_contract
 ```
 
 `run_coverage.py` is cross-platform (Windows, macOS, Linux) and invokes coverage through `sys.executable`. If your environment is an externally managed Python (PEP 668), install `coverage` from `requirements-dev.txt` into a virtual environment first:
