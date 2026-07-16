@@ -268,6 +268,34 @@ TEST_PATH_LITERAL_ALLOWLIST = {
         "reason": "main-thread artifact relative normalization fixture",
         "expected_count": 1,
     },
+    (
+        "tests/test_revisit_generation.py",
+        ".." + "/" + "escape.txt",
+    ): {
+        "reason": "observed-read workspace-containment escape rejection",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_generation.py",
+        "/" + "etc/passwd",
+    ): {
+        "reason": "observed-read POSIX-absolute path rejection",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_generation.py",
+        "C:" + "/" + "Windows/system32",
+    ): {
+        "reason": "observed-read Windows-drive path rejection",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_generation.py",
+        "a/" + ".." + "/" + ".." + "/" + "escape.txt",
+    ): {
+        "reason": "observed-read dot-segment escape rejection",
+        "expected_count": 1,
+    },
 }
 
 
@@ -527,8 +555,8 @@ class TestSofaStructure(unittest.TestCase):
         unexpected, stale = classify(occurrences, allowlist)
         self.assertEqual({}, unexpected)
         self.assertEqual({}, stale)
-        self.assertEqual(17, sum(entry["expected_count"] for entry in allowlist.values()))
-        self.assertEqual(17, sum(len(records) for records in occurrences.values()))
+        self.assertEqual(21, sum(entry["expected_count"] for entry in allowlist.values()))
+        self.assertEqual(21, sum(len(records) for records in occurrences.values()))
         self.assertEqual(
             [],
             [key for key, entry in allowlist.items() if not entry["reason"].strip()],
