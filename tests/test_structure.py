@@ -332,6 +332,11 @@ class TestSofaStructure(unittest.TestCase):
             "scripts/generate_ultra_packet.py",
             "scripts/run_coverage.py",
             "scripts/prompts/frontier_review_prompt.md",
+            # Task 6 observed-read readiness architecture (deep seam + tests).
+            "scripts/revisit_contract/generation.py",
+            "scripts/sofa_contract/revisit_readiness.py",
+            "tests/test_revisit_generation.py",
+            "tests/test_revisit_readiness.py",
         ]
         missing = [path for path in required_paths if not (ROOT / path).exists()]
         self.assertEqual(
@@ -609,6 +614,212 @@ class TestSofaStructure(unittest.TestCase):
             ),
         )
 
+    # ------------------------------------------------------------------
+    # Task 6 architecture guards: lock the observed-read readiness design.
+    #
+    # Production (Task 6.4/6.5) is already correct, so each guard PASSES
+    # immediately and locks current good state. A failure here means a
+    # production regression re-introduced a forbidden marker or raw-I/O
+    # call -- report it; do NOT weaken the guard or patch production in
+    # this test-only packet.
+    # ------------------------------------------------------------------
+
+    def test_revisit_readiness_owns_semantic_io_and_cli_has_no_manual_union(self):
+        # Guard 1: the deleted readiness internals must never return inside the
+        # readiness seam or the CLI ``check`` adapter. (Note: the spelling in
+        # the plan body, ``_evaluate_discovered_revisited_report``, is also
+        # forbidden alongside the canonical ``_evaluate_discovered_revisit_report``.)
+        readiness_source = (ROOT / "scripts" / "sofa_contract" / "revisit_readiness.py").read_text(encoding="utf-8")
+        cli_source = (ROOT / "scripts" / "revisit_cycle.py").read_text(encoding="utf-8")
+        combined = readiness_source + cli_source
+        for forbidden in (
+            "required_authority_paths",
+            "_capture_dispatch_delivery_generations",
+            "require_candidate",
+            "_command_check_in_transaction",
+            "_evaluate_discovered_revisit_report",
+            "_evaluate_discovered_revisited_report",
+        ):
+            self.assertNotIn(
+                forbidden,
+                combined,
+                f"deleted readiness internal {forbidden!r} re-introduced in "
+                "revisit_readiness.py or revisit_cycle.py",
+            )
+
+    def test_revisit_readiness_module_has_no_raw_filesystem_calls(self):
+        # Guard 2: the whole readiness module must do ALL semantic FS via
+        # ObservedReadSession (read_required/read_optional/list_directory).
+        # Reject raw I/O Call nodes anywhere in the module AST.
+        readiness_path = ROOT / "scripts" / "sofa_contract" / "revisit_readiness.py"
+        violations = _raw_io_call_violations(readiness_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [],
+            violations,
+            "revisit_readiness.py must route all semantic filesystem access "
+            "through ObservedReadSession; raw I/O call nodes found:\n"
+            + "\n".join(
+                f"  line {lineno}: .{attr}()" if attr != "open" else f"  line {lineno}: open(...)"
+                for lineno, attr in violations
+            ),
+        )
+
+    def test_evaluate_pure_owners_have_no_raw_filesystem_calls(self):
+        # Guard 3: the six extracted PURE preloaded-document owners in
+        # evaluate.py must not do raw FS reads (the surrounding thin FS
+        # adapters MAY). Walk each target function's AST subtree only.
+        evaluate_path = ROOT / "scripts" / "sofa_contract" / "evaluate.py"
+        tree = ast.parse(evaluate_path.read_text(encoding="utf-8"))
+        target_owners = {
+            "_evaluate_specific_ticker_report_document",
+            "_check_state_workflow_documents",
+            "_search_facts_from_records",
+            "_check_dispatch_documents",
+            "_check_worker_output_documents",
+            "_derive_revisit_frontier_floor_issues_from_facts",
+        }
+        found_owners = set()
+        failures = []
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef) or node.name not in target_owners:
+                continue
+            found_owners.add(node.name)
+            for lineno, attr in _raw_io_call_violations_for_node(node):
+                failures.append(
+                    f"{node.name}:line {lineno}: .{attr}()"
+                    if attr != "open"
+                    else f"{node.name}:line {lineno}: open(...)"
+                )
+        self.assertEqual(
+            set(),
+            target_owners - found_owners,
+            "expected pure owner function definition(s) missing from evaluate.py: "
+            + ", ".join(sorted(target_owners - found_owners)),
+        )
+        self.assertEqual(
+            [],
+            failures,
+            "evaluate.py pure owners must accept preloaded facts only; raw I/O "
+            "call nodes found:\n" + "\n".join(failures),
+        )
+
+    def test_revisit_contract_does_not_import_sofa_contract(self):
+        # Guard 4a: dependency direction. revisit_contract must NOT depend on
+        # sofa_contract (sofa_contract depends on revisit_contract, not vice-versa).
+        revisit_contract_dir = ROOT / "scripts" / "revisit_contract"
+        offenders = []
+        for path in sorted(revisit_contract_dir.glob("*.py")):
+            if path.name == "__init__.py":
+                continue
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text, filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                module = node.module or ""
+                if module == "sofa_contract" or module.startswith("sofa_contract."):
+                    offenders.append(
+                        f"{path.relative_to(ROOT)}:line {node.lineno}: "
+                        f"from {module} import ..."
+                    )
+        self.assertEqual(
+            [],
+            offenders,
+            "scripts/revisit_contract/ must not import sofa_contract "
+            "(wrong dependency direction):\n" + "\n".join(offenders),
+        )
+
+    def test_require_unchanged_except_is_imported_only_by_store(self):
+        # Guard 4b: ``_require_unchanged_except`` is module-private (underscore)
+        # and must be imported ONLY by scripts/revisit_contract/store.py in the
+        # whole production tree. (Tests reference it for intrinsic store tests.)
+        offenders = []
+        for path in sorted((ROOT / "scripts").rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            rel = path.relative_to(ROOT).as_posix()
+            if rel == "scripts/revisit_contract/store.py":
+                continue
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text, filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                for alias in node.names:
+                    if alias.name == "_require_unchanged_except":
+                        offenders.append(f"{rel}:line {node.lineno}")
+        self.assertEqual(
+            [],
+            offenders,
+            "_require_unchanged_except must be imported only by "
+            "scripts/revisit_contract/store.py; other importers found:\n"
+            + "\n".join(offenders),
+        )
+
+    def test_revisit_cycle_cli_imports_public_check_seam_only(self):
+        # Guard 4c: revisit_cycle.py ``command_check`` is a thin adapter calling
+        # ``check_revisit_readiness`` (the public seam). It must NOT import any
+        # generation type (those live behind the ObservedReadSession boundary).
+        cli_source = (ROOT / "scripts" / "revisit_cycle.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "check_revisit_readiness",
+            cli_source,
+            "revisit_cycle.py must import the public check_revisit_readiness seam",
+        )
+        for forbidden_type in (
+            "GenerationClosure",
+            "ObservedReadSession",
+            "AuthorityDriftError",
+            "FileGeneration",
+        ):
+            self.assertNotIn(
+                forbidden_type,
+                cli_source,
+                f"revisit_cycle.py must not reference generation type "
+                f"{forbidden_type!r} (it belongs behind the observed-read seam)",
+            )
+
+    def test_evaluate_routes_both_named_and_profile_to_readiness_seam(self):
+        # Guard 4d: evaluate.py routes BOTH the named adapter
+        # (``evaluate_revisit_report``) and the profile target
+        # (``ContractProfile(target="revisit_report")`` in ``evaluate_workspace``)
+        # to the single ``evaluate_revisit_readiness`` seam.
+        evaluate_source = (ROOT / "scripts" / "sofa_contract" / "evaluate.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "evaluate_revisit_readiness",
+            evaluate_source,
+            "evaluate.py must reference evaluate_revisit_readiness",
+        )
+        # The named adapter and the profile branch each reference the seam.
+        tree = ast.parse(evaluate_source, filename="scripts/sofa_contract/evaluate.py")
+        named_routes = False
+        profile_routes = False
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            calls_to_seam = [
+                call.func
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "evaluate_revisit_readiness"
+            ]
+            if not calls_to_seam:
+                continue
+            if node.name == "evaluate_revisit_report":
+                named_routes = True
+            elif node.name == "evaluate_workspace":
+                profile_routes = True
+        self.assertTrue(
+            named_routes,
+            "evaluate_revisit_report must delegate to evaluate_revisit_readiness",
+        )
+        self.assertTrue(
+            profile_routes,
+            "evaluate_workspace must route the revisit_report target to "
+            "evaluate_revisit_readiness",
+        )
+
     def test_repository_file_references_are_self_contained(self):
         violations = []
         for path in _repo_text_files():
@@ -733,6 +944,53 @@ def _python_string_path_occurrences(relative_path, source):
         key = (relative_path, node.value)
         occurrences.setdefault(key, []).append((node.lineno, tuple(sorted(set(kinds)))))
     return {key: tuple(records) for key, records in occurrences.items()}
+
+
+# Raw filesystem Call attributes that the observed-read readiness seam forbids.
+# ``ObservedReadSession.read_required``/``read_optional``/``list_directory`` are
+# the ALLOWED seam (method calls on a session object, NOT these attributes).
+FORBIDDEN_RAW_IO_ATTRS = frozenset(
+    {
+        "read_bytes",
+        "read_text",
+        "write_bytes",
+        "write_text",
+        "exists",
+        "is_file",
+        "is_dir",
+        "iterdir",
+        "glob",
+        "rglob",
+    }
+)
+
+
+def _raw_io_call_violations(source):
+    """Return ``(lineno, attr_name)`` tuples for raw I/O Call nodes in ``source``.
+
+    Targets the ``.<forbidden_attr>(...)`` Call pattern (ast.Attribute on an
+    ast.Call) plus a bare ``open(...)`` builtin call. Walks the parsed AST so a
+    forbidden name appearing only in a comment or string does NOT trip the check.
+    """
+    return _collect_raw_io_calls(ast.walk(ast.parse(source)))
+
+
+def _raw_io_call_violations_for_node(node):
+    """Scope the raw-I/O Call check to ``node``'s subtree (used per function)."""
+    return _collect_raw_io_calls(ast.walk(node))
+
+
+def _collect_raw_io_calls(nodes):
+    violations = []
+    for node in nodes:
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in FORBIDDEN_RAW_IO_ATTRS:
+            violations.append((node.lineno, func.attr))
+        elif isinstance(func, ast.Name) and func.id == "open":
+            violations.append((node.lineno, "open"))
+    return violations
 
 
 def _test_path_literal_occurrences():
