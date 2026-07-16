@@ -17,9 +17,19 @@ from worker_role_catalog import (
 )
 
 try:
-    from framing_contract import FramingContractError, evaluate_contract, load_contract
+    from framing_contract import (
+        FramingContractError,
+        evaluate_contract,
+        load_contract,
+    )
+    from framing_contract.model import normalize_contract
 except ImportError:
-    from scripts.framing_contract import FramingContractError, evaluate_contract, load_contract
+    from scripts.framing_contract import (
+        FramingContractError,
+        evaluate_contract,
+        load_contract,
+    )
+    from scripts.framing_contract.model import normalize_contract
 
 try:
     from source_cache import (
@@ -40,8 +50,8 @@ try:
         RevisitIssue,
         derive_claim_issues,
         derive_freshness_issues,
-        evaluate_history,
         derive_frontier_requirements,
+        evaluate_history,
         list_cycle_ids,
         load_cycle,
         load_pointer,
@@ -53,8 +63,8 @@ except ImportError:
         RevisitIssue,
         derive_claim_issues,
         derive_freshness_issues,
-        evaluate_history,
         derive_frontier_requirements,
+        evaluate_history,
         list_cycle_ids,
         load_cycle,
         load_pointer,
@@ -62,9 +72,29 @@ except ImportError:
     )
 
 try:
-    from frontier_lifecycle import LOOP_HEADER_RE, validate_registry
+    from revisit_contract.model import derive_frontier_binding_legality_issue
 except ImportError:
-    from scripts.frontier_lifecycle import LOOP_HEADER_RE, validate_registry
+    from scripts.revisit_contract.model import (
+        derive_frontier_binding_legality_issue,
+    )
+
+try:
+    from revisit_contract.store import verify_workspace_artifact
+except ImportError:
+    from scripts.revisit_contract.store import verify_workspace_artifact
+
+try:
+    from frontier_lifecycle import (
+        LOOP_HEADER_RE,
+        derive_loop_counts,
+        validate_registry,
+    )
+except ImportError:
+    from scripts.frontier_lifecycle import (
+        LOOP_HEADER_RE,
+        derive_loop_counts,
+        validate_registry,
+    )
 
 try:
     from frontier_review import read_registry_snapshot
@@ -203,10 +233,17 @@ def evaluate_revisit_report(
             path="state.json",
         )
         return result
-    if isinstance(state, dict) and str(state.get("mode", "")).lower() == "sector":
+    if isinstance(state, dict) and state.get("mode") == "sector":
         result.fail(
             code="REVISIT_UNSUPPORTED_MODE",
             message="revisit_report is unavailable for Sector workspaces",
+            path="state.json",
+        )
+        return result
+    if not isinstance(state, dict) or state.get("mode") != "ticker":
+        result.fail(
+            code="REVISIT_CYCLE_MALFORMED",
+            message="revisit_report requires state.json with mode=ticker",
             path="state.json",
         )
         return result
@@ -228,6 +265,8 @@ def evaluate_revisit_report(
             path=f"revisit_cycles/{cycle_id}.json",
         )
         return result
+
+    _check_revisit_intake_authorities(root, cycle, result)
 
     current = pointer["current_revision"]
     base = cycle["intake"]["base_revision"]
@@ -296,8 +335,18 @@ def evaluate_revisit_report(
             path="cycle.decision_assessment",
         )
 
+    dispatch_records = _check_dispatch_log(
+        root,
+        read_text_file(root / "research_workflow.md"),
+        ContractProfile(mode="ticker", target="revisit_report"),
+        result,
+    )
     for issue in _derive_revisit_frontier_floor_issues(
-        root, cycle, registry, ledger_text
+        root,
+        cycle,
+        registry,
+        ledger_text,
+        dispatch_records,
     ):
         result.fail(
             code=issue.code,
@@ -334,6 +383,89 @@ def evaluate_revisit_report(
             evidence=resolution["claim_id"],
         )
     return result
+
+
+def _check_revisit_intake_authorities(
+    workspace: Path,
+    cycle: dict,
+    result: ContractResult,
+) -> None:
+    framing = cycle["intake"]["framing"]
+    try:
+        relative, payload = verify_workspace_artifact(
+            workspace,
+            framing["path"],
+            framing["sha256"],
+        )
+        if relative != framing["path"]:
+            raise RevisitContractError(
+                "framing contract path differs from the immutable intake path"
+            )
+        raw_contract = json.loads(payload.decode("utf-8"))
+        contract = normalize_contract(raw_contract)
+        evaluation = evaluate_contract(contract, state_mode="ticker")
+        if not evaluation.complete:
+            details = "; ".join(
+                f"{issue.code} {issue.field}: {issue.message}"
+                for issue in evaluation.issues
+            )
+            raise RevisitContractError(
+                f"framing contract is invalid: {details}"
+            )
+        if contract["mode"] != "ticker":
+            raise RevisitContractError("framing contract mode must be ticker")
+        if contract["research_posture"] != "revisit":
+            raise RevisitContractError(
+                "framing contract research_posture must be revisit"
+            )
+        snapshot = {
+            "subject_resolution": contract["subject_resolution"],
+            "research_posture": contract["research_posture"],
+            "time_horizon": contract["time_horizon"],
+            "market_scope": contract["market_scope"],
+            "risk_appetite": contract["risk_appetite"],
+            "output_expectation": contract["output_expectation"],
+            "report_language": contract["report_language"],
+            "budget_appetite": contract["budget_appetite"],
+        }
+        if snapshot != framing["snapshot"]:
+            raise RevisitContractError(
+                "live framing contract snapshot differs from immutable intake"
+            )
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        FramingContractError,
+        RevisitContractError,
+    ) as exc:
+        result.fail(
+            code="REVISIT_CYCLE_MALFORMED",
+            message=str(exc),
+            path="cycle.intake.framing",
+        )
+
+    for claim_index, claim in enumerate(cycle["intake"]["selected_claims"]):
+        source_ref = claim["source_ref"]
+        try:
+            relative, _ = verify_workspace_artifact(
+                workspace,
+                source_ref["path"],
+                source_ref["sha256"],
+            )
+            if relative != source_ref["path"]:
+                raise RevisitContractError(
+                    "selected claim source path differs from immutable intake"
+                )
+        except (OSError, RevisitContractError) as exc:
+            result.fail(
+                code="REVISIT_CYCLE_MALFORMED",
+                message=str(exc),
+                path=(
+                    f"cycle.intake.selected_claims[{claim_index}].source_ref"
+                ),
+                evidence=claim["claim_id"],
+            )
 
 
 def _revisit_evidence_ref_valid(
@@ -594,8 +726,19 @@ def _derive_revisit_frontier_floor_issues(
     cycle: dict,
     registry: dict,
     ledger_text: str,
+    dispatch_records: list[dict],
 ) -> tuple[RevisitIssue, ...]:
     validate_registry(registry)
+    try:
+        live_loop_counts = derive_loop_counts(ledger_text, registry)
+    except ValueError as exc:
+        return (
+            RevisitIssue(
+                "REVISIT_FRONTIER_BINDING_INVALID",
+                "evidence_ledger.md",
+                str(exc),
+            ),
+        )
     frontiers = {
         frontier["id"]: frontier for frontier in registry["frontiers"]
     }
@@ -618,15 +761,6 @@ def _derive_revisit_frontier_floor_issues(
         )
 
     covered_search_loops, _ = _valid_search_coverage(workspace)
-    dispatch_result = ContractResult()
-    dispatch_records = (
-        _read_dispatch_records(workspace, dispatch_result)
-        if (workspace / "dispatch_log.jsonl").exists()
-        else []
-    )
-    if dispatch_records is None:
-        dispatch_records = []
-
     boundary = cycle["intake"]["workspace_boundary"][
         "max_existing_loop_number"
     ]
@@ -645,6 +779,15 @@ def _derive_revisit_frontier_floor_issues(
                 )
             )
             continue
+        legality_issue = derive_frontier_binding_legality_issue(
+            cycle,
+            binding,
+            frontier,
+            path=path,
+        )
+        if legality_issue is not None:
+            issues.append(legality_issue)
+            continue
         new_loop_numbers = tuple(
             sorted(
                 {
@@ -656,7 +799,12 @@ def _derive_revisit_frontier_floor_issues(
             )
         )
         loop_ids = tuple(f"loop_{number}" for number in new_loop_numbers)
-        if len(loop_ids) < 3:
+        baseline_loop_count = binding["baseline_loop_count"]
+        live_loop_count = live_loop_counts.get(frontier_id, 0)
+        if (
+            len(loop_ids) < 3
+            or live_loop_count < baseline_loop_count + 3
+        ):
             suffix = (
                 "; retire this incomplete cycle through abort"
                 if frontier.get("status") == "Retired"
@@ -667,7 +815,9 @@ def _derive_revisit_frontier_floor_issues(
                     "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
                     path,
                     "bound frontier requires at least three distinct "
-                    f"post-boundary ledger loops; found {len(loop_ids)}{suffix}",
+                    "post-boundary ledger loops and a live loop count at least "
+                    f"baseline+3; found post-boundary={len(loop_ids)}, "
+                    f"baseline={baseline_loop_count}, live={live_loop_count}{suffix}",
                     ", ".join(loop_ids),
                 )
             )
@@ -895,23 +1045,23 @@ def _check_dispatch_log(
     workflow_text: str | None,
     profile: ContractProfile,
     result: ContractResult,
-) -> None:
+) -> list[dict]:
     worker_outputs = find_worker_outputs(workspace)
     workflow_claims_delivery = _workflow_claims_subagent_delivery(workflow_text)
     dispatch_path = workspace / "dispatch_log.jsonl"
     if not dispatch_path.exists():
         if not worker_outputs and not workflow_claims_delivery:
-            return
+            return []
         result.fail(
             code="DISPATCH_PROOF_MISSING" if workflow_claims_delivery else "DISPATCH_LOG_MISSING",
             message="worker outputs and workflow dispatch claims require dispatch_log.jsonl or approved degraded-mode records",
             path="dispatch_log.jsonl",
             evidence=_dispatch_missing_evidence(worker_outputs, workflow_claims_delivery),
         )
-        return
+        return []
     records = _read_dispatch_records(workspace, result)
     if records is None:
-        return
+        return []
     if workflow_claims_delivery and not any(_dispatch_record_counts_as_delivery(record) for record in records):
         result.fail(
             code="DISPATCH_PROOF_MISSING",
@@ -994,6 +1144,7 @@ def _check_dispatch_log(
                 path=rel,
                 evidence="dispatch_log.jsonl delivery_path mismatch",
             )
+    return records
 
 
 def _normalize_delivery_path(workspace: Path, delivery_path) -> str | None:

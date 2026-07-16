@@ -404,12 +404,17 @@ def bind_task6_reactivated_frontier(workspace: Path, cycle_id: str) -> None:
         raise AssertionError(result.stderr)
 
 
-def append_task6_loops(workspace: Path, count: int) -> tuple[str, ...]:
+def append_task6_loops(
+    workspace: Path,
+    count: int,
+    *,
+    frontier_id: str = "F1",
+) -> tuple[str, ...]:
     loop_ids = tuple(f"loop_{number}" for number in range(8, 8 + count))
     with (workspace / "evidence_ledger.md").open("a", encoding="utf-8") as handle:
         for number in range(8, 8 + count):
             handle.write(
-                f"## Loop {number}: F1 - Qualification timing\n\n"
+                f"## Loop {number}: {frontier_id} - Qualification timing\n\n"
                 f"Cycle-relative evidence for loop {number}.\n\n"
             )
     return loop_ids
@@ -464,14 +469,16 @@ def review_task6_frontier(
     workspace: Path,
     *,
     decision: str = "Continued",
+    frontier_id: str = "F1",
+    loop_count: int = 6,
 ) -> None:
     registry_path = workspace / "frontier_registry.json"
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     registry = transition(
         registry,
-        "F1",
+        frontier_id,
         decision,
-        {"F1": 6},
+        {frontier_id: loop_count},
         mode="ticker",
         action="review",
         rationale="Three new loops completed the cycle-relative review.",
@@ -486,6 +493,11 @@ def review_task6_frontier(
 
 
 def derive_task6_floor_issues(workspace: Path, cycle_id: str):
+    dispatch_result = sofa_evaluate.ContractResult()
+    dispatch_records = sofa_evaluate._read_dispatch_records(
+        workspace,
+        dispatch_result,
+    )
     return sofa_evaluate._derive_revisit_frontier_floor_issues(
         workspace,
         revisit_contract.load_cycle(workspace, cycle_id),
@@ -493,6 +505,7 @@ def derive_task6_floor_issues(workspace: Path, cycle_id: str):
             (workspace / "frontier_registry.json").read_text(encoding="utf-8")
         ),
         (workspace / "evidence_ledger.md").read_text(encoding="utf-8"),
+        dispatch_records or [],
     )
 
 
@@ -507,7 +520,64 @@ def make_task6_ready_workspace(
     write_task6_search_and_dispatch(workspace, loop_ids)
     review_task6_frontier(workspace)
 
+    _finish_task6_ready_claim(
+        root,
+        workspace,
+        cycle_id,
+        frontier_id="F1",
+        current_ref=current_ref,
+    )
+    return workspace, cycle_id
+
+
+def make_task6_added_ready_workspace(root: Path) -> tuple[Path, str, str]:
+    workspace, cycle_id = make_task6_binding_workspace(root)
+    frontier_id = add_task6_frontier(workspace, initial_status="Active")
+    bound = run_revisit_cycle_cli(
+        workspace,
+        "bind-frontier",
+        cycle_id,
+        "--frontier",
+        frontier_id,
+        "--action",
+        "added",
+        "--claim",
+        f"{cycle_id}-CL-01",
+        "--expected-evidence",
+        "Current qualification timing and counter-evidence.",
+    )
+    if bound.returncode != 0:
+        raise AssertionError(bound.stderr)
+    loop_ids = append_task6_loops(
+        workspace,
+        3,
+        frontier_id=frontier_id,
+    )
+    write_task6_search_and_dispatch(workspace, loop_ids)
+    review_task6_frontier(
+        workspace,
+        frontier_id=frontier_id,
+        loop_count=3,
+    )
+    _finish_task6_ready_claim(
+        root,
+        workspace,
+        cycle_id,
+        frontier_id=frontier_id,
+    )
+    return workspace, cycle_id, frontier_id
+
+
+def _finish_task6_ready_claim(
+    root: Path,
+    workspace: Path,
+    cycle_id: str,
+    *,
+    frontier_id: str,
+    current_ref: dict | None = None,
+) -> None:
     resolution = make_confirmed_resolution_request()
+    resolution["bound_frontier_ids"] = [frontier_id]
     resolution["current_evidence_refs"] = [
         current_ref
         or {
@@ -551,7 +621,6 @@ def make_task6_ready_workspace(
     )
     if assessed.returncode != 0:
         raise AssertionError(assessed.stderr)
-    return workspace, cycle_id
 
 
 def make_emergent_claim_request() -> dict:
@@ -4602,22 +4671,7 @@ class TestRevisitFrontierResearchFloors(unittest.TestCase):
                 "Current qualification timing and counter-evidence.",
             )
             self.assertEqual(0, bound.returncode, bound.stderr)
-            derive = getattr(
-                sofa_evaluate,
-                "_derive_revisit_frontier_floor_issues",
-                lambda *args: (),
-            )
-
-            issues = derive(
-                workspace,
-                revisit_contract.load_cycle(workspace, cycle_id),
-                json.loads(
-                    (workspace / "frontier_registry.json").read_text(
-                        encoding="utf-8"
-                    )
-                ),
-                (workspace / "evidence_ledger.md").read_text(encoding="utf-8"),
-            )
+            issues = derive_task6_floor_issues(workspace, cycle_id)
 
             self.assertIn(
                 "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
@@ -5087,6 +5141,74 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             )
             self.assertEqual(before, snapshot_tree(workspace))
 
+    def test_direct_evaluator_rejects_framing_raw_hash_or_snapshot_drift(self):
+        for drift_case in ("raw_hash", "snapshot"):
+            with (
+                self.subTest(drift_case=drift_case),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+                framing_path = workspace / "framing_contract.json"
+                if drift_case == "raw_hash":
+                    framing_path.write_bytes(framing_path.read_bytes() + b"\n")
+                else:
+                    framing = json.loads(framing_path.read_text(encoding="utf-8"))
+                    framing["time_horizon"] = "12-18 months"
+                    framing_path.write_text(
+                        json.dumps(framing, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    cycle = revisit_contract.load_cycle(workspace, cycle_id)
+                    cycle["intake"]["framing"]["sha256"] = hashlib.sha256(
+                        framing_path.read_bytes()
+                    ).hexdigest()
+                    cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                    attach_valid_audit(cycle)
+                    revisit_contract.persist_cycle(
+                        workspace,
+                        cycle,
+                        expected_sha256=revisit_contract.sha256_file(
+                            workspace / "revisit_cycles" / f"{cycle_id}.json"
+                        ),
+                    )
+
+                result = sofa_evaluate.evaluate_revisit_report(
+                    workspace, cycle_id
+                )
+
+                self.assertFalse(result.passed)
+                self.assertIn(
+                    "REVISIT_CYCLE_MALFORMED",
+                    [issue.code for issue in result.failures],
+                )
+
+    def test_direct_evaluator_rejects_selected_claim_source_deletion_or_hash_drift(
+        self,
+    ):
+        for drift_case in ("deleted", "hash"):
+            with (
+                self.subTest(drift_case=drift_case),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+                source_path = workspace / "claim_ledger.md"
+                if drift_case == "deleted":
+                    source_path.unlink()
+                else:
+                    source_path.write_bytes(
+                        source_path.read_bytes() + b"selected claim source drift\n"
+                    )
+
+                result = sofa_evaluate.evaluate_revisit_report(
+                    workspace, cycle_id
+                )
+
+                self.assertFalse(result.passed)
+                self.assertIn(
+                    "REVISIT_CYCLE_MALFORMED",
+                    [issue.code for issue in result.failures],
+                )
+
     def test_evaluator_reports_stable_malformed_base_trigger_and_unresolved_codes(self):
         cases = ("malformed", "base_drift", "trigger_missing", "unresolved")
         for case in cases:
@@ -5200,6 +5322,244 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                         [issue.code for issue in result.failures],
                     )
 
+    def test_direct_evaluator_rejects_historical_loop_regression(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            ledger_path = workspace / "evidence_ledger.md"
+            ledger_text = ledger_path.read_text(encoding="utf-8")
+            ledger_path.write_text(
+                ledger_text.replace(
+                    "## Loop 2: F1 - Qualification timing\n\n",
+                    "",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            result = sofa_evaluate.evaluate_revisit_report(
+                workspace, cycle_id
+            )
+
+            self.assertFalse(result.passed)
+            self.assertIn(
+                "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_check_rejects_historical_loop_regression_without_cycle_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            ledger_path = workspace / "evidence_ledger.md"
+            ledger_text = ledger_path.read_text(encoding="utf-8")
+            ledger_path.write_text(
+                ledger_text.replace(
+                    "## Loop 2: F1 - Qualification timing\n\n",
+                    "",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_cycle = cycle_path.read_bytes()
+            prior_mirror = mirror_path.read_bytes()
+            regressed_ledger = ledger_path.read_bytes()
+
+            result = run_revisit_cycle_cli(workspace, "check", cycle_id)
+
+            self.assertEqual(1, result.returncode, result.stderr)
+            self.assertIn(
+                "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+                result.stderr,
+            )
+            self.assertEqual(regressed_ledger, ledger_path.read_bytes())
+            self.assertEqual(prior_cycle, cycle_path.read_bytes())
+            self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    def test_direct_and_profile_reject_reactivated_binding_history_drift(self):
+        evaluators = (
+            (
+                "direct",
+                lambda workspace, cycle_id: sofa_evaluate.evaluate_revisit_report(
+                    workspace, cycle_id
+                ),
+            ),
+            (
+                "profile",
+                lambda workspace, _cycle_id: sofa_evaluate.evaluate_workspace(
+                    workspace,
+                    sofa_evaluate.ContractProfile(
+                        mode="ticker", target="revisit_report"
+                    ),
+                ),
+            ),
+        )
+        for drift_case in ("timestamp", "preceding_state"):
+            for evaluator_name, evaluate in evaluators:
+                with (
+                    self.subTest(
+                        drift_case=drift_case,
+                        evaluator=evaluator_name,
+                    ),
+                    tempfile.TemporaryDirectory() as temp_dir,
+                ):
+                    workspace, cycle_id = make_task6_ready_workspace(
+                        Path(temp_dir)
+                    )
+                    registry_path = workspace / "frontier_registry.json"
+                    registry = json.loads(
+                        registry_path.read_text(encoding="utf-8")
+                    )
+                    lifecycle = registry["frontiers"][0]["lifecycle"]
+                    active_index = max(
+                        index
+                        for index, transition_row in enumerate(lifecycle)
+                        if transition_row.get("to") == "Active"
+                    )
+                    if drift_case == "timestamp":
+                        lifecycle[active_index]["ts"] = "2026-07-14T09:00:00Z"
+                    else:
+                        lifecycle[active_index - 1]["to"] = "New"
+                    registry_path.write_text(
+                        json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+
+                    result = evaluate(workspace, cycle_id)
+
+                    self.assertFalse(result.passed)
+                    self.assertIn(
+                        "REVISIT_FRONTIER_BINDING_INVALID",
+                        [issue.code for issue in result.failures],
+                    )
+
+    def test_direct_and_profile_reject_added_binding_history_drift(self):
+        evaluators = (
+            (
+                "direct",
+                lambda workspace, cycle_id: sofa_evaluate.evaluate_revisit_report(
+                    workspace, cycle_id
+                ),
+            ),
+            (
+                "profile",
+                lambda workspace, _cycle_id: sofa_evaluate.evaluate_workspace(
+                    workspace,
+                    sofa_evaluate.ContractProfile(
+                        mode="ticker", target="revisit_report"
+                    ),
+                ),
+            ),
+        )
+        for drift_case in ("first_transition", "proposal_loop"):
+            for evaluator_name, evaluate in evaluators:
+                with (
+                    self.subTest(
+                        drift_case=drift_case,
+                        evaluator=evaluator_name,
+                    ),
+                    tempfile.TemporaryDirectory() as temp_dir,
+                ):
+                    workspace, cycle_id, frontier_id = (
+                        make_task6_added_ready_workspace(Path(temp_dir))
+                    )
+                    registry_path = workspace / "frontier_registry.json"
+                    registry = json.loads(
+                        registry_path.read_text(encoding="utf-8")
+                    )
+                    frontier = next(
+                        row
+                        for row in registry["frontiers"]
+                        if row["id"] == frontier_id
+                    )
+                    if drift_case == "first_transition":
+                        frontier["lifecycle"][0]["ts"] = (
+                            "2026-07-14T09:00:00Z"
+                        )
+                    else:
+                        frontier["proposed_at_loop"] = 7
+                    registry_path.write_text(
+                        json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+
+                    result = evaluate(workspace, cycle_id)
+
+                    self.assertFalse(result.passed)
+                    self.assertIn(
+                        "REVISIT_FRONTIER_BINDING_INVALID",
+                        [issue.code for issue in result.failures],
+                    )
+
+    def test_revisit_evaluator_preserves_global_dispatch_invariants(self):
+        cases = (
+            ("duplicate_path", "DISPATCH_DELIVERY_PATH_DUPLICATE"),
+            ("incomplete", "DISPATCH_RECORD_INCOMPLETE"),
+            ("unsupported_mechanism", "DISPATCH_MECHANISM_UNSUPPORTED"),
+            ("role_path_mismatch", "DISPATCH_ROLE_DELIVERY_MISMATCH"),
+        )
+        for dispatch_case, expected_code in cases:
+            with (
+                self.subTest(dispatch_case=dispatch_case),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+                dispatch_path = workspace / "dispatch_log.jsonl"
+                records = [
+                    json.loads(line)
+                    for line in dispatch_path.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                ]
+                if dispatch_case == "duplicate_path":
+                    extra = copy.deepcopy(records[0])
+                    extra["dispatch_id"] = "dispatch_duplicate_path"
+                    extra["loop_id"] = "loop_11"
+                elif dispatch_case == "incomplete":
+                    extra = {
+                        "dispatch_id": "dispatch_incomplete",
+                        "status": "delivered",
+                    }
+                else:
+                    delivery_path = (
+                        "scouts/loop_11_scout.md"
+                        if dispatch_case == "unsupported_mechanism"
+                        else "challenges/loop_11_challenge.md"
+                    )
+                    delivery = workspace / delivery_path
+                    delivery.parent.mkdir(exist_ok=True)
+                    delivery.write_text(
+                        "# Extra dispatch invariant probe\n",
+                        encoding="utf-8",
+                    )
+                    extra = {
+                        "dispatch_id": f"dispatch_{dispatch_case}",
+                        "loop_id": "loop_11",
+                        "role": "frontier_scout",
+                        "mechanism": (
+                            "unsupported"
+                            if dispatch_case == "unsupported_mechanism"
+                            else "host_subagent"
+                        ),
+                        "delivery_path": delivery_path,
+                        "status": "delivered",
+                    }
+                records.append(extra)
+                dispatch_path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records),
+                    encoding="utf-8",
+                )
+
+                result = sofa_evaluate.evaluate_revisit_report(
+                    workspace, cycle_id
+                )
+
+                self.assertFalse(result.passed)
+                self.assertIn(
+                    expected_code,
+                    [issue.code for issue in result.failures],
+                )
+
     def test_evaluator_reports_invalid_current_support_and_forbidden_support(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -5298,6 +5658,55 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                 "REVISIT_UNSUPPORTED_MODE",
                 [issue.code for issue in result.failures],
             )
+
+    def test_direct_and_profile_reject_missing_or_unknown_ticker_state(self):
+        evaluators = (
+            (
+                "direct",
+                lambda workspace, cycle_id: sofa_evaluate.evaluate_revisit_report(
+                    workspace, cycle_id
+                ),
+            ),
+            (
+                "profile",
+                lambda workspace, _cycle_id: sofa_evaluate.evaluate_workspace(
+                    workspace,
+                    sofa_evaluate.ContractProfile(
+                        mode="ticker", target="revisit_report"
+                    ),
+                ),
+            ),
+        )
+        for state_case in ("missing", "unknown"):
+            for evaluator_name, evaluate in evaluators:
+                with (
+                    self.subTest(
+                        state_case=state_case,
+                        evaluator=evaluator_name,
+                    ),
+                    tempfile.TemporaryDirectory() as temp_dir,
+                ):
+                    workspace, cycle_id = make_task6_ready_workspace(
+                        Path(temp_dir)
+                    )
+                    state_path = workspace / "state.json"
+                    if state_case == "missing":
+                        state_path.unlink()
+                    else:
+                        state = json.loads(state_path.read_text(encoding="utf-8"))
+                        state["mode"] = "not-ticker"
+                        state_path.write_text(
+                            json.dumps(state, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+
+                    result = evaluate(workspace, cycle_id)
+
+                    self.assertFalse(result.passed)
+                    self.assertIn(
+                        "REVISIT_CYCLE_MALFORMED",
+                        [issue.code for issue in result.failures],
+                    )
 
     def test_check_failure_prints_verdict_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5438,6 +5847,103 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             self.assertEqual(drifted_delivery, delivery.read_bytes())
             self.assertEqual(prior_cycle, cycle_path.read_bytes())
             self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    def test_check_rejects_intake_authority_byte_drift_without_cycle_writes(self):
+        for relative_path in ("framing_contract.json", "claim_ledger.md"):
+            with (
+                self.subTest(relative_path=relative_path),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+                authority = workspace / relative_path
+                drifted = authority.read_bytes() + b"post-evaluation drift\n"
+                cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+                mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+                prior_cycle = cycle_path.read_bytes()
+                prior_mirror = mirror_path.read_bytes()
+                real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+
+                def evaluate_then_drift(*args, **kwargs):
+                    evaluation = real_evaluate(*args, **kwargs)
+                    authority.write_bytes(drifted)
+                    return evaluation
+
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(
+                        revisit_cycle_cli,
+                        "evaluate_revisit_report",
+                        side_effect=evaluate_then_drift,
+                    ),
+                    mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                    mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                ):
+                    result = revisit_cycle_cli.main(
+                        [str(workspace), "check", cycle_id]
+                    )
+
+                self.assertEqual(2, result, stderr.getvalue())
+                self.assertRegex(stderr.getvalue(), "authority changed")
+                self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+                self.assertEqual(drifted, authority.read_bytes())
+                self.assertEqual(prior_cycle, cycle_path.read_bytes())
+                self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symbolic links")
+    def test_check_rejects_intake_authority_retarget_without_cycle_writes(self):
+        for relative_path in ("framing_contract.json", "claim_ledger.md"):
+            with (
+                self.subTest(relative_path=relative_path),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+                authority = workspace / relative_path
+                first_target = authority.with_name(
+                    f"{authority.stem}-first{authority.suffix}"
+                )
+                second_target = authority.with_name(
+                    f"{authority.stem}-second{authority.suffix}"
+                )
+                payload = authority.read_bytes()
+                authority.replace(first_target)
+                second_target.write_bytes(payload)
+                authority.symlink_to(first_target.name)
+                cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+                mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+                prior_cycle = cycle_path.read_bytes()
+                prior_mirror = mirror_path.read_bytes()
+                real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+
+                def evaluate_then_retarget(*args, **kwargs):
+                    evaluation = real_evaluate(*args, **kwargs)
+                    authority.unlink()
+                    authority.symlink_to(second_target.name)
+                    return evaluation
+
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(
+                        revisit_cycle_cli,
+                        "evaluate_revisit_report",
+                        side_effect=evaluate_then_retarget,
+                    ),
+                    mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                    mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                ):
+                    result = revisit_cycle_cli.main(
+                        [str(workspace), "check", cycle_id]
+                    )
+
+                self.assertEqual(2, result, stderr.getvalue())
+                self.assertRegex(stderr.getvalue(), "authority target changed")
+                self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+                self.assertEqual(second_target.resolve(), authority.resolve())
+                self.assertEqual(payload, first_target.read_bytes())
+                self.assertEqual(payload, second_target.read_bytes())
+                self.assertEqual(prior_cycle, cycle_path.read_bytes())
+                self.assertEqual(prior_mirror, mirror_path.read_bytes())
 
 
 class TestRevisitDerivedClaimMutation(unittest.TestCase):

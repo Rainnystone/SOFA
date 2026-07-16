@@ -37,7 +37,10 @@ from revisit_contract import (
     validate_evidence_ref,
     workspace_transaction,
 )
-from revisit_contract.model import with_audit
+from revisit_contract.model import (
+    derive_frontier_binding_legality_issue,
+    with_audit,
+)
 from revisit_contract.store import (
     PreparedAuthoritySnapshot,
     _AuthorityGeneration,
@@ -1210,45 +1213,15 @@ def _command_bind_frontier_in_transaction(
         )
 
     frontier = get_frontier(registry, args.frontier)
-    lifecycle = frontier.get("lifecycle", [])
     if args.action == "reactivated":
         if frontier.get("status") != "Active":
             raise RevisitContractError(
                 f"reactivated frontier {args.frontier} must be Active"
             )
-        if (
-            len(lifecycle) < 2
-            or lifecycle[-1].get("to") != "Active"
-            or not isinstance(lifecycle[-1].get("ts"), str)
-            or lifecycle[-1]["ts"] < cycle["created_at"]
-        ):
-            raise RevisitContractError(
-                f"reactivated frontier {args.frontier} requires a post-cycle "
-                "Active transition"
-            )
-        if lifecycle[-2].get("to") != "Continued":
-            raise RevisitContractError(
-                f"reactivated frontier {args.frontier} must immediately follow "
-                "Continued"
-            )
     else:
-        first_transition = lifecycle[0] if lifecycle else None
         if frontier.get("status") not in {"New", "Active"}:
             raise RevisitContractError(
                 f"added frontier {args.frontier} must be New or Active"
-            )
-        if (
-            first_transition is None
-            or not isinstance(first_transition.get("ts"), str)
-            or first_transition["ts"] < cycle["created_at"]
-        ):
-            raise RevisitContractError(
-                f"added frontier {args.frontier} must begin at or after cycle creation"
-            )
-        if frontier.get("proposed_at_loop", 0) <= boundary:
-            raise RevisitContractError(
-                f"added frontier {args.frontier} proposed_at_loop must be greater "
-                "than the cycle boundary"
             )
 
     binding = {
@@ -1261,6 +1234,13 @@ def _command_bind_frontier_in_transaction(
         "registry_sha256": registry_authority.expected_sha256,
         "bound_at": _utc_now_seconds(),
     }
+    legality_issue = derive_frontier_binding_legality_issue(
+        cycle,
+        binding,
+        frontier,
+    )
+    if legality_issue is not None:
+        raise RevisitContractError(legality_issue.message)
     proposed = bind_frontier(cycle, binding)
     updated = with_audit(
         cycle,
@@ -1339,6 +1319,13 @@ def _command_check_in_transaction(
     authority_generations = list(
         _capture_dispatch_delivery_generations(workspace)
     )
+    required_authority_paths = [
+        workspace / cycle["intake"]["framing"]["path"],
+        *(
+            workspace / claim["source_ref"]["path"]
+            for claim in cycle["intake"]["selected_claims"]
+        ),
+    ]
     authority_paths = [
         workspace / "state.json",
         workspace / "frontier_registry.json",
@@ -1352,6 +1339,14 @@ def _command_check_in_transaction(
         generation.snapshot.lexical_path
         for generation in authority_generations
     }
+    for path in required_authority_paths:
+        lexical = Path(path)
+        if lexical in seen_paths:
+            continue
+        seen_paths.add(lexical)
+        authority_generations.append(
+            _read_authority_generation(workspace, lexical)
+        )
     for path in authority_paths:
         lexical = Path(path)
         if lexical in seen_paths or not lexical.is_file():

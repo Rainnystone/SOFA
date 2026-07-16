@@ -870,6 +870,100 @@ def derive_frontier_requirements(
     )
 
 
+def derive_frontier_binding_legality_issue(
+    cycle: dict[str, Any],
+    binding: dict[str, Any],
+    frontier: dict[str, Any],
+    *,
+    path: str = "cycle.frontier_bindings",
+) -> RevisitIssue | None:
+    frontier_id = binding.get("frontier_id", "")
+
+    def invalid(message: str) -> RevisitIssue:
+        return RevisitIssue(
+            "REVISIT_FRONTIER_BINDING_INVALID",
+            path,
+            message,
+            str(frontier_id),
+        )
+
+    if frontier.get("id") != frontier_id:
+        return invalid("binding does not match the supplied frontier")
+    lifecycle = frontier.get("lifecycle")
+    if not isinstance(lifecycle, list) or not lifecycle:
+        return invalid(f"frontier {frontier_id} has no lifecycle history")
+
+    created_at = cycle["created_at"]
+    bound_at = binding["bound_at"]
+    if binding["action"] == "reactivated":
+        active_indexes = [
+            index
+            for index, transition in enumerate(lifecycle)
+            if isinstance(transition, dict)
+            and transition.get("to") == "Active"
+            and _is_utc_timestamp(transition.get("ts"))
+            and created_at <= transition["ts"] <= bound_at
+        ]
+        if not active_indexes:
+            return invalid(
+                f"reactivated frontier {frontier_id} requires a post-cycle "
+                "Active transition at or before binding"
+            )
+        active_index = active_indexes[-1]
+        if (
+            active_index == 0
+            or not isinstance(lifecycle[active_index - 1], dict)
+            or lifecycle[active_index - 1].get("to") != "Continued"
+        ):
+            return invalid(
+                f"reactivated frontier {frontier_id} must immediately follow "
+                "Continued"
+            )
+        return None
+
+    first_transition = lifecycle[0]
+    if (
+        not isinstance(first_transition, dict)
+        or first_transition.get("to") not in {"New", "Active"}
+    ):
+        return invalid(
+            f"added frontier {frontier_id} must begin as New or Active"
+        )
+    first_timestamp = first_transition.get("ts")
+    if (
+        not _is_utc_timestamp(first_timestamp)
+        or not created_at <= first_timestamp <= bound_at
+    ):
+        return invalid(
+            f"added frontier {frontier_id} must begin at or after cycle creation "
+            "and at or before binding"
+        )
+    proposed_at_loop = frontier.get("proposed_at_loop")
+    boundary = cycle["intake"]["workspace_boundary"][
+        "max_existing_loop_number"
+    ]
+    if (
+        isinstance(proposed_at_loop, bool)
+        or not isinstance(proposed_at_loop, int)
+        or proposed_at_loop <= boundary
+    ):
+        return invalid(
+            f"added frontier {frontier_id} proposed_at_loop must be greater "
+            "than the cycle boundary"
+        )
+    return None
+
+
+def _is_utc_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or _UTC_TIMESTAMP_RE.fullmatch(value) is None:
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
+
+
 def derive_claim_issues(cycle: dict[str, Any]) -> tuple[RevisitIssue, ...]:
     validate_cycle(cycle)
     issues = []
