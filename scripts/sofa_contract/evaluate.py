@@ -403,13 +403,6 @@ def _revisit_evidence_ref_valid(
     return sha256_bytes(payload) == reference.get("sha256")
 
 
-def _evaluate_discovered_revisit_report(workspace: Path) -> ContractResult:
-    """Adapter: profile-target discovery now uses the unified read-only seam."""
-    from .revisit_readiness import evaluate_revisit_readiness
-
-    return evaluate_revisit_readiness(workspace)
-
-
 def _has_exact_single_metadata_block(report_text: str, expected_metadata: str) -> bool:
     return report_text.count(expected_metadata) == 1
 
