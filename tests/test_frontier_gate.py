@@ -129,6 +129,39 @@ class TestFrontierGateIntegration(unittest.TestCase):
         frontiers = []
         for index in range(6):
             status = first_status if index == 0 else "Continued"
+            # Build a coherent v3 frontier: lifecycle ends in `status`, and a
+            # Continued status carries one review decision that matches a
+            # lifecycle transition (kept canonical so strict v3 validation
+            # accepts the fixture while preserving the status/layer facts the
+            # gate actually checks).
+            if status == "Active":
+                lifecycle = [
+                    {"to": "New", "at_loop": 1, "ts": None},
+                    {"to": "Active", "at_loop": 1, "ts": None},
+                ]
+                review_count = 0
+                review_decisions = []
+            elif status == "New":
+                lifecycle = [{"to": "New", "at_loop": 1, "ts": None}]
+                review_count = 0
+                review_decisions = []
+            else:  # Continued
+                lifecycle = [
+                    {"to": "New", "at_loop": 1, "ts": None},
+                    {"to": "Active", "at_loop": 1, "ts": None},
+                    {"to": "Continued", "at_loop": 3, "ts": None},
+                ]
+                review_count = 1
+                review_decisions = [
+                    {
+                        "review_number": 1,
+                        "at_loop": 3,
+                        "decision": "Continued",
+                        "retire_category": None,
+                        "rationale_short": "continuing",
+                        "portfolio_actions": [],
+                    }
+                ]
             frontiers.append(
                 {
                     "id": f"F{index + 1}",
@@ -137,11 +170,11 @@ class TestFrontierGateIntegration(unittest.TestCase):
                     "source": "initial",
                     "source_frontier": None,
                     "status": status,
-                    "review_count": 0 if status == "Active" else 1,
+                    "review_count": review_count,
                     "max_reviews": 3,
                     "retire_category": None,
-                    "lifecycle": [{"to": status, "at_loop": 3, "ts": None}],
-                    "review_decisions": [],
+                    "lifecycle": lifecycle,
+                    "review_decisions": review_decisions,
                     "evidence_pointers": [],
                     "layer": index,
                     "parent_frontier": None,
