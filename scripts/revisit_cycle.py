@@ -1400,7 +1400,6 @@ def _command_check_in_transaction(
     evaluation = evaluate_revisit_report(
         workspace,
         args.cycle,
-        require_candidate=False,
     )
     _require_snapshot_generations(
         authority_union,

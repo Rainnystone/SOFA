@@ -37,14 +37,18 @@ try:
         SourceCacheEvaluation,
         evaluate_index,
         has_registered_source_id_reference,
+        registered_source_ids,
     )
+    from source_cache.model import source_ids_in_text
 except ImportError:
     from scripts.source_cache import (
         SOURCE_INDEX_FILENAME,
         SourceCacheEvaluation,
         evaluate_index,
         has_registered_source_id_reference,
+        registered_source_ids,
     )
+    from scripts.source_cache.model import source_ids_in_text
 
 try:
     from revisit_contract import (
@@ -181,38 +185,69 @@ def evaluate_specific_ticker_report(
     expected_metadata: str | None = None,
 ) -> ContractResult:
     root = Path(workspace)
-    result = ContractResult()
     try:
-        relative, payload, text = read_specific_markdown_report(root, report_path)
+        relative, payload, _text = read_specific_markdown_report(root, report_path)
     except (OSError, ValueError, RevisitContractError) as exc:
+        result = ContractResult()
         result.fail(
             code="CURRENT_REPORT_INVALID",
             message=str(exc),
             path=str(report_path),
         )
         return result
+    return _evaluate_specific_ticker_report_document(
+        relative,
+        payload,
+        expected_sha256=expected_sha256,
+        expected_metadata=expected_metadata,
+    )
+
+
+def _evaluate_specific_ticker_report_document(
+    report_path: str,
+    payload: bytes,
+    *,
+    expected_sha256: str | None = None,
+    expected_metadata: str | None = None,
+) -> ContractResult:
+    """Pure document owner for ticker report validation.
+
+    The thin filesystem adapter ``evaluate_specific_ticker_report`` reads the
+    report and delegates here. Task 6.4's read-only seam passes preloaded bytes
+    from an ``ObservedReadSession``.
+    """
+    result = ContractResult()
     if expected_sha256 is not None and sha256_bytes(payload) != expected_sha256:
         result.fail(
             code="CURRENT_REPORT_HASH_DRIFT",
             message="registered report bytes do not match report_sha256",
-            path=relative,
+            path=report_path,
+        )
+        return result
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        result.fail(
+            code="CURRENT_REPORT_INVALID",
+            message=f"report is not valid UTF-8: {exc}",
+            path=report_path,
         )
         return result
     if expected_metadata is not None and not _has_exact_single_metadata_block(
-        payload.decode("utf-8"),
+        text,
         expected_metadata,
     ):
         result.fail(
             code="REVISIT_REPORT_METADATA_MISMATCH",
             message="report does not contain the exact derived revisit metadata block",
-            path=relative,
+            path=report_path,
         )
     profile = ContractProfile(mode="ticker", target="final_report")
-    for label in _missing_final_report_requirements(text, profile):
+    for label in _missing_final_report_requirements(text.lower(), profile):
         result.fail(
             code=f"FINAL_REPORT_MISSING_{label}",
             message=f"final report is missing required area: {label.lower().replace('_', ' ')}",
-            path=relative,
+            path=report_path,
             evidence=", ".join(TICKER_REPORT_REQUIREMENTS[label]),
         )
     return result
@@ -251,181 +286,15 @@ def _check_revisit_ticker_mode(
 def evaluate_revisit_report(
     workspace: Path | str,
     cycle_id: str,
-    require_candidate: bool = False,
 ) -> ContractResult:
-    del require_candidate
-    root = Path(workspace)
-    result = ContractResult()
-    if not _check_revisit_ticker_mode(root, result):
-        return result
-    try:
-        pointer = load_pointer(root)
-        cycle = load_cycle(root, cycle_id)
-        registry, _ = read_registry_snapshot(root)
-        ledger_text = (root / "evidence_ledger.md").read_text(encoding="utf-8")
-    except (OSError, ValueError, RevisitContractError) as exc:
-        message = str(exc)
-        code = (
-            "REVISIT_CLAIM_SUPPORT_FORBIDDEN"
-            if "cannot be used as positive support" in message
-            else "REVISIT_CYCLE_MALFORMED"
-        )
-        result.fail(
-            code=code,
-            message=message,
-            path=f"revisit_cycles/{cycle_id}.json",
-        )
-        return result
+    """Compatibility adapter for the read-only readiness seam.
 
-    _check_revisit_intake_authorities(root, cycle, result)
+    Task 6.4 unifies all revisit readiness evaluation under
+    ``evaluate_revisit_readiness``; this named-selection wrapper delegates there.
+    """
+    from .revisit_readiness import evaluate_revisit_readiness
 
-    current = pointer["current_revision"]
-    base = cycle["intake"]["base_revision"]
-    expected_base = (
-        {
-            "revision_id": current["revision_id"],
-            "report_path": current["report_path"],
-            "report_sha256": current["report_sha256"],
-            "action_class": current["action_class"],
-        }
-        if current is not None
-        else None
-    )
-    base_drift = base != expected_base
-    if current is not None:
-        try:
-            relative, payload, _ = read_specific_markdown_report(
-                root, current["report_path"]
-            )
-            base_drift = base_drift or (
-                relative != current["report_path"]
-                or sha256_bytes(payload) != current["report_sha256"]
-            )
-        except (OSError, ValueError, RevisitContractError):
-            base_drift = True
-    if base_drift:
-        result.fail(
-            code="REVISIT_BASE_REPORT_DRIFT",
-            message="cycle base revision or current report bytes differ from the registered pointer",
-            path="cycle.intake.base_revision",
-        )
-
-    source_evaluation = evaluate_index(root)
-    if (root / SOURCE_INDEX_FILENAME).exists():
-        _append_source_cache_evaluation(result, source_evaluation)
-    source_ids = {str(record["source_id"]) for record in source_evaluation.records}
-    source_context_valid = not source_evaluation.issues
-    for trigger_index, trigger in enumerate(cycle["intake"]["triggers"]):
-        for reference_index, reference in enumerate(trigger["evidence_refs"]):
-            if _revisit_evidence_ref_valid(
-                root,
-                reference,
-                source_ids=source_ids,
-                source_context_valid=source_context_valid,
-            ):
-                continue
-            result.fail(
-                code="REVISIT_TRIGGER_EVIDENCE_MISSING",
-                message="fired trigger evidence reference is not currently valid",
-                path=(
-                    f"cycle.intake.triggers[{trigger_index}]"
-                    f".evidence_refs[{reference_index}]"
-                ),
-                evidence=trigger["trigger_id"],
-            )
-
-    for issue in derive_claim_issues(cycle):
-        result.fail(
-            code=issue.code,
-            message=issue.message,
-            path=issue.path,
-            evidence=issue.evidence,
-        )
-    if cycle["decision_assessment"] is None and not any(
-        issue.code == "REVISIT_CLAIM_UNRESOLVED" for issue in result.failures
-    ):
-        result.fail(
-            code="REVISIT_CYCLE_MALFORMED",
-            message="pre-report readiness requires a decision assessment",
-            path="cycle.decision_assessment",
-        )
-
-    revisit_profile = ContractProfile(mode="ticker", target="revisit_report")
-    dispatch_records = _check_dispatch_log(
-        root,
-        read_text_file(root / "research_workflow.md"),
-        revisit_profile,
-        result,
-    )
-    _check_worker_outputs(root, revisit_profile, result)
-    for issue in _derive_revisit_frontier_floor_issues(
-        root,
-        cycle,
-        registry,
-        ledger_text,
-        dispatch_records,
-    ):
-        result.fail(
-            code=issue.code,
-            message=issue.message,
-            path=issue.path,
-            evidence=issue.evidence,
-        )
-    for issue in derive_freshness_issues(cycle):
-        result.fail(
-            code=issue.code,
-            message=issue.message,
-            path=issue.path,
-            evidence=issue.evidence,
-        )
-    for resolution_index, resolution in enumerate(cycle["claim_resolutions"]):
-        status = resolution["status"]
-        if status in {"confirmed", "weakened"}:
-            for reference_index, reference in enumerate(
-                resolution["current_evidence_refs"]
-            ):
-                if _revisit_evidence_ref_valid(
-                    root,
-                    reference,
-                    source_ids=source_ids,
-                    source_context_valid=source_context_valid,
-                ):
-                    continue
-                result.fail(
-                    code="REVISIT_FRESHNESS_SUPPORT_INVALID",
-                    message=(
-                        "positive claim support evidence reference is not "
-                        "currently valid"
-                    ),
-                    path=(
-                        f"cycle.claim_resolutions[{resolution_index}]"
-                        f".current_evidence_refs[{reference_index}]"
-                    ),
-                    evidence=resolution["claim_id"],
-                )
-        if status in {"weakened", "refuted"}:
-            for reference_index, reference in enumerate(
-                resolution["counter_evidence_refs"]
-            ):
-                if _revisit_evidence_ref_valid(
-                    root,
-                    reference,
-                    source_ids=source_ids,
-                    source_context_valid=source_context_valid,
-                ):
-                    continue
-                result.fail(
-                    code="REVISIT_COUNTER_EVIDENCE_INVALID",
-                    message=(
-                        "claim counter-evidence reference is not currently valid"
-                    ),
-                    path=(
-                        f"cycle.claim_resolutions[{resolution_index}]"
-                        f".counter_evidence_refs[{reference_index}]"
-                    ),
-                    evidence=resolution["claim_id"],
-                )
-    return result
+    return evaluate_revisit_readiness(workspace, cycle_id)
 
 
 def _check_revisit_intake_authorities(
@@ -535,45 +404,10 @@ def _revisit_evidence_ref_valid(
 
 
 def _evaluate_discovered_revisit_report(workspace: Path) -> ContractResult:
-    result = ContractResult()
-    if not _check_revisit_ticker_mode(workspace, result):
-        return result
-    try:
-        pointer = load_pointer(workspace)
-        cycles = [
-            load_cycle(workspace, cycle_id)
-            for cycle_id in list_cycle_ids(workspace)
-        ]
-        history = evaluate_history(pointer, cycles)
-    except (OSError, ValueError, RevisitContractError) as exc:
-        result.fail(
-            code="REVISIT_CYCLE_MALFORMED",
-            message=str(exc),
-            path="revisit_contract.json",
-        )
-        return result
-    if history.issues:
-        for issue in history.issues:
-            result.fail(
-                code="REVISIT_CYCLE_MALFORMED",
-                message=issue.message,
-                path=issue.path,
-                evidence=issue.evidence,
-            )
-        return result
-    eligible = (
-        *history.nonterminal_cycle_ids,
-        *history.completed_unpublished_cycle_ids,
-    )
-    if len(eligible) != 1:
-        result.fail(
-            code="REVISIT_CYCLE_MALFORMED",
-            message="revisit_report requires exactly one active, ready, or completed-unpublished cycle",
-            path="revisit_cycles",
-            evidence=", ".join(eligible),
-        )
-        return result
-    return evaluate_revisit_report(workspace, eligible[0])
+    """Adapter: profile-target discovery now uses the unified read-only seam."""
+    from .revisit_readiness import evaluate_revisit_readiness
+
+    return evaluate_revisit_readiness(workspace)
 
 
 def _has_exact_single_metadata_block(report_text: str, expected_metadata: str) -> bool:
@@ -583,7 +417,9 @@ def _has_exact_single_metadata_block(report_text: str, expected_metadata: str) -
 def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> ContractResult:
     workspace = Path(workspace_path)
     if profile.target == "revisit_report":
-        return _evaluate_discovered_revisit_report(workspace)
+        from .revisit_readiness import evaluate_revisit_readiness
+
+        return evaluate_revisit_readiness(workspace)
     result = ContractResult()
     state = _check_core_workspace_files(workspace, result)
     workflow_text = read_text_file(workspace / "research_workflow.md")
@@ -703,6 +539,20 @@ def _check_state_workflow_consistency(
     workflow_text: str | None,
     result: ContractResult,
 ) -> None:
+    _check_state_workflow_documents(state, workflow_text, result)
+
+
+def _check_state_workflow_documents(
+    state: dict | None,
+    workflow_text: str | None,
+    result: ContractResult,
+) -> None:
+    """Pure document owner: state/workflow stage consistency.
+
+    The filesystem adapter ``_check_state_workflow_consistency`` passes the
+    already-loaded state and workflow text; Task 6.4's read-only seam passes
+    facts preloaded by ``ObservedReadSession``.
+    """
     if state is None or workflow_text is None:
         return
     statuses = parse_stage_progress(workflow_text)
@@ -742,27 +592,37 @@ def _valid_search_coverage(workspace: Path) -> tuple[set[str], bool]:
     per-loop coverage so a workspace with loop_count=3 and only a loop_1 record
     is rejected (SEARCH_LOG_LOOP_COVERAGE_MISSING).
     """
-    loop_ids: set[str] = set()
-    has_any_valid = False
     if not (workspace / "search_log.jsonl").exists():
-        return loop_ids, has_any_valid
+        return set(), False
     try:
-        for _line_number, record in iter_jsonl_records(workspace / "search_log.jsonl"):
-            status = str(record.get("result_status", "")).strip().lower()
-            valid = (
-                status == RESULT_STATUS_COMPLETED
-                and _has_completed_search_record_shape(record)
-            ) or (
-                status == RESULT_STATUS_DEGRADED
-                and _has_degraded_search_record_shape(record)
-            )
-            if valid:
-                has_any_valid = True
-                loop_id = record.get("loop_id")
-                if loop_id:
-                    loop_ids.add(str(loop_id))
+        records = tuple(
+            record for _line_number, record in iter_jsonl_records(workspace / "search_log.jsonl")
+        )
     except (json.JSONDecodeError, ValueError):
         return set(), False
+    return _search_facts_from_records(records)
+
+
+def _search_facts_from_records(
+    records: tuple[dict, ...],
+) -> tuple[set[str], bool]:
+    """Pure fact owner: derive valid search loop coverage from parsed records."""
+    loop_ids: set[str] = set()
+    has_any_valid = False
+    for record in records:
+        status = str(record.get("result_status", "")).strip().lower()
+        valid = (
+            status == RESULT_STATUS_COMPLETED
+            and _has_completed_search_record_shape(record)
+        ) or (
+            status == RESULT_STATUS_DEGRADED
+            and _has_degraded_search_record_shape(record)
+        )
+        if valid:
+            has_any_valid = True
+            loop_id = record.get("loop_id")
+            if loop_id:
+                loop_ids.add(str(loop_id))
     return loop_ids, has_any_valid
 
 
@@ -792,6 +652,34 @@ def _derive_revisit_frontier_floor_issues(
     ledger_text: str,
     dispatch_records: list[dict],
 ) -> tuple[RevisitIssue, ...]:
+    """Filesystem adapter: derives search-coverage facts, then delegates.
+
+    Task 6.4's read-only seam passes preloaded facts to
+    ``_derive_revisit_frontier_floor_issues_from_facts``.
+    """
+    covered_search_loops, _ = _valid_search_coverage(workspace)
+    return _derive_revisit_frontier_floor_issues_from_facts(
+        cycle=cycle,
+        registry=registry,
+        ledger_text=ledger_text,
+        dispatch_records=tuple(dispatch_records),
+        covered_search_loops=frozenset(covered_search_loops),
+    )
+
+
+def _derive_revisit_frontier_floor_issues_from_facts(
+    *,
+    cycle: dict,
+    registry: dict,
+    ledger_text: str,
+    dispatch_records: tuple[dict, ...],
+    covered_search_loops: frozenset[str],
+) -> tuple[RevisitIssue, ...]:
+    """Pure fact owner: revisit frontier research-floor requirements.
+
+    Expects a validated registry and immutable preloaded facts. The filesystem
+    adapter above validates the registry and derives ``covered_search_loops``.
+    """
     validate_registry(registry)
     try:
         live_loop_counts = derive_loop_counts(ledger_text, registry)
@@ -824,7 +712,6 @@ def _derive_revisit_frontier_floor_issues(
             (int(match.group("loop")), match.group("frontier_id"))
         )
 
-    covered_search_loops, _ = _valid_search_coverage(workspace)
     boundary = cycle["intake"]["workspace_boundary"][
         "max_existing_loop_number"
     ]
@@ -907,8 +794,7 @@ def _derive_revisit_frontier_floor_issues(
             missing_role = tuple(
                 loop_id
                 for loop_id in loop_ids
-                if not _has_exact_revisit_role_delivery(
-                    workspace,
+                if not _has_exact_revisit_role_delivery_from_facts(
                     dispatch_records,
                     loop_id,
                     role_slug,
@@ -998,17 +884,28 @@ def _has_exact_revisit_role_delivery(
     loop_id: str,
     required_role_slug: str,
 ) -> bool:
+    """Filesystem adapter retained for ordinary-target callers."""
+    return _has_exact_revisit_role_delivery_from_facts(
+        tuple(records), loop_id, required_role_slug
+    )
+
+
+def _has_exact_revisit_role_delivery_from_facts(
+    records: tuple[dict, ...],
+    loop_id: str,
+    required_role_slug: str,
+) -> bool:
+    """Pure fact owner: does a delivered dispatch record match role+loop?"""
     for record in records:
         if str(record.get("loop_id", "")) != loop_id:
             continue
         if not _dispatch_record_counts_as_delivery(record):
             continue
-        normalized_path = _normalize_delivery_path(
-            workspace, record.get("delivery_path", "")
+        normalized_path = _normalize_delivery_path_from_facts(
+            record.get("delivery_path", "")
         )
         if (
             normalized_path is None
-            or not (workspace / normalized_path).is_file()
             or _dispatch_role_delivery_issue(record, normalized_path, "ticker")
             is not None
         ):
@@ -1022,6 +919,28 @@ def _has_exact_revisit_role_delivery(
         if role_slug == required_role_slug:
             return True
     return False
+
+
+def _normalize_delivery_path_from_facts(delivery_path) -> str | None:
+    """Normalize a delivery_path without filesystem access.
+
+    Mirrors ``_normalize_delivery_path`` for already-resolved relative POSIX
+    paths. Rejects absolute paths and paths escaping the workspace.
+    """
+    raw = str(delivery_path)
+    try:
+        candidate = Path(raw)
+    except (ValueError, TypeError):
+        return None
+    if candidate.is_absolute():
+        return None
+    parts = candidate.parts
+    if ".." in parts:
+        return None
+    normalized = candidate.as_posix()
+    if normalized in {"", "."}:
+        return None
+    return normalized
 
 
 def _has_completed_search_record_shape(record: dict) -> bool:
@@ -1121,30 +1040,103 @@ def _check_dispatch_log(
     profile: ContractProfile,
     result: ContractResult,
 ) -> list[dict]:
-    worker_outputs = find_worker_outputs(workspace)
-    workflow_claims_delivery = _workflow_claims_subagent_delivery(workflow_text)
+    """Filesystem adapter: loads dispatch records and worker-output facts.
+
+    Task 6.4's read-only seam passes preloaded facts to
+    ``_check_dispatch_documents``.
+    """
+    worker_output_paths = tuple(
+        path.relative_to(workspace).as_posix()
+        for path in find_worker_outputs(workspace)
+    )
     dispatch_path = workspace / "dispatch_log.jsonl"
     if not dispatch_path.exists():
-        if not worker_outputs and not workflow_claims_delivery:
-            return []
+        return list(
+            _check_dispatch_documents(
+                records=None,
+                workflow_text=workflow_text,
+                profile=profile,
+                worker_output_paths=worker_output_paths,
+                delivered_payloads=(),
+                result=result,
+            )
+        )
+    records = _read_dispatch_records(workspace, result)
+    if records is None:
+        return []
+    delivered_payloads: list[tuple[str, bytes | None]] = []
+    seen_delivered: set[str] = set()
+    for record in records:
+        if record.get("status") != "delivered":
+            continue
+        raw_path = record.get("delivery_path", "")
+        if not raw_path:
+            continue
+        normalized = _normalize_delivery_path(workspace, raw_path)
+        if normalized is None or normalized in seen_delivered:
+            continue
+        seen_delivered.add(normalized)
+        try:
+            payload = (workspace / normalized).read_bytes()
+        except OSError:
+            payload = None
+        delivered_payloads.append((normalized, payload))
+    return list(
+        _check_dispatch_documents(
+            records=tuple(records),
+            workflow_text=workflow_text,
+            profile=profile,
+            worker_output_paths=worker_output_paths,
+            delivered_payloads=tuple(delivered_payloads),
+            result=result,
+            workspace=workspace,
+        )
+    )
+
+
+def _check_dispatch_documents(
+    *,
+    records: tuple[dict, ...] | None,
+    workflow_text: str | None,
+    profile: ContractProfile,
+    worker_output_paths: tuple[str, ...],
+    delivered_payloads: tuple[tuple[str, bytes | None], ...],
+    result: ContractResult,
+    workspace: Path | None = None,
+) -> tuple[dict, ...]:
+    """Pure document owner: dispatch delivery semantics over preloaded facts.
+
+    ``records`` is the parsed dispatch_log.jsonl content, or ``None`` if the
+    log was missing or unparseable. ``delivered_payloads`` maps normalized
+    delivery paths to their bytes (``None`` if the file is absent) and is used
+    instead of filesystem existence checks.
+
+    ``workspace`` is used to normalize raw delivery paths. When omitted, only
+    already-relative POSIX paths are accepted.
+    """
+    _normalize = _normalize_delivery_path if workspace is not None else _normalize_delivery_path_from_facts
+    workflow_claims_delivery = _workflow_claims_subagent_delivery(workflow_text)
+    if records is None:
+        if not worker_output_paths and not workflow_claims_delivery:
+            return ()
         result.fail(
             code="DISPATCH_PROOF_MISSING" if workflow_claims_delivery else "DISPATCH_LOG_MISSING",
             message="worker outputs and workflow dispatch claims require dispatch_log.jsonl or approved degraded-mode records",
             path="dispatch_log.jsonl",
-            evidence=_dispatch_missing_evidence(worker_outputs, workflow_claims_delivery),
+            evidence=_dispatch_missing_evidence_from_facts(worker_output_paths, workflow_claims_delivery),
         )
-        return []
-    records = _read_dispatch_records(workspace, result)
-    if records is None:
-        return []
-    if workflow_claims_delivery and not any(_dispatch_record_counts_as_delivery(record) for record in records):
+        return ()
+    if workflow_claims_delivery and not any(
+        _dispatch_record_counts_as_delivery(record) for record in records
+    ):
         result.fail(
             code="DISPATCH_PROOF_MISSING",
             message="workflow Subagent Dispatch Log claims delivered subagent work without machine delivery proof",
             path="dispatch_log.jsonl",
             evidence="no delivered host/native subagent record or approved degraded delivery record",
         )
-    for duplicate_path, dispatch_ids in _duplicate_delivered_paths(workspace, records).items():
+    payload_by_path: dict[str, bytes | None] = dict(delivered_payloads)
+    for duplicate_path, dispatch_ids in _duplicate_delivered_paths(records, workspace=workspace).items():
         result.fail(
             code="DISPATCH_DELIVERY_PATH_DUPLICATE",
             message="delivered dispatch records must not reuse the same delivery_path",
@@ -1164,8 +1156,13 @@ def _check_dispatch_log(
                     evidence=", ".join(missing_fields),
                 )
             else:
-                normalized_delivery_path = _normalize_delivery_path(workspace, record.get("delivery_path", ""))
-                if normalized_delivery_path is None or not (workspace / normalized_delivery_path).is_file():
+                normalized_delivery_path = _normalize(
+                    record.get("delivery_path", "")
+                ) if workspace is None else _normalize(
+                    workspace, record.get("delivery_path", "")
+                )
+                payload = payload_by_path.get(normalized_delivery_path) if normalized_delivery_path else None
+                if normalized_delivery_path is None or payload is None:
                     result.fail(
                         code="DISPATCH_DELIVERY_MISSING",
                         message="delivered dispatch record points to a missing delivery_path",
@@ -1180,7 +1177,9 @@ def _check_dispatch_log(
                         evidence=mechanism,
                     )
                 else:
-                    role_issue = _dispatch_role_delivery_issue(record, normalized_delivery_path, profile.mode)
+                    role_issue = _dispatch_role_delivery_issue(
+                        record, normalized_delivery_path, profile.mode
+                    )
                     if role_issue is not None:
                         code, message, evidence = role_issue
                         result.fail(
@@ -1207,11 +1206,14 @@ def _check_dispatch_log(
         normalized_path
         for record in records
         if _dispatch_record_counts_as_delivery(record)
-        for normalized_path in [_normalize_delivery_path(workspace, record.get("delivery_path", ""))]
+        for normalized_path in [_normalize(
+            record.get("delivery_path", "")
+        ) if workspace is None else _normalize(
+            workspace, record.get("delivery_path", "")
+        )]
         if normalized_path is not None
     }
-    for output in worker_outputs:
-        rel = output.relative_to(workspace).as_posix()
+    for rel in worker_output_paths:
         if rel not in delivered_paths:
             result.fail(
                 code="WORKER_OUTPUT_WITHOUT_DISPATCH",
@@ -1220,6 +1222,55 @@ def _check_dispatch_log(
                 evidence="dispatch_log.jsonl delivery_path mismatch",
             )
     return records
+
+
+def _duplicate_delivered_paths(
+    records: tuple[dict, ...],
+    *,
+    workspace: Path | None = None,
+) -> dict[str, list[str]]:
+    _normalize = _normalize_delivery_path if workspace is not None else _normalize_delivery_path_from_facts
+    dispatch_ids_by_path: dict[str, list[str]] = {}
+    for record in records:
+        if record.get("status") != "delivered":
+            continue
+        if not record.get("delivery_path"):
+            continue
+        normalized_path = (
+            _normalize(record.get("delivery_path", ""))
+            if workspace is None
+            else _normalize(workspace, record.get("delivery_path", ""))
+        )
+        if normalized_path is None:
+            continue
+        dispatch_ids_by_path.setdefault(normalized_path, []).append(str(record.get("dispatch_id", "")))
+    return {
+        path: dispatch_ids
+        for path, dispatch_ids in dispatch_ids_by_path.items()
+        if len(dispatch_ids) > 1
+    }
+
+
+def _dispatch_missing_evidence(
+    worker_outputs: list[Path], workflow_claims_delivery: bool
+) -> str:
+    evidence = []
+    if worker_outputs:
+        evidence.append(f"{len(worker_outputs)} worker output file(s)")
+    if workflow_claims_delivery:
+        evidence.append("research_workflow.md Subagent Dispatch Log delivered row")
+    return "; ".join(evidence)
+
+
+def _dispatch_missing_evidence_from_facts(
+    worker_output_paths: tuple[str, ...], workflow_claims_delivery: bool
+) -> str:
+    evidence = []
+    if worker_output_paths:
+        evidence.append(f"{len(worker_output_paths)} worker output file(s)")
+    if workflow_claims_delivery:
+        evidence.append("research_workflow.md Subagent Dispatch Log delivered row")
+    return "; ".join(evidence)
 
 
 def _normalize_delivery_path(workspace: Path, delivery_path) -> str | None:
@@ -1266,39 +1317,30 @@ def _dispatch_role_delivery_issue(
     return None
 
 
-def _duplicate_delivered_paths(workspace: Path, records: list[dict]) -> dict[str, list[str]]:
-    dispatch_ids_by_path: dict[str, list[str]] = {}
-    for record in records:
-        if record.get("status") != "delivered":
-            continue
-        if not record.get("delivery_path"):
-            continue
-        normalized_path = _normalize_delivery_path(workspace, record.get("delivery_path", ""))
-        if normalized_path is None:
-            continue
-        dispatch_ids_by_path.setdefault(normalized_path, []).append(str(record.get("dispatch_id", "")))
-    return {
-        path: dispatch_ids
-        for path, dispatch_ids in dispatch_ids_by_path.items()
-        if len(dispatch_ids) > 1
-    }
-
-
 def _delivered_roles_by_path(workspace: Path, profile_mode: str) -> dict[str, str]:
+    """Filesystem adapter retained for ordinary-target callers."""
     dispatch_path = workspace / "dispatch_log.jsonl"
     if not dispatch_path.exists():
         return {}
     try:
-        records = [record for _line_number, record in iter_jsonl_records(dispatch_path)]
+        records = tuple(
+            record for _line_number, record in iter_jsonl_records(dispatch_path)
+        )
     except (json.JSONDecodeError, ValueError):
         return {}
+    return _delivered_roles_by_path_from_facts(records, profile_mode)
 
+
+def _delivered_roles_by_path_from_facts(
+    records: tuple[dict, ...], profile_mode: str
+) -> dict[str, str]:
+    """Pure fact owner: map delivered paths to normalized role slugs."""
     roles_by_path: dict[str, str] = {}
     seen_paths: set[str] = set()
     for record in records:
         if not _dispatch_record_counts_as_delivery(record):
             continue
-        normalized_path = _normalize_delivery_path(workspace, record.get("delivery_path", ""))
+        normalized_path = _normalize_delivery_path_from_facts(record.get("delivery_path", ""))
         if normalized_path is None:
             continue
         if normalized_path in seen_paths:
@@ -1394,12 +1436,39 @@ def _missing_dispatch_delivery_fields(record: dict) -> list[str]:
 
 
 def _check_worker_outputs(workspace: Path, profile: ContractProfile, result: ContractResult) -> None:
+    """Filesystem adapter: loads worker-output texts and delivered roles.
+
+    Task 6.4's read-only seam passes preloaded facts to
+    ``_check_worker_output_documents``.
+    """
     delivered_roles = _delivered_roles_by_path(workspace, profile.mode)
+    outputs: list[tuple[str, str]] = []
     for path in find_worker_outputs(workspace):
         rel = path.relative_to(workspace).as_posix()
         text = path.read_text(encoding="utf-8")
+        outputs.append((rel, text))
+    _check_worker_output_documents(
+        outputs=tuple(outputs),
+        delivered_roles=tuple(delivered_roles.items()),
+        registered_source_ids=registered_source_ids(workspace),
+        profile=profile,
+        result=result,
+    )
+
+
+def _check_worker_output_documents(
+    *,
+    outputs: tuple[tuple[str, str], ...],
+    delivered_roles: tuple[tuple[str, str], ...],
+    registered_source_ids: frozenset[str],
+    profile: ContractProfile,
+    result: ContractResult,
+) -> None:
+    """Pure document owner: worker-output semantics over preloaded facts."""
+    delivered_roles_map = dict(delivered_roles)
+    for rel, text in outputs:
         candidate_roles = _candidate_worker_roles_for_output(rel)
-        role = _worker_role_for_output(rel, delivered_roles, candidate_roles)
+        role = _worker_role_for_output(rel, delivered_roles_map, candidate_roles)
 
         if not any(
             has_required_output_marker(text, marker)
@@ -1410,8 +1479,8 @@ def _check_worker_outputs(workspace: Path, profile: ContractProfile, result: Con
                 message="worker output must declare Method cards loaded",
                 path=rel,
             )
-        has_trace = has_source_trace(text, candidate_roles[0]) or has_registered_source_id_reference(
-            workspace, text
+        has_trace = has_source_trace(text, candidate_roles[0]) or _has_registered_source_id_reference_from_facts(
+            text, registered_source_ids
         )
         if not has_trace:
             if _requires_source_trace(role, candidate_roles):
@@ -1436,6 +1505,16 @@ def _check_worker_outputs(workspace: Path, profile: ContractProfile, result: Con
                     message=issue.message,
                     path=rel,
                 )
+
+
+def _has_registered_source_id_reference_from_facts(
+    text: str, registered_source_ids: frozenset[str]
+) -> bool:
+    """Pure fact owner: source-cache trace without filesystem access."""
+    cited = set(source_ids_in_text(text))
+    if not cited:
+        return False
+    return bool(cited & registered_source_ids)
 
 
 def _candidate_worker_roles_for_output(rel: str):

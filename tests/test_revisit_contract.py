@@ -5503,14 +5503,12 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             )
             return workspace, cycle_id
 
-        # Task 6.2 strict registry validation now rejects these incoherent
-        # review/lifecycle rows at load time, surfacing as
-        # REVISIT_CYCLE_MALFORMED (evaluator path) before the revisit review
-        # floor check runs.
+        # Task 6.4 routes the canonical registry through ObservedReadSession and
+        # maps LifecycleError to REVISIT_FRONTIER_REGISTRY_MALFORMED.
         self.assert_revisit_failure(
             make_workspace,
-            "REVISIT_CYCLE_MALFORMED",
-            expected_path="revisit_cycles/RC-0001.json",
+            "REVISIT_FRONTIER_REGISTRY_MALFORMED",
+            expected_path="frontier_registry.json",
         )
 
     def test_revisit_rejects_review_without_matching_lifecycle_transition(self):
@@ -5701,14 +5699,12 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             )
             return workspace, cycle_id
 
-        # Task 6.2 strict registry validation now rejects the decreasing
-        # lifecycle timestamps at load time, surfacing as
-        # REVISIT_CYCLE_MALFORMED (evaluator path) before the revisit binding
-        # check runs.
+        # Task 6.4 routes the canonical registry through ObservedReadSession and
+        # maps LifecycleError to REVISIT_FRONTIER_REGISTRY_MALFORMED.
         self.assert_revisit_failure(
             make_workspace,
-            "REVISIT_CYCLE_MALFORMED",
-            expected_path="revisit_cycles/RC-0001.json",
+            "REVISIT_FRONTIER_REGISTRY_MALFORMED",
+            expected_path="frontier_registry.json",
         )
 
     def test_added_binding_rejects_decreasing_pre_binding_timestamps(self):
@@ -5736,14 +5732,12 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             )
             return workspace, cycle_id
 
-        # Task 6.2 strict registry validation now rejects the decreasing
-        # lifecycle timestamps at load time, surfacing as
-        # REVISIT_CYCLE_MALFORMED (evaluator path) before the revisit binding
-        # check runs.
+        # Task 6.4 routes the canonical registry through ObservedReadSession and
+        # maps LifecycleError to REVISIT_FRONTIER_REGISTRY_MALFORMED.
         self.assert_revisit_failure(
             make_workspace,
-            "REVISIT_CYCLE_MALFORMED",
-            expected_path="revisit_cycles/RC-0001.json",
+            "REVISIT_FRONTIER_REGISTRY_MALFORMED",
+            expected_path="frontier_registry.json",
         )
 
     def assert_bound_at_state_drift_rejected(self, make_workspace) -> None:
@@ -5840,7 +5834,7 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             before = snapshot_tree(workspace)
 
             result = sofa_evaluate.evaluate_revisit_report(
-                workspace, cycle_id, require_candidate=False
+                workspace, cycle_id
             )
 
             self.assertTrue(
@@ -6136,15 +6130,11 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                     result = evaluate(workspace, cycle_id)
 
                     self.assertFalse(result.passed)
-                    # Task 6.2 strict registry validation now rejects these
-                    # incoherent lifecycle rows at load time, surfacing as
-                    # REVISIT_CYCLE_MALFORMED before the revisit binding
-                    # history-drift check runs. The timestamp drift yields a
-                    # "ts must be non-decreasing" message and the
-                    # preceding_state drift yields a "has no matching
-                    # lifecycle transition" message, both under this code.
+                    # Task 6.4 routes the canonical registry through
+                    # ObservedReadSession and maps LifecycleError to
+                    # REVISIT_FRONTIER_REGISTRY_MALFORMED.
                     self.assertIn(
-                        "REVISIT_CYCLE_MALFORMED",
+                        "REVISIT_FRONTIER_REGISTRY_MALFORMED",
                         [issue.code for issue in result.failures],
                     )
 
