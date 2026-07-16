@@ -61,7 +61,10 @@ from sofa_contract.evaluate import (
     evaluate_revisit_report,
     evaluate_specific_ticker_report,
 )
-from sofa_contract.workspace import read_specific_markdown_report
+from sofa_contract.workspace import (
+    find_worker_outputs,
+    read_specific_markdown_report,
+)
 
 
 def _configure_utf8_stdio() -> None:
@@ -526,6 +529,7 @@ def _read_dispatch_delivery_generation(
     record: dict,
     *,
     strict: bool,
+    missing_is_error: bool = False,
 ) -> _AuthorityGeneration | None:
     dispatch_id = str(record.get("dispatch_id", ""))
     raw_delivery = record.get("delivery_path")
@@ -557,7 +561,7 @@ def _read_dispatch_delivery_generation(
             f"dispatch {dispatch_id} delivery path escapes workspace"
         ) from exc
     if not resolved.is_file():
-        if not strict:
+        if not strict and not missing_is_error:
             return None
         raise RevisitContractError(
             f"dispatch {dispatch_id} delivery path is missing or not a file: {relative}"
@@ -568,12 +572,11 @@ def _read_dispatch_delivery_generation(
 def _capture_dispatch_delivery_generations(
     workspace: Path,
 ) -> tuple[_AuthorityGeneration, ...]:
-    # This transaction layer captures existing targets only. The evaluator
-    # remains the sole owner of malformed, missing, or ineligible delivery
-    # verdicts, so invalid records are not reinterpreted here.
+    # The evaluator remains the sole owner of malformed or ineligible dispatch
+    # verdicts. This transaction layer binds the raw log, every named delivered
+    # target that could appear during evaluation, and every pre-existing worker
+    # output consumed by the global orphan-output check.
     dispatch_path = workspace / "dispatch_log.jsonl"
-    if not dispatch_path.is_file():
-        return ()
     dispatch_generation = _read_authority_generation(workspace, dispatch_path)
     records = _decode_dispatch_generation(dispatch_generation, strict=False)
     generations = [dispatch_generation]
@@ -585,12 +588,20 @@ def _capture_dispatch_delivery_generations(
             workspace,
             record,
             strict=False,
+            missing_is_error=True,
         )
         if (
             generation is None
             or generation.snapshot.lexical_path in seen_paths
         ):
             continue
+        seen_paths.add(generation.snapshot.lexical_path)
+        generations.append(generation)
+    for output_path in find_worker_outputs(workspace):
+        lexical = Path(output_path)
+        if lexical in seen_paths:
+            continue
+        generation = _read_authority_generation(workspace, lexical)
         seen_paths.add(generation.snapshot.lexical_path)
         generations.append(generation)
     for generation in generations:
@@ -1320,21 +1331,22 @@ def _command_check_in_transaction(
         _capture_dispatch_delivery_generations(workspace)
     )
     required_authority_paths = [
+        workspace / "state.json",
+        workspace / "frontier_registry.json",
+        workspace / "evidence_ledger.md",
+        workspace / "search_log.jsonl",
+        workspace / "research_workflow.md",
         workspace / cycle["intake"]["framing"]["path"],
         *(
             workspace / claim["source_ref"]["path"]
             for claim in cycle["intake"]["selected_claims"]
         ),
+        *(
+            workspace / reference["path"]
+            for reference in evidence_references
+            if reference.get("kind") == "artifact"
+        ),
     ]
-    authority_paths = [
-        workspace / "state.json",
-        workspace / "frontier_registry.json",
-        workspace / "evidence_ledger.md",
-        workspace / "search_log.jsonl",
-    ]
-    for reference in evidence_references:
-        if reference.get("kind") == "artifact":
-            authority_paths.append(workspace / reference["path"])
     seen_paths = {
         generation.snapshot.lexical_path
         for generation in authority_generations
@@ -1342,14 +1354,6 @@ def _command_check_in_transaction(
     for path in required_authority_paths:
         lexical = Path(path)
         if lexical in seen_paths:
-            continue
-        seen_paths.add(lexical)
-        authority_generations.append(
-            _read_authority_generation(workspace, lexical)
-        )
-    for path in authority_paths:
-        lexical = Path(path)
-        if lexical in seen_paths or not lexical.is_file():
             continue
         seen_paths.add(lexical)
         authority_generations.append(

@@ -386,22 +386,50 @@ def add_task6_frontier(
     return frontier_id
 
 
+def bind_task6_frontier(
+    workspace: Path,
+    cycle_id: str,
+    *,
+    frontier_id: str,
+    action: str,
+) -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        mock.patch.object(
+            revisit_cycle_cli,
+            "_utc_now_seconds",
+            return_value="2026-07-14T11:30:00Z",
+        ),
+        mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+        mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+    ):
+        result = revisit_cycle_cli.main(
+            [
+                str(workspace),
+                "bind-frontier",
+                cycle_id,
+                "--frontier",
+                frontier_id,
+                "--action",
+                action,
+                "--claim",
+                f"{cycle_id}-CL-01",
+                "--expected-evidence",
+                "Current qualification timing and counter-evidence.",
+            ]
+        )
+    if result != 0:
+        raise AssertionError(stderr.getvalue())
+
+
 def bind_task6_reactivated_frontier(workspace: Path, cycle_id: str) -> None:
-    result = run_revisit_cycle_cli(
+    bind_task6_frontier(
         workspace,
-        "bind-frontier",
         cycle_id,
-        "--frontier",
-        "F1",
-        "--action",
-        "reactivated",
-        "--claim",
-        f"{cycle_id}-CL-01",
-        "--expected-evidence",
-        "Current qualification timing and counter-evidence.",
+        frontier_id="F1",
+        action="reactivated",
     )
-    if result.returncode != 0:
-        raise AssertionError(result.stderr)
 
 
 def append_task6_loops(
@@ -424,6 +452,10 @@ def write_task6_search_and_dispatch(
     workspace: Path,
     loop_ids: tuple[str, ...],
 ) -> None:
+    (workspace / "research_workflow.md").write_text(
+        "# Research Workflow\n",
+        encoding="utf-8",
+    )
     search_records = [
         {
             "loop_id": loop_id,
@@ -533,21 +565,12 @@ def make_task6_ready_workspace(
 def make_task6_added_ready_workspace(root: Path) -> tuple[Path, str, str]:
     workspace, cycle_id = make_task6_binding_workspace(root)
     frontier_id = add_task6_frontier(workspace, initial_status="Active")
-    bound = run_revisit_cycle_cli(
+    bind_task6_frontier(
         workspace,
-        "bind-frontier",
         cycle_id,
-        "--frontier",
-        frontier_id,
-        "--action",
-        "added",
-        "--claim",
-        f"{cycle_id}-CL-01",
-        "--expected-evidence",
-        "Current qualification timing and counter-evidence.",
+        frontier_id=frontier_id,
+        action="added",
     )
-    if bound.returncode != 0:
-        raise AssertionError(bound.stderr)
     loop_ids = append_task6_loops(
         workspace,
         3,
@@ -621,6 +644,31 @@ def _finish_task6_ready_claim(
     )
     if assessed.returncode != 0:
         raise AssertionError(assessed.stderr)
+
+
+def move_task6_review_to_bound_at(
+    workspace: Path,
+    cycle_id: str,
+    frontier_id: str,
+) -> None:
+    cycle = revisit_contract.load_cycle(workspace, cycle_id)
+    binding = next(
+        row
+        for row in cycle["frontier_bindings"]
+        if row["frontier_id"] == frontier_id
+    )
+    registry_path = workspace / "frontier_registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    frontier = next(
+        row for row in registry["frontiers"] if row["id"] == frontier_id
+    )
+    if frontier["lifecycle"][-1]["to"] != "Continued":
+        raise AssertionError("Task 6 ready fixture must end with Continued")
+    frontier["lifecycle"][-1]["ts"] = binding["bound_at"]
+    registry_path.write_text(
+        json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def make_emergent_claim_request() -> dict:
@@ -5109,6 +5157,77 @@ class TestRevisitClaimBindingAndFreshnessFacts(unittest.TestCase):
 
 
 class TestRevisitPreReportEvaluation(unittest.TestCase):
+    def assert_bound_at_state_drift_rejected(self, make_workspace) -> None:
+        evaluators = (
+            (
+                "direct",
+                lambda workspace, cycle_id: sofa_evaluate.evaluate_revisit_report(
+                    workspace, cycle_id
+                ),
+            ),
+            (
+                "profile",
+                lambda workspace, _cycle_id: sofa_evaluate.evaluate_workspace(
+                    workspace,
+                    sofa_evaluate.ContractProfile(
+                        mode="ticker", target="revisit_report"
+                    ),
+                ),
+            ),
+        )
+        for evaluator_name, evaluate in evaluators:
+            with (
+                self.subTest(evaluator=evaluator_name),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                workspace, cycle_id, frontier_id = make_workspace(
+                    Path(temp_dir)
+                )
+                move_task6_review_to_bound_at(
+                    workspace,
+                    cycle_id,
+                    frontier_id,
+                )
+
+                result = evaluate(workspace, cycle_id)
+
+                self.assertFalse(result.passed)
+                self.assertIn(
+                    "REVISIT_FRONTIER_BINDING_INVALID",
+                    [issue.code for issue in result.failures],
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_workspace(Path(temp_dir))
+            move_task6_review_to_bound_at(
+                workspace,
+                cycle_id,
+                frontier_id,
+            )
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_cycle = cycle_path.read_bytes()
+            prior_mirror = mirror_path.read_bytes()
+
+            result = run_revisit_cycle_cli(workspace, "check", cycle_id)
+
+            self.assertEqual(1, result.returncode, result.stderr)
+            self.assertIn("REVISIT_FRONTIER_BINDING_INVALID", result.stderr)
+            self.assertEqual(prior_cycle, cycle_path.read_bytes())
+            self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    def test_reactivated_binding_rejects_non_active_state_at_bound_at(self):
+        def make_workspace(root: Path) -> tuple[Path, str, str]:
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            return workspace, cycle_id, "F1"
+
+        self.assert_bound_at_state_drift_rejected(make_workspace)
+
+    def test_added_binding_rejects_non_active_or_new_state_at_bound_at(self):
+        self.assert_bound_at_state_drift_rejected(
+            make_task6_added_ready_workspace
+        )
+
     def test_revisit_report_profile_routes_to_cycle_relative_floor_verdict(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
@@ -5712,6 +5831,7 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
             bind_task6_reactivated_frontier(workspace, cycle_id)
+            write_task6_search_and_dispatch(workspace, ())
             before = snapshot_tree(workspace)
 
             result = run_revisit_cycle_cli(workspace, "check", cycle_id)
@@ -5808,6 +5928,349 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
             self.assertEqual(prior_cycle, cycle_path.read_bytes())
             self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    def assert_missing_authority_cannot_appear_during_evaluation(
+        self,
+        workspace: Path,
+        cycle_id: str,
+        authority_path: Path,
+    ) -> None:
+        authority_payload = authority_path.read_bytes()
+        authority_path.unlink()
+        cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+        mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+        prior_cycle = cycle_path.read_bytes()
+        prior_mirror = mirror_path.read_bytes()
+        real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+        evaluate_calls = 0
+
+        def restore_before_evaluate(*args, **kwargs):
+            nonlocal evaluate_calls
+            evaluate_calls += 1
+            authority_path.write_bytes(authority_payload)
+            return real_evaluate(*args, **kwargs)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                revisit_cycle_cli,
+                "evaluate_revisit_report",
+                side_effect=restore_before_evaluate,
+            ),
+            mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+            mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+        ):
+            result = revisit_cycle_cli.main(
+                [str(workspace), "check", cycle_id]
+            )
+
+        self.assertNotEqual(0, result, stderr.getvalue())
+        self.assertEqual(0, evaluate_calls)
+        self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+        self.assertFalse(authority_path.exists())
+        self.assertEqual(prior_cycle, cycle_path.read_bytes())
+        self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    def test_check_rejects_search_log_missing_to_appearance_without_cycle_writes(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            self.assert_missing_authority_cannot_appear_during_evaluation(
+                workspace,
+                cycle_id,
+                workspace / "search_log.jsonl",
+            )
+
+    def test_check_rejects_dispatch_log_missing_to_appearance_without_cycle_writes(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            self.assert_missing_authority_cannot_appear_during_evaluation(
+                workspace,
+                cycle_id,
+                workspace / "dispatch_log.jsonl",
+            )
+
+    def test_check_rejects_delivered_target_missing_to_appearance_without_cycle_writes(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            self.assert_missing_authority_cannot_appear_during_evaluation(
+                workspace,
+                cycle_id,
+                workspace / "scouts" / "loop_8_scout.md",
+            )
+
+    def test_check_rejects_core_authority_missing_to_appearance_without_cycle_writes(
+        self,
+    ):
+        for relative_path in (
+            "frontier_registry.json",
+            "evidence_ledger.md",
+            "research_workflow.md",
+        ):
+            with (
+                self.subTest(relative_path=relative_path),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+                self.assert_missing_authority_cannot_appear_during_evaluation(
+                    workspace,
+                    cycle_id,
+                    workspace / relative_path,
+                )
+
+    def test_check_rejects_artifact_ref_missing_to_appearance_without_cycle_writes(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact_path = root / "workspace" / "evidence" / "current.md"
+            artifact_path.parent.mkdir(parents=True)
+            artifact_payload = b"Current cycle evidence.\n"
+            artifact_path.write_bytes(artifact_payload)
+            workspace, cycle_id = make_task6_ready_workspace(
+                root,
+                current_ref={
+                    "kind": "artifact",
+                    "path": "evidence/current.md",
+                    "sha256": hashlib.sha256(artifact_payload).hexdigest(),
+                    "locator": "Current cycle evidence",
+                    "checked_at": "2026-07-14T12:00:00Z",
+                },
+            )
+            self.assert_missing_authority_cannot_appear_during_evaluation(
+                workspace,
+                cycle_id,
+                artifact_path,
+            )
+
+    def test_check_rejects_preexisting_orphan_output_disappearance_without_cycle_writes(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            orphan_path = workspace / "scouts" / "orphan.md"
+            orphan_path.write_text(
+                "# Orphan worker output\n",
+                encoding="utf-8",
+            )
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_cycle = cycle_path.read_bytes()
+            prior_mirror = mirror_path.read_bytes()
+            real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+            evaluate_calls = 0
+
+            def remove_before_evaluate(*args, **kwargs):
+                nonlocal evaluate_calls
+                evaluate_calls += 1
+                orphan_path.unlink()
+                return real_evaluate(*args, **kwargs)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_revisit_report",
+                    side_effect=remove_before_evaluate,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [str(workspace), "check", cycle_id]
+                )
+
+            self.assertNotEqual(0, result, stderr.getvalue())
+            self.assertEqual(1, evaluate_calls)
+            self.assertRegex(stderr.getvalue(), "authority disappeared")
+            self.assertNotIn("REVISIT CYCLE READY", stdout.getvalue())
+            self.assertFalse(orphan_path.exists())
+            self.assertEqual(prior_cycle, cycle_path.read_bytes())
+            self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
+    def test_check_binds_complete_pre_evaluation_authority_set_once_in_order(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact_path = root / "workspace" / "evidence" / "current.md"
+            artifact_path.parent.mkdir(parents=True)
+            artifact_payload = b"Current cycle evidence.\n"
+            artifact_path.write_bytes(artifact_payload)
+            current_ref = {
+                "kind": "artifact",
+                "path": "evidence/current.md",
+                "sha256": hashlib.sha256(artifact_payload).hexdigest(),
+                "locator": "Current cycle evidence",
+                "checked_at": "2026-07-14T12:00:00Z",
+            }
+            workspace, cycle_id = make_task6_ready_workspace(
+                root,
+                current_ref=current_ref,
+            )
+            cycle_relative = f"revisit_cycles/{cycle_id}.json"
+            prior_cycle_sha256 = revisit_contract.sha256_file(
+                workspace / cycle_relative
+            )
+            delivered_targets = {
+                (Path(directory) / f"loop_{loop_number}_{suffix}.md").as_posix()
+                for loop_number in range(8, 11)
+                for directory, suffix in (
+                    ("scouts", "scout"),
+                    ("challenges", "challenge"),
+                )
+            }
+            expected_captures = {
+                revisit_contract.POINTER_FILENAME,
+                "reports/final.md",
+                cycle_relative,
+                "sources_index.jsonl",
+                "sources/src-001.md",
+                "dispatch_log.jsonl",
+                "state.json",
+                "frontier_registry.json",
+                "evidence_ledger.md",
+                "search_log.jsonl",
+                "research_workflow.md",
+                "framing_contract.json",
+                "claim_ledger.md",
+                "evidence/current.md",
+                *delivered_targets,
+            }
+            events = []
+            post_evaluation_checks = []
+            persisted_paths = []
+            persisted_expected_sha256 = None
+            real_read = revisit_cycle_cli._read_authority_generation
+            real_require = revisit_cycle_cli._require_authority_generation
+            real_require_snapshots = revisit_cycle_cli._require_snapshot_generations
+            real_evaluate = revisit_cycle_cli.evaluate_revisit_report
+            real_persist = revisit_cycle_cli.persist_cycle
+
+            def relative_path(snapshot):
+                return snapshot.lexical_path.relative_to(
+                    snapshot.workspace
+                ).as_posix()
+
+            def record_generation(snapshot_workspace, path):
+                generation = real_read(snapshot_workspace, path)
+                events.append(("capture", relative_path(generation.snapshot)))
+                return generation
+
+            def record_generation_check(generation, boundary):
+                if boundary == "after revisit report evaluation":
+                    checked_path = relative_path(generation.snapshot)
+                    post_evaluation_checks.append(checked_path)
+                    events.append(("post_evaluation_check", checked_path))
+                return real_require(generation, boundary)
+
+            def record_snapshot_checks(snapshots, boundary):
+                if boundary == "after revisit report evaluation":
+                    for snapshot in snapshots.values():
+                        checked_path = relative_path(snapshot)
+                        post_evaluation_checks.append(checked_path)
+                        events.append(("post_evaluation_check", checked_path))
+                return real_require_snapshots(snapshots, boundary)
+
+            def record_evaluate(*args, **kwargs):
+                events.append(("evaluate", cycle_id))
+                return real_evaluate(*args, **kwargs)
+
+            def record_persist(
+                snapshot_workspace,
+                cycle,
+                expected_sha256,
+                *,
+                authority_snapshots=None,
+            ):
+                nonlocal persisted_expected_sha256
+                persisted_expected_sha256 = expected_sha256
+                persisted_paths.extend(
+                    relative_path(snapshot)
+                    for snapshot in authority_snapshots or ()
+                )
+                events.append(("persist", cycle["cycle_id"]))
+                return real_persist(
+                    snapshot_workspace,
+                    cycle,
+                    expected_sha256,
+                    authority_snapshots=authority_snapshots,
+                )
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_read_authority_generation",
+                    side_effect=record_generation,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_require_authority_generation",
+                    side_effect=record_generation_check,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_require_snapshot_generations",
+                    side_effect=record_snapshot_checks,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_revisit_report",
+                    side_effect=record_evaluate,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "persist_cycle",
+                    side_effect=record_persist,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [str(workspace), "check", cycle_id]
+                )
+
+            self.assertEqual(0, result, stderr.getvalue())
+            capture_paths = [
+                path for event, path in events if event == "capture"
+            ]
+            self.assertEqual(expected_captures, set(capture_paths))
+            self.assertEqual(len(capture_paths), len(set(capture_paths)))
+            evaluate_index = events.index(("evaluate", cycle_id))
+            persist_index = events.index(("persist", cycle_id))
+            self.assertTrue(
+                all(
+                    index < evaluate_index
+                    for index, (event, _path) in enumerate(events)
+                    if event == "capture"
+                )
+            )
+            self.assertLess(evaluate_index, persist_index)
+            self.assertEqual(expected_captures, set(post_evaluation_checks))
+            self.assertEqual(
+                len(post_evaluation_checks),
+                len(set(post_evaluation_checks)),
+            )
+            self.assertTrue(
+                all(
+                    evaluate_index < index < persist_index
+                    for index, (event, _path) in enumerate(events)
+                    if event == "post_evaluation_check"
+                )
+            )
+            expected_persisted = expected_captures - {cycle_relative}
+            self.assertEqual(expected_persisted, set(persisted_paths))
+            self.assertEqual(len(persisted_paths), len(set(persisted_paths)))
+            self.assertEqual(prior_cycle_sha256, persisted_expected_sha256)
 
     def test_check_rejects_delivered_worker_path_drift_before_ready_persistence(self):
         with tempfile.TemporaryDirectory() as temp_dir:

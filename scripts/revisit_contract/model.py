@@ -895,25 +895,44 @@ def derive_frontier_binding_legality_issue(
 
     created_at = cycle["created_at"]
     bound_at = binding["bound_at"]
+    final_at_binding_index = None
+    after_binding = False
+    for index, transition in enumerate(lifecycle):
+        if (
+            not isinstance(transition, dict)
+            or not _is_utc_timestamp(transition.get("ts"))
+        ):
+            return invalid(
+                f"frontier {frontier_id} lifecycle transition {index + 1} "
+                "requires a valid UTC timestamp"
+            )
+        if transition["ts"] <= bound_at:
+            if after_binding:
+                return invalid(
+                    f"frontier {frontier_id} lifecycle order crosses "
+                    "the binding boundary"
+                )
+            final_at_binding_index = index
+        else:
+            after_binding = True
+    if final_at_binding_index is None:
+        return invalid(
+            f"frontier {frontier_id} has no lifecycle state at binding"
+        )
+
+    final_at_binding = lifecycle[final_at_binding_index]
     if binding["action"] == "reactivated":
-        active_indexes = [
-            index
-            for index, transition in enumerate(lifecycle)
-            if isinstance(transition, dict)
-            and transition.get("to") == "Active"
-            and _is_utc_timestamp(transition.get("ts"))
-            and created_at <= transition["ts"] <= bound_at
-        ]
-        if not active_indexes:
+        if (
+            final_at_binding.get("to") != "Active"
+            or final_at_binding["ts"] < created_at
+        ):
             return invalid(
                 f"reactivated frontier {frontier_id} requires a post-cycle "
-                "Active transition at or before binding"
+                "Active transition as the final state at binding"
             )
-        active_index = active_indexes[-1]
         if (
-            active_index == 0
-            or not isinstance(lifecycle[active_index - 1], dict)
-            or lifecycle[active_index - 1].get("to") != "Continued"
+            final_at_binding_index == 0
+            or lifecycle[final_at_binding_index - 1].get("to") != "Continued"
         ):
             return invalid(
                 f"reactivated frontier {frontier_id} must immediately follow "
@@ -937,6 +956,10 @@ def derive_frontier_binding_legality_issue(
         return invalid(
             f"added frontier {frontier_id} must begin at or after cycle creation "
             "and at or before binding"
+        )
+    if final_at_binding.get("to") not in {"New", "Active"}:
+        return invalid(
+            f"added frontier {frontier_id} must be New or Active at binding"
         )
     proposed_at_loop = frontier.get("proposed_at_loop")
     boundary = cycle["intake"]["workspace_boundary"][
