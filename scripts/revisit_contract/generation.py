@@ -203,7 +203,7 @@ def _walk_directory(
         for child in children:
             child_rel = f"{dir_relative}/{child.name}"
             child_target = _resolve_member_target(workspace, child_rel)
-            kind = _classify_entry(child_target)
+            kind = _classify_entry(workspace / child_rel)
             members.append(
                 ObservedEntry(
                     relative_path=child_rel,
@@ -330,7 +330,6 @@ class ObservedReadSession:
 
     def __init__(self, workspace: str | Path) -> None:
         self._workspace = Path(workspace).resolve()
-        self._file_cache: dict[str, bytes] = {}
         self._directory_cache: dict[tuple[str, bool], tuple[ObservedEntry, ...]] = {}
         # File/absent generations are keyed by normalized relative path; the
         # first observation for a path wins and is never overwritten.
@@ -354,8 +353,13 @@ class ObservedReadSession:
     def read_required(self, relative_path: str) -> bytes:
         self._ensure_open()
         relative = normalize_relative_path(relative_path)
-        if relative in self._file_cache:
-            return self._file_cache[relative]
+        observed = self._path_generations.get(relative)
+        if isinstance(observed, FileGeneration):
+            return observed.payload
+        if isinstance(observed, AbsentGeneration):
+            raise RevisitContractError(
+                f"required authority is missing: {relative}"
+            )
         resolved = _resolve_member_target(self._workspace, relative)
         try:
             payload = resolved.read_bytes()
@@ -364,7 +368,6 @@ class ObservedReadSession:
             raise RevisitContractError(
                 f"required authority is missing: {relative}"
             )
-        self._file_cache[relative] = payload
         self._record_path(
             relative,
             FileGeneration(
@@ -379,15 +382,17 @@ class ObservedReadSession:
     def read_optional(self, relative_path: str) -> bytes | None:
         self._ensure_open()
         relative = normalize_relative_path(relative_path)
-        if relative in self._file_cache:
-            return self._file_cache[relative]
+        observed = self._path_generations.get(relative)
+        if isinstance(observed, FileGeneration):
+            return observed.payload
+        if isinstance(observed, AbsentGeneration):
+            return None
         resolved = _resolve_member_target(self._workspace, relative)
         try:
             payload = resolved.read_bytes()
         except FileNotFoundError:
             self._record_path(relative, AbsentGeneration(relative_path=relative))
             return None
-        self._file_cache[relative] = payload
         self._record_path(
             relative,
             FileGeneration(
@@ -408,6 +413,13 @@ class ObservedReadSession:
     ) -> tuple[ObservedEntry, ...]:
         self._ensure_open()
         relative = normalize_relative_path(relative_path)
+        observed = self._path_generations.get(relative)
+        if isinstance(observed, AbsentGeneration):
+            if optional:
+                return ()
+            raise RevisitContractError(
+                f"required directory is missing: {relative}"
+            )
         cache_key = (relative, recursive)
         if cache_key in self._directory_cache:
             return self._directory_cache[cache_key]

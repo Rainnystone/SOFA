@@ -84,6 +84,26 @@ class TestObservedFileGeneration(_WorkspaceMixin, unittest.TestCase):
             closure.require_unchanged()
         self.assertEqual(ctx.exception.drift.relative_path, "ghost.txt")
 
+    def test_optional_absence_remains_first_observation_after_appearance(
+        self,
+    ) -> None:
+        session = ObservedReadSession(self.workspace)
+        self.assertIsNone(session.read_optional("ghost.txt"))
+
+        (self.workspace / "ghost.txt").write_bytes(b"appeared\n")
+
+        self.assertIsNone(session.read_optional("ghost.txt"))
+        with self.assertRaises(RevisitContractError) as missing:
+            session.read_required("ghost.txt")
+        self.assertIn(
+            "required authority is missing: ghost.txt",
+            str(missing.exception),
+        )
+
+        with self.assertRaises(AuthorityDriftError) as drift:
+            session.freeze().require_unchanged()
+        self.assertEqual(drift.exception.drift.relative_path, "ghost.txt")
+
     def test_optional_present_then_byte_drift(self) -> None:
         target = self.workspace / "opt.txt"
         target.write_bytes(b"one\n")
@@ -221,6 +241,30 @@ class TestObservedDirectoryGeneration(_WorkspaceMixin, unittest.TestCase):
             closure.require_unchanged()
         self.assertEqual(ctx.exception.drift.relative_path, "ghost")
 
+    def test_absence_is_shared_across_directory_recursion_modes(self) -> None:
+        session = ObservedReadSession(self.workspace)
+        self.assertEqual(
+            session.list_directory("ghost", recursive=False, optional=True), ()
+        )
+
+        ghost = self.workspace / "ghost"
+        ghost.mkdir()
+        (ghost / "x.txt").write_bytes(b"x\n")
+
+        self.assertEqual(
+            session.list_directory("ghost", recursive=True, optional=True), ()
+        )
+        with self.assertRaises(RevisitContractError) as missing:
+            session.list_directory("ghost", recursive=True)
+        self.assertIn(
+            "required directory is missing: ghost",
+            str(missing.exception),
+        )
+
+        with self.assertRaises(AuthorityDriftError) as drift:
+            session.freeze().require_unchanged()
+        self.assertEqual(drift.exception.drift.relative_path, "ghost")
+
     def test_required_absent_dir_records_tombstone_before_raising(self) -> None:
         session = ObservedReadSession(self.workspace)
         with self.assertRaises(RevisitContractError) as ctx:
@@ -293,6 +337,27 @@ class TestObservedDirectoryGeneration(_WorkspaceMixin, unittest.TestCase):
         os.symlink(target_b, link)
         with self.assertRaises(AuthorityDriftError):
             session.freeze().require_unchanged()
+
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
+    def test_recursive_listing_does_not_follow_directory_symlink_member(
+        self,
+    ) -> None:
+        d = self._make_dir()
+        real = d / "real"
+        real.mkdir()
+        (real / "deep.txt").write_bytes(b"deep\n")
+        link = d / "link"
+        os.symlink(real, link)
+
+        entries = ObservedReadSession(self.workspace).list_directory(
+            "d", recursive=True
+        )
+        by_path = {entry.relative_path: entry for entry in entries}
+
+        self.assertEqual(by_path["d/link"].kind, "other")
+        self.assertEqual(by_path["d/link"].resolved_target, real.resolve())
+        self.assertNotIn("d/link/deep.txt", by_path)
+        self.assertIn("d/real/deep.txt", by_path)
 
     def test_recursive_scope_observes_nested_members(self) -> None:
         d = self._make_dir()
