@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from workspace_contract import core_required_files, managed_block_for_name
@@ -661,67 +662,58 @@ def _derive_revisit_frontier_floor_issues(
     )
 
 
-def _derive_revisit_frontier_floor_issues_from_facts(
+@dataclass(frozen=True)
+class _RevisitFrontierBindingFacts:
+    path: str
+    binding_issue: RevisitIssue | None
+    progress_available: bool
+    loop_issue: RevisitIssue | None
+    search_issue: RevisitIssue | None
+    dispatch_issues: tuple[RevisitIssue, ...]
+    review_issue: RevisitIssue | None
+
+
+@dataclass(frozen=True)
+class _RevisitFrontierFacts:
+    preparation_issue: RevisitIssue | None
+    bindings: tuple[_RevisitFrontierBindingFacts, ...]
+    declared_binding_issues: tuple[RevisitIssue, ...]
+    claim_floor_issues: tuple[RevisitIssue, ...]
+
+
+def _prepare_revisit_frontier_facts(
     *,
     cycle: dict,
-    registry: dict,
-    ledger_text: str,
-    dispatch_records: tuple[dict, ...],
-    covered_search_loops: frozenset[str],
-) -> tuple[RevisitIssue, ...]:
-    """Pure fact owner: revisit frontier research-floor requirements.
-
-    Expects a validated registry and immutable preloaded facts. The filesystem
-    adapter above validates the registry and derives ``covered_search_loops``.
-    """
-    validate_registry(registry)
-    try:
-        live_loop_counts = derive_loop_counts(ledger_text, registry)
-    except ValueError as exc:
-        return (
-            RevisitIssue(
-                "REVISIT_FRONTIER_BINDING_INVALID",
-                "evidence_ledger.md",
-                str(exc),
-            ),
+    registry: dict | None,
+    ledger_text: str | None,
+    dispatch_records: tuple[dict, ...] | None,
+    covered_search_loops: frozenset[str] | None,
+) -> _RevisitFrontierFacts:
+    """Build one immutable frontier fact set for the four readiness owners."""
+    declared_binding_issues = derive_frontier_requirements(cycle)
+    if registry is None:
+        return _RevisitFrontierFacts(
+            preparation_issue=None,
+            bindings=(),
+            declared_binding_issues=declared_binding_issues,
+            claim_floor_issues=(),
         )
+
+    validate_registry(registry)
     frontiers = {
         frontier["id"]: frontier for frontier in registry["frontiers"]
     }
-    headers: list[tuple[int, str]] = []
-    for raw_line in ledger_text.splitlines():
-        line = raw_line.rstrip()
-        if not line.startswith("## Loop "):
-            continue
-        match = LOOP_HEADER_RE.fullmatch(line)
-        if match is None:
-            return (
-                RevisitIssue(
-                    "REVISIT_FRONTIER_BINDING_INVALID",
-                    "evidence_ledger.md",
-                    f"malformed loop header: {line}",
-                ),
-            )
-        headers.append(
-            (int(match.group("loop")), match.group("frontier_id"))
-        )
-
-    boundary = cycle["intake"]["workspace_boundary"][
-        "max_existing_loop_number"
-    ]
-    issues: list[RevisitIssue] = []
+    registry_issue_by_path: dict[str, RevisitIssue] = {}
     for index, binding in enumerate(cycle["frontier_bindings"]):
         path = f"cycle.frontier_bindings[{index}]"
         frontier_id = binding["frontier_id"]
         frontier = frontiers.get(frontier_id)
         if frontier is None:
-            issues.append(
-                RevisitIssue(
-                    "REVISIT_FRONTIER_BINDING_INVALID",
-                    path,
-                    "bound frontier is absent from the validated registry",
-                    frontier_id,
-                )
+            registry_issue_by_path[path] = RevisitIssue(
+                "REVISIT_FRONTIER_BINDING_INVALID",
+                path,
+                "bound frontier is absent from the validated registry",
+                frontier_id,
             )
             continue
         legality_issue = derive_frontier_binding_legality_issue(
@@ -731,8 +723,80 @@ def _derive_revisit_frontier_floor_issues_from_facts(
             path=path,
         )
         if legality_issue is not None:
-            issues.append(legality_issue)
+            registry_issue_by_path[path] = legality_issue
+
+    preparation_issue = None
+    progress_available = ledger_text is not None
+    live_loop_counts: dict[str, int] = {}
+    headers: list[tuple[int, str]] = []
+    if ledger_text is not None:
+        try:
+            live_loop_counts = derive_loop_counts(ledger_text, registry)
+        except ValueError as exc:
+            preparation_issue = RevisitIssue(
+                "REVISIT_FRONTIER_BINDING_INVALID",
+                "evidence_ledger.md",
+                str(exc),
+            )
+            progress_available = False
+        if progress_available:
+            for raw_line in ledger_text.splitlines():
+                line = raw_line.rstrip()
+                if not line.startswith("## Loop "):
+                    continue
+                match = LOOP_HEADER_RE.fullmatch(line)
+                if match is None:
+                    preparation_issue = RevisitIssue(
+                        "REVISIT_FRONTIER_BINDING_INVALID",
+                        "evidence_ledger.md",
+                        f"malformed loop header: {line}",
+                    )
+                    progress_available = False
+                    headers.clear()
+                    break
+                headers.append(
+                    (int(match.group("loop")), match.group("frontier_id"))
+                )
+
+    boundary = cycle["intake"]["workspace_boundary"][
+        "max_existing_loop_number"
+    ]
+    binding_facts: list[_RevisitFrontierBindingFacts] = []
+    failed_binding_paths: set[str] = set()
+    for index, binding in enumerate(cycle["frontier_bindings"]):
+        path = f"cycle.frontier_bindings[{index}]"
+        frontier_id = binding["frontier_id"]
+        frontier = frontiers.get(frontier_id)
+        binding_issue = registry_issue_by_path.get(path)
+        if binding_issue is not None:
+            failed_binding_paths.add(path)
+            binding_facts.append(
+                _RevisitFrontierBindingFacts(
+                    path=path,
+                    binding_issue=binding_issue,
+                    progress_available=False,
+                    loop_issue=None,
+                    search_issue=None,
+                    dispatch_issues=(),
+                    review_issue=None,
+                )
+            )
             continue
+
+        if not progress_available:
+            binding_facts.append(
+                _RevisitFrontierBindingFacts(
+                    path=path,
+                    binding_issue=None,
+                    progress_available=False,
+                    loop_issue=None,
+                    search_issue=None,
+                    dispatch_issues=(),
+                    review_issue=None,
+                )
+            )
+            continue
+
         new_loop_numbers = tuple(
             sorted(
                 {
@@ -746,45 +810,53 @@ def _derive_revisit_frontier_floor_issues_from_facts(
         loop_ids = tuple(f"loop_{number}" for number in new_loop_numbers)
         baseline_loop_count = binding["baseline_loop_count"]
         live_loop_count = live_loop_counts.get(frontier_id, 0)
-        if (
-            len(loop_ids) < 3
-            or live_loop_count < baseline_loop_count + 3
-        ):
+        loop_issue = None
+        if len(loop_ids) < 3 or live_loop_count < baseline_loop_count + 3:
             suffix = (
                 "; retire this incomplete cycle through abort"
                 if frontier.get("status") == "Retired"
                 else ""
             )
-            issues.append(
-                RevisitIssue(
-                    "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
-                    path,
-                    "bound frontier requires at least three distinct "
-                    "post-boundary ledger loops and a live loop count at least "
-                    f"baseline+3; found post-boundary={len(loop_ids)}, "
-                    f"baseline={baseline_loop_count}, live={live_loop_count}{suffix}",
-                    ", ".join(loop_ids),
-                )
+            loop_issue = RevisitIssue(
+                "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+                path,
+                "bound frontier requires at least three distinct "
+                "post-boundary ledger loops and a live loop count at least "
+                f"baseline+3; found post-boundary={len(loop_ids)}, "
+                f"baseline={baseline_loop_count}, live={live_loop_count}{suffix}",
+                ", ".join(loop_ids),
             )
-            continue
 
-        missing_search = tuple(
-            loop_id for loop_id in loop_ids if loop_id not in covered_search_loops
+        missing_search = (
+            tuple(
+                loop_id
+                for loop_id in loop_ids
+                if loop_id not in covered_search_loops
+            )
+            if covered_search_loops is not None
+            else ()
         )
-        if missing_search:
-            issues.append(
-                RevisitIssue(
-                    "REVISIT_SEARCH_FLOOR_MISSING",
-                    path,
-                    "every post-boundary frontier loop requires a valid search record",
-                    ", ".join(missing_search),
-                )
+        search_issue = (
+            RevisitIssue(
+                "REVISIT_SEARCH_FLOOR_MISSING",
+                path,
+                "every post-boundary frontier loop requires a valid search record",
+                ", ".join(missing_search),
             )
+            if missing_search
+            else None
+        )
 
-        for role_slug, code in (
-            ("frontier_scout", "REVISIT_SCOUT_FLOOR_MISSING"),
-            ("challenge_probe", "REVISIT_CHALLENGE_FLOOR_MISSING"),
-        ):
+        dispatch_issues: list[RevisitIssue] = []
+        role_requirements = (
+            ()
+            if dispatch_records is None
+            else (
+                ("frontier_scout", "REVISIT_SCOUT_FLOOR_MISSING"),
+                ("challenge_probe", "REVISIT_CHALLENGE_FLOOR_MISSING"),
+            )
+        )
+        for role_slug, code in role_requirements:
             missing_role = tuple(
                 loop_id
                 for loop_id in loop_ids
@@ -795,11 +867,12 @@ def _derive_revisit_frontier_floor_issues_from_facts(
                 )
             )
             if missing_role:
-                issues.append(
+                dispatch_issues.append(
                     RevisitIssue(
                         code,
                         path,
-                        f"every post-boundary frontier loop requires delivered {role_slug} work",
+                        "every post-boundary frontier loop requires delivered "
+                        f"{role_slug} work",
                         ", ".join(missing_role),
                     )
                 )
@@ -823,29 +896,44 @@ def _derive_revisit_frontier_floor_issues_from_facts(
                 bound_at=binding["bound_at"],
             )
         )
-        if not review_complete:
-            issues.append(
-                RevisitIssue(
-                    "REVISIT_REVIEW_FLOOR_MISSING",
-                    path,
-                    "bound frontier requires a post-binding review that leaves Continued or review-based Retired",
-                    (
-                        f"baseline={baseline_reviews}; "
-                        f"current={frontier.get('review_count', 0)}"
-                    ),
-                )
+        review_issue = (
+            None
+            if review_complete
+            else RevisitIssue(
+                "REVISIT_REVIEW_FLOOR_MISSING",
+                path,
+                "bound frontier requires a post-binding review that leaves Continued or review-based Retired",
+                (
+                    f"baseline={baseline_reviews}; "
+                    f"current={frontier.get('review_count', 0)}"
+                ),
             )
-    issues.extend(derive_frontier_requirements(cycle))
-    failed_binding_paths = {
-        issue.path
-        for issue in issues
-        if issue.path.startswith("cycle.frontier_bindings[")
-    }
+        )
+        if (
+            loop_issue is not None
+            or search_issue is not None
+            or dispatch_issues
+            or review_issue is not None
+        ):
+            failed_binding_paths.add(path)
+        binding_facts.append(
+            _RevisitFrontierBindingFacts(
+                path=path,
+                binding_issue=None,
+                progress_available=True,
+                loop_issue=loop_issue,
+                search_issue=search_issue,
+                dispatch_issues=tuple(dispatch_issues),
+                review_issue=review_issue,
+            )
+        )
+
     bound_claim_ids = {
         claim_id
         for binding in cycle["frontier_bindings"]
         for claim_id in binding["claim_ids"]
     }
+    claim_floor_issues: list[RevisitIssue] = []
     for claim in (
         *cycle["intake"]["selected_claims"],
         *cycle["derived_claims"],
@@ -861,7 +949,7 @@ def _derive_revisit_frontier_floor_issues_from_facts(
             and binding_paths
             and binding_paths.issubset(failed_binding_paths)
         ):
-            issues.append(
+            claim_floor_issues.append(
                 RevisitIssue(
                     "REVISIT_FRONTIER_BINDING_INVALID",
                     f"cycle.claim_resolutions[{claim_id}]",
@@ -869,6 +957,131 @@ def _derive_revisit_frontier_floor_issues_from_facts(
                     claim_id,
                 )
             )
+
+    return _RevisitFrontierFacts(
+        preparation_issue=preparation_issue,
+        bindings=tuple(binding_facts),
+        declared_binding_issues=declared_binding_issues,
+        claim_floor_issues=tuple(claim_floor_issues),
+    )
+
+
+def _project_binding_registry_issue(
+    binding: _RevisitFrontierBindingFacts,
+) -> tuple[RevisitIssue, ...]:
+    return (binding.binding_issue,) if binding.binding_issue is not None else ()
+
+
+def _project_binding_loop_issue(
+    binding: _RevisitFrontierBindingFacts,
+) -> tuple[RevisitIssue, ...]:
+    if not binding.progress_available or binding.loop_issue is None:
+        return ()
+    return (binding.loop_issue,)
+
+
+def _project_binding_review_issue(
+    binding: _RevisitFrontierBindingFacts,
+) -> tuple[RevisitIssue, ...]:
+    if not binding.progress_available or binding.review_issue is None:
+        return ()
+    return (binding.review_issue,)
+
+
+def _project_binding_search_issue(
+    binding: _RevisitFrontierBindingFacts,
+) -> tuple[RevisitIssue, ...]:
+    if not binding.progress_available or binding.search_issue is None:
+        return ()
+    return (binding.search_issue,)
+
+
+def _project_binding_dispatch_issues(
+    binding: _RevisitFrontierBindingFacts,
+) -> tuple[RevisitIssue, ...]:
+    if not binding.progress_available:
+        return ()
+    return binding.dispatch_issues
+
+
+def _derive_revisit_registry_issues_from_facts(
+    facts: _RevisitFrontierFacts,
+) -> tuple[RevisitIssue, ...]:
+    return tuple(
+        issue
+        for binding in facts.bindings
+        for issue in _project_binding_registry_issue(binding)
+    )
+
+
+def _derive_revisit_frontier_progress_issues_from_facts(
+    facts: _RevisitFrontierFacts,
+) -> tuple[RevisitIssue, ...]:
+    if facts.preparation_issue is not None:
+        issues: list[RevisitIssue] = [facts.preparation_issue]
+    else:
+        issues = []
+    for binding in facts.bindings:
+        issues.extend(_project_binding_loop_issue(binding))
+        issues.extend(_project_binding_review_issue(binding))
+    issues.extend(facts.declared_binding_issues)
+    issues.extend(facts.claim_floor_issues)
+    return tuple(issues)
+
+
+def _derive_revisit_search_floor_issues_from_facts(
+    facts: _RevisitFrontierFacts,
+) -> tuple[RevisitIssue, ...]:
+    return tuple(
+        issue
+        for binding in facts.bindings
+        for issue in _project_binding_search_issue(binding)
+    )
+
+
+def _derive_revisit_dispatch_floor_issues_from_facts(
+    facts: _RevisitFrontierFacts,
+) -> tuple[RevisitIssue, ...]:
+    return tuple(
+        issue
+        for binding in facts.bindings
+        for issue in _project_binding_dispatch_issues(binding)
+    )
+
+
+def _derive_revisit_frontier_floor_issues_from_facts(
+    *,
+    cycle: dict,
+    registry: dict,
+    ledger_text: str,
+    dispatch_records: tuple[dict, ...],
+    covered_search_loops: frozenset[str],
+) -> tuple[RevisitIssue, ...]:
+    """Compatibility adapter preserving the existing composite issue order."""
+    facts = _prepare_revisit_frontier_facts(
+        cycle=cycle,
+        registry=registry,
+        ledger_text=ledger_text,
+        dispatch_records=dispatch_records,
+        covered_search_loops=covered_search_loops,
+    )
+    if facts.preparation_issue is not None:
+        return (facts.preparation_issue,)
+    issues: list[RevisitIssue] = []
+    for binding in facts.bindings:
+        binding_issues = _project_binding_registry_issue(binding)
+        issues.extend(binding_issues)
+        if binding_issues:
+            continue
+        loop_issues = _project_binding_loop_issue(binding)
+        issues.extend(loop_issues)
+        if loop_issues:
+            continue
+        issues.extend(_project_binding_search_issue(binding))
+        issues.extend(_project_binding_dispatch_issues(binding))
+        issues.extend(_project_binding_review_issue(binding))
+    issues.extend(facts.declared_binding_issues)
+    issues.extend(facts.claim_floor_issues)
     return tuple(issues)
 
 
@@ -1484,13 +1697,13 @@ def _check_worker_outputs(workspace: Path, profile: ContractProfile, result: Con
 def _check_worker_output_documents(
     *,
     outputs: tuple[tuple[str, str], ...],
-    delivered_roles: tuple[tuple[str, str], ...],
-    registered_source_ids: frozenset[str],
+    delivered_roles: tuple[tuple[str, str], ...] | None,
+    registered_source_ids: frozenset[str] | None,
     profile: ContractProfile,
     result: ContractResult,
 ) -> None:
     """Pure document owner: worker-output semantics over preloaded facts."""
-    delivered_roles_map = dict(delivered_roles)
+    delivered_roles_map = dict(delivered_roles or ())
     for rel, text in outputs:
         candidate_roles = _candidate_worker_roles_for_output(rel)
         role = _worker_role_for_output(rel, delivered_roles_map, candidate_roles)
@@ -1504,10 +1717,15 @@ def _check_worker_output_documents(
                 message="worker output must declare Method cards loaded",
                 path=rel,
             )
-        has_trace = has_source_trace(text, candidate_roles[0]) or _has_registered_source_id_reference_from_facts(
-            text, registered_source_ids
+        has_trace = has_source_trace(
+            text, candidate_roles[0]
+        ) or (
+            registered_source_ids is not None
+            and _has_registered_source_id_reference_from_facts(
+                text, registered_source_ids
+            )
         )
-        if not has_trace:
+        if not has_trace and registered_source_ids is not None:
             if _requires_source_trace(role, candidate_roles):
                 result.fail(
                     code="WORKER_SOURCE_TRACE_MISSING",

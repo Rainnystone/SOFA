@@ -24,6 +24,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -38,14 +39,22 @@ from sofa_contract import (  # noqa: E402
     evaluate_revisit_readiness,
     evaluate_workspace,
 )
-from sofa_contract import evaluate as sofa_evaluate  # noqa: E402
-from sofa_contract.revisit_readiness import REVISIT_REQUIREMENT_IDS  # noqa: E402
+from sofa_contract import revisit_readiness as readiness_mod  # noqa: E402
+from sofa_contract.revisit_readiness import (  # noqa: E402
+    REVISIT_REQUIREMENT_IDS,
+    ReadinessPlanError,
+)
 
 # Module-level helpers from the existing revisit-contract test corpus. These are
 # importable (NOT the instance-method ``assert_revisit_failure``).
 from tests.test_revisit_contract import (  # noqa: E402
     CAN_SYMLINK,
+    append_task6_loops,
     attach_valid_audit,
+    bind_task6_reactivated_frontier,
+    derive_task6_floor_issues,
+    make_registration_workspace,
+    make_task6_binding_workspace,
     make_task6_ready_workspace,
     run_revisit_cycle_cli,
     snapshot_tree,
@@ -70,6 +79,43 @@ EXPECTED_REQUIREMENT_IDS = (
     "generation_closure",
     "route_and_effect_parity",
 )
+
+
+def _noop_requirement(_context) -> None:
+    """Test-only handler used before the private executable plan exists."""
+
+
+def _plan_rows():
+    plan = getattr(readiness_mod, "_READINESS_PLAN", None)
+    if plan is not None:
+        return tuple(plan)
+    return tuple(
+        SimpleNamespace(
+            requirement_id=requirement_id,
+            handlers=(_noop_requirement,),
+            prerequisites=(),
+            invariant=(requirement_id == "route_and_effect_parity"),
+        )
+        for requirement_id in EXPECTED_REQUIREMENT_IDS
+    )
+
+
+def _replace_plan_row(row, **changes):
+    values = {
+        "requirement_id": row.requirement_id,
+        "handlers": row.handlers,
+        "prerequisites": row.prerequisites,
+        "invariant": row.invariant,
+    }
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def _trace_pairs(prepared) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (entry.requirement_id, entry.status)
+        for entry in getattr(prepared, "trace", ())
+    )
 
 
 def _failure_codes(result) -> list[str]:
@@ -707,6 +753,96 @@ class TestRevisitCheckClosureVsSnapshots(unittest.TestCase):
 class TestReadOnlyReadinessParity(unittest.TestCase):
     """Focused convergence + completeness tests for the readiness seam."""
 
+    def _prepare(self, workspace: Path, cycle_id: str):
+        return readiness_mod._prepare_revisit_readiness(
+            readiness_mod.ObservedReadSession(workspace),
+            readiness_mod.ContractResult(),
+            cycle_id,
+            workspace,
+        )
+
+    def _assert_trace_statuses(self, prepared, expected: dict[str, str]) -> None:
+        statuses = dict(_trace_pairs(prepared))
+        self.assertEqual(
+            tuple(expected.items()),
+            tuple((key, statuses.get(key)) for key in expected),
+        )
+
+    def _assert_bad_plan_before_read(self, plan, expected_fragment: str) -> None:
+        reads: list[tuple[str, str]] = []
+        real_init = readiness_mod.ObservedReadSession.__init__
+        real_read_required = readiness_mod.ObservedReadSession.read_required
+        real_read_optional = readiness_mod.ObservedReadSession.read_optional
+        real_list_directory = readiness_mod.ObservedReadSession.list_directory
+
+        def tracking_init(session, workspace):
+            reads.append(("session_init", str(workspace)))
+            return real_init(session, workspace)
+
+        def tracking_read_required(session, relative_path):
+            reads.append(("read_required", relative_path))
+            return real_read_required(session, relative_path)
+
+        def tracking_read_optional(session, relative_path):
+            reads.append(("read_optional", relative_path))
+            return real_read_optional(session, relative_path)
+
+        def tracking_list_directory(
+            session,
+            relative_path,
+            *,
+            recursive,
+            optional=False,
+        ):
+            reads.append(("list_directory", relative_path))
+            return real_list_directory(
+                session,
+                relative_path,
+                recursive=recursive,
+                optional=optional,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            with (
+                mock.patch.object(
+                    readiness_mod,
+                    "_READINESS_PLAN",
+                    tuple(plan),
+                    create=True,
+                ),
+                mock.patch.object(
+                    readiness_mod.ObservedReadSession,
+                    "__init__",
+                    tracking_init,
+                ),
+                mock.patch.object(
+                    readiness_mod.ObservedReadSession,
+                    "read_required",
+                    tracking_read_required,
+                ),
+                mock.patch.object(
+                    readiness_mod.ObservedReadSession,
+                    "read_optional",
+                    tracking_read_optional,
+                ),
+                mock.patch.object(
+                    readiness_mod.ObservedReadSession,
+                    "list_directory",
+                    tracking_list_directory,
+                ),
+            ):
+                try:
+                    evaluate_revisit_readiness(workspace, cycle_id)
+                except ReadinessPlanError as exc:
+                    self.assertIn(expected_fragment, str(exc))
+                else:
+                    self.fail(
+                        "malformed readiness plan did not raise "
+                        "ReadinessPlanError"
+                    )
+        self.assertEqual([], reads, "plan shape must fail before workspace reads")
+
     # ------------------------------------------------------------------
     # Completeness of the closed thirteen-row plan
     # ------------------------------------------------------------------
@@ -714,6 +850,545 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
         self.assertEqual(13, len(REVISIT_REQUIREMENT_IDS))
         self.assertEqual(13, len(set(REVISIT_REQUIREMENT_IDS)))
         self.assertEqual(EXPECTED_REQUIREMENT_IDS, REVISIT_REQUIREMENT_IDS)
+
+    def test_requirement_plan_uses_only_canonical_row_prerequisites(self):
+        expected = {
+            "core_state_workflow": (),
+            "global_cycle_history": ("ticker_mode",),
+            "intake_provenance": ("ticker_mode", "cycle"),
+            "trigger_evidence": ("ticker_mode", "cycle"),
+            "claim_freshness": ("ticker_mode", "cycle"),
+            "frontier_registry": ("ticker_mode",),
+            "frontier_research_floor": ("ticker_mode", "cycle"),
+            "search_coverage": ("ticker_mode",),
+            "dispatch_delivery": ("ticker_mode",),
+            "worker_outputs": ("ticker_mode",),
+            "source_cache": (),
+            "generation_closure": (),
+            "route_and_effect_parity": (),
+        }
+        self.assertEqual(
+            expected,
+            {
+                row.requirement_id: row.prerequisites
+                for row in _plan_rows()
+            },
+        )
+
+    def test_requirement_plan_rejects_missing_row_before_filesystem_read(self):
+        self._assert_bad_plan_before_read(_plan_rows()[:-1], "missing")
+
+    def test_requirement_plan_rejects_duplicate_row_before_filesystem_read(self):
+        plan = _plan_rows()
+        self._assert_bad_plan_before_read(plan[:-1] + (plan[0],), "duplicate")
+
+    def test_requirement_plan_rejects_unknown_row_before_filesystem_read(self):
+        plan = list(_plan_rows())
+        plan[-1] = _replace_plan_row(
+            plan[-1],
+            requirement_id="unknown_requirement",
+        )
+        self._assert_bad_plan_before_read(plan, "unknown")
+
+    def test_requirement_plan_rejects_unowned_row_before_filesystem_read(self):
+        plan = list(_plan_rows())
+        plan[4] = _replace_plan_row(plan[4], handlers=())
+        self._assert_bad_plan_before_read(plan, "unowned")
+
+    def test_requirement_plan_rejects_multi_owned_row_before_filesystem_read(self):
+        plan = list(_plan_rows())
+        plan[4] = _replace_plan_row(
+            plan[4],
+            handlers=plan[4].handlers + plan[4].handlers,
+        )
+        self._assert_bad_plan_before_read(plan, "multi-owned")
+
+    def test_requirement_plan_rejects_wrong_order_before_filesystem_read(self):
+        plan = list(_plan_rows())
+        plan[0], plan[1] = plan[1], plan[0]
+        self._assert_bad_plan_before_read(plan, "wrong-order")
+
+    def test_ready_fixture_trace_visits_all_requirements_once_in_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            prepared = readiness_mod._prepare_revisit_readiness(
+                readiness_mod.ObservedReadSession(workspace),
+                readiness_mod.ContractResult(),
+                cycle_id,
+                workspace,
+            )
+
+        self.assertEqual(
+            tuple(
+                (
+                    requirement_id,
+                    "invariant"
+                    if requirement_id == "route_and_effect_parity"
+                    else "evaluated",
+                )
+                for requirement_id in EXPECTED_REQUIREMENT_IDS
+            ),
+            _trace_pairs(prepared),
+        )
+
+    def test_sector_mode_skips_ticker_rows_but_runs_closure_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _report = make_registration_workspace(
+                Path(temp_dir),
+                mode="sector",
+            )
+            prepared = readiness_mod._prepare_revisit_readiness(
+                readiness_mod.ObservedReadSession(workspace),
+                readiness_mod.ContractResult(),
+                None,
+                workspace,
+            )
+
+        self.assertEqual(
+            ["REVISIT_UNSUPPORTED_MODE"],
+            _failure_codes(prepared.result),
+        )
+        self.assertEqual(
+            (
+                ("core_state_workflow", "evaluated"),
+                ("global_cycle_history", "skipped"),
+                ("intake_provenance", "skipped"),
+                ("trigger_evidence", "skipped"),
+                ("claim_freshness", "skipped"),
+                ("frontier_registry", "skipped"),
+                ("frontier_research_floor", "skipped"),
+                ("search_coverage", "skipped"),
+                ("dispatch_delivery", "skipped"),
+                ("worker_outputs", "skipped"),
+                ("source_cache", "evaluated"),
+                ("generation_closure", "evaluated"),
+                ("route_and_effect_parity", "invariant"),
+            ),
+            _trace_pairs(prepared),
+        )
+
+    def test_malformed_history_sibling_suppresses_unsafe_selection_derivations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            aborted = run_revisit_cycle_cli(
+                workspace,
+                "abort",
+                cycle_id,
+                "--reason",
+                "Architecture correction isolates incomplete history.",
+            )
+            self.assertEqual(0, aborted.returncode, aborted.stderr)
+            index_record = json.loads(
+                (workspace / "sources_index.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[0]
+            )
+            (workspace / index_record["excerpt_path"]).unlink()
+            malformed_path = workspace / "revisit_cycles" / "RC-9999.json"
+            malformed_path.write_bytes(b"{")
+
+            prepared = readiness_mod._prepare_revisit_readiness(
+                readiness_mod.ObservedReadSession(workspace),
+                readiness_mod.ContractResult(),
+                "RC-9999",
+                workspace,
+            )
+
+        history_issues = [
+            issue
+            for issue in prepared.result.failures
+            if issue.code == "REVISIT_CYCLE_MALFORMED"
+        ]
+        self.assertEqual(1, len(history_issues))
+        self.assertEqual(
+            "revisit_cycles/RC-9999.json",
+            history_issues[0].path,
+        )
+        self.assertIn(
+            "SOURCE_EXCERPT_MISSING",
+            _failure_codes(prepared.result),
+        )
+        self.assertIsNone(prepared.cycle_id)
+        trace = _trace_pairs(prepared)
+        self.assertEqual(EXPECTED_REQUIREMENT_IDS, tuple(row[0] for row in trace))
+        self.assertEqual(13, len(trace))
+        self.assertEqual(13, len({row[0] for row in trace}))
+
+    def test_invalid_registry_does_not_skip_row_7_cycle_projection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            registry_path = workspace / "frontier_registry.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["version"] = 999
+            registry_path.write_text(
+                json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            prepared = self._prepare(workspace, cycle_id)
+
+        self.assertIn(
+            "REVISIT_FRONTIER_REGISTRY_MALFORMED",
+            _failure_codes(prepared.result),
+        )
+        self._assert_trace_statuses(
+            prepared,
+            {
+                "frontier_registry": "evaluated",
+                "frontier_research_floor": "evaluated",
+                "search_coverage": "evaluated",
+                "dispatch_delivery": "evaluated",
+                "source_cache": "evaluated",
+            },
+        )
+
+    def test_invalid_ledger_does_not_mask_independent_owners(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            (workspace / "evidence_ledger.md").write_bytes(b"\xff")
+            try:
+                prepared = self._prepare(workspace, cycle_id)
+            except UnicodeDecodeError as exc:
+                self.fail(f"invalid ledger escaped its row owner: {exc}")
+
+        codes = _failure_codes(prepared.result)
+        self.assertIn("EVIDENCE_LEDGER_INVALID", codes)
+        self.assertNotIn("REVISIT_SEARCH_FLOOR_MISSING", codes)
+        self.assertNotIn("REVISIT_SCOUT_FLOOR_MISSING", codes)
+        self.assertNotIn("REVISIT_CHALLENGE_FLOOR_MISSING", codes)
+        self._assert_trace_statuses(
+            prepared,
+            {
+                "frontier_registry": "evaluated",
+                "frontier_research_floor": "evaluated",
+                "search_coverage": "evaluated",
+                "dispatch_delivery": "evaluated",
+                "source_cache": "evaluated",
+            },
+        )
+
+    def test_invalid_ledger_and_registry_do_not_mask_row_7_claim_coverage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
+            (workspace / "evidence_ledger.md").write_bytes(b"\xff")
+            registry_path = workspace / "frontier_registry.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["version"] = 999
+            registry_path.write_text(
+                json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            prepared = self._prepare(workspace, cycle_id)
+
+        owner_codes = {
+            "EVIDENCE_LEDGER_INVALID",
+            "REVISIT_FRONTIER_REGISTRY_MALFORMED",
+            "REVISIT_FRONTIER_BINDING_INVALID",
+        }
+        self.assertEqual(
+            [
+                "EVIDENCE_LEDGER_INVALID",
+                "REVISIT_FRONTIER_REGISTRY_MALFORMED",
+                "REVISIT_FRONTIER_BINDING_INVALID",
+            ],
+            [
+                code
+                for code in _failure_codes(prepared.result)
+                if code in owner_codes
+            ],
+        )
+        self._assert_trace_statuses(
+            prepared,
+            {
+                "core_state_workflow": "evaluated",
+                "frontier_registry": "evaluated",
+                "frontier_research_floor": "evaluated",
+            },
+        )
+
+    def test_invalid_search_is_owned_without_masking_dispatch_or_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            (workspace / "search_log.jsonl").write_bytes(b"\xff")
+            prepared = self._prepare(workspace, cycle_id)
+
+        codes = _failure_codes(prepared.result)
+        self.assertIn("SEARCH_LOG_INVALID", codes)
+        self.assertNotIn("REVISIT_SEARCH_FLOOR_MISSING", codes)
+        self._assert_trace_statuses(
+            prepared,
+            {
+                "frontier_research_floor": "evaluated",
+                "search_coverage": "evaluated",
+                "dispatch_delivery": "evaluated",
+                "source_cache": "evaluated",
+            },
+        )
+
+    def test_invalid_dispatch_does_not_mask_independent_worker_checks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            worker_path = workspace / "challenges" / "loop_8_challenge.md"
+            worker_path.write_text(
+                worker_path.read_text(encoding="utf-8").replace(
+                    "Method cards loaded: red-team, supply-chain-mapping, "
+                    "customer-graph-discovery.\n\n",
+                    "",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            (workspace / "dispatch_log.jsonl").write_bytes(b"{\n")
+            prepared = self._prepare(workspace, cycle_id)
+
+        codes = _failure_codes(prepared.result)
+        self.assertEqual(
+            ["DISPATCH_LOG_INVALID", "WORKER_METHOD_CARDS_MISSING"],
+            [
+                code
+                for code in codes
+                if code
+                in {
+                    "DISPATCH_LOG_INVALID",
+                    "WORKER_METHOD_CARDS_MISSING",
+                }
+            ],
+        )
+        self.assertNotIn("WORKER_OUTPUT_WITHOUT_DISPATCH", codes)
+        self.assertNotIn("DISPATCH_ROLE_DELIVERY_MISMATCH", codes)
+        self.assertNotIn("REVISIT_SCOUT_FLOOR_MISSING", codes)
+        self.assertNotIn("REVISIT_CHALLENGE_FLOOR_MISSING", codes)
+        self._assert_trace_statuses(
+            prepared,
+            {
+                "frontier_research_floor": "evaluated",
+                "search_coverage": "evaluated",
+                "dispatch_delivery": "evaluated",
+                "worker_outputs": "evaluated",
+                "source_cache": "evaluated",
+            },
+        )
+
+    def test_invalid_source_suppresses_only_source_dependent_subchecks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            artifact_ref = {
+                "kind": "artifact",
+                "path": "evidence/missing-proof.md",
+                "sha256": "0" * 64,
+                "locator": "Missing artifact remains independently checkable",
+                "checked_at": "2026-07-14T12:00:00Z",
+            }
+            cycle["intake"]["triggers"][0]["evidence_refs"].append(
+                dict(artifact_ref)
+            )
+            cycle["claim_resolutions"][0]["current_evidence_refs"].append(
+                dict(artifact_ref)
+            )
+            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            attach_valid_audit(cycle)
+            revisit_contract.persist_cycle(
+                workspace,
+                cycle,
+                expected_sha256=revisit_contract.sha256_file(
+                    workspace / "revisit_cycles" / f"{cycle_id}.json"
+                ),
+            )
+
+            worker_path = workspace / "challenges" / "loop_8_challenge.md"
+            worker_path.write_text(
+                worker_path.read_text(encoding="utf-8").replace(
+                    "Method cards loaded: red-team, supply-chain-mapping, "
+                    "customer-graph-discovery.\n\n",
+                    "",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            index_record = json.loads(
+                (workspace / "sources_index.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[0]
+            )
+            (workspace / index_record["excerpt_path"]).unlink()
+            prepared = self._prepare(workspace, cycle_id)
+
+        codes = _failure_codes(prepared.result)
+        conditional_codes = {
+            "REVISIT_TRIGGER_EVIDENCE_MISSING",
+            "REVISIT_FRESHNESS_SUPPORT_INVALID",
+            "WORKER_METHOD_CARDS_MISSING",
+            "SOURCE_EXCERPT_MISSING",
+        }
+        self.assertEqual(
+            [
+                "REVISIT_TRIGGER_EVIDENCE_MISSING",
+                "REVISIT_FRESHNESS_SUPPORT_INVALID",
+                "WORKER_METHOD_CARDS_MISSING",
+                "SOURCE_EXCERPT_MISSING",
+            ],
+            [code for code in codes if code in conditional_codes],
+        )
+        trigger_issues = [
+            issue
+            for issue in prepared.result.failures
+            if issue.code == "REVISIT_TRIGGER_EVIDENCE_MISSING"
+        ]
+        freshness_issues = [
+            issue
+            for issue in prepared.result.failures
+            if issue.code == "REVISIT_FRESHNESS_SUPPORT_INVALID"
+        ]
+        self.assertEqual(
+            ["cycle.intake.triggers[0].evidence_refs[1]"],
+            [issue.path for issue in trigger_issues],
+        )
+        self.assertEqual(
+            ["cycle.claim_resolutions[0].current_evidence_refs[1]"],
+            [issue.path for issue in freshness_issues],
+        )
+        self.assertNotIn("REVISIT_COUNTER_EVIDENCE_INVALID", codes)
+        self.assertNotIn("WORKER_SOURCE_TRACE_MISSING", codes)
+        self.assertNotIn(
+            "WORKER_SOURCE_TRACE_RECOMMENDED",
+            [issue.code for issue in prepared.result.warnings],
+        )
+        self._assert_trace_statuses(
+            prepared,
+            {
+                "trigger_evidence": "evaluated",
+                "claim_freshness": "evaluated",
+                "frontier_registry": "evaluated",
+                "frontier_research_floor": "evaluated",
+                "search_coverage": "evaluated",
+                "dispatch_delivery": "evaluated",
+                "worker_outputs": "evaluated",
+                "source_cache": "evaluated",
+            },
+        )
+
+    def test_unbound_claim_is_reported_without_fabricated_progress_issues(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
+            prepared = self._prepare(workspace, cycle_id)
+
+        codes = _failure_codes(prepared.result)
+        self.assertIn("REVISIT_FRONTIER_BINDING_INVALID", codes)
+        claim_issue = next(
+            issue
+            for issue in prepared.result.failures
+            if issue.code == "REVISIT_FRONTIER_BINDING_INVALID"
+        )
+        self.assertEqual(
+            "cycle.claim_resolutions[RC-0001-CL-01]",
+            claim_issue.path,
+        )
+        self.assertNotIn("REVISIT_FRONTIER_LOOP_FLOOR_MISSING", codes)
+        self.assertNotIn("REVISIT_SEARCH_FLOOR_MISSING", codes)
+        self.assertNotIn("REVISIT_SCOUT_FLOOR_MISSING", codes)
+
+    def test_loop_failure_does_not_mask_review_search_or_delivery_siblings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
+            bind_task6_reactivated_frontier(workspace, cycle_id)
+            append_task6_loops(workspace, 1)
+            prepared = self._prepare(workspace, cycle_id)
+
+        sibling_codes = {
+            "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+            "REVISIT_REVIEW_FLOOR_MISSING",
+            "REVISIT_SEARCH_FLOOR_MISSING",
+            "REVISIT_SCOUT_FLOOR_MISSING",
+            "REVISIT_CHALLENGE_FLOOR_MISSING",
+        }
+        self.assertEqual(
+            [
+                "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+                "REVISIT_REVIEW_FLOOR_MISSING",
+                "REVISIT_SEARCH_FLOOR_MISSING",
+                "REVISIT_SCOUT_FLOOR_MISSING",
+                "REVISIT_CHALLENGE_FLOOR_MISSING",
+            ],
+            [
+                code
+                for code in _failure_codes(prepared.result)
+                if code in sibling_codes
+            ],
+        )
+
+    def test_ordinary_adapter_stops_after_loop_floor_compatibility_issue(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_binding_workspace(Path(temp_dir))
+            bind_task6_reactivated_frontier(workspace, cycle_id)
+            append_task6_loops(workspace, 1)
+
+            issues = derive_task6_floor_issues(workspace, cycle_id)
+
+        sibling_codes = {
+            "REVISIT_FRONTIER_LOOP_FLOOR_MISSING",
+            "REVISIT_REVIEW_FLOOR_MISSING",
+            "REVISIT_SEARCH_FLOOR_MISSING",
+            "REVISIT_SCOUT_FLOOR_MISSING",
+            "REVISIT_CHALLENGE_FLOOR_MISSING",
+        }
+        self.assertEqual(
+            ["REVISIT_FRONTIER_LOOP_FLOOR_MISSING"],
+            [issue.code for issue in issues if issue.code in sibling_codes],
+        )
+
+    def test_row_8_owns_revisit_search_categories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            search_path = workspace / "search_log.jsonl"
+            records = [
+                json.loads(line)
+                for line in search_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            search_path.write_text(
+                "".join(
+                    json.dumps(record) + "\n"
+                    for record in records
+                    if record.get("loop_id") != "loop_10"
+                ),
+                encoding="utf-8",
+            )
+            prepared = self._prepare(workspace, cycle_id)
+
+        codes = _failure_codes(prepared.result)
+        self.assertIn("REVISIT_SEARCH_FLOOR_MISSING", codes)
+        self.assertNotIn("REVISIT_SCOUT_FLOOR_MISSING", codes)
+        self.assertNotIn("REVISIT_CHALLENGE_FLOOR_MISSING", codes)
+
+    def test_row_9_owns_revisit_dispatch_floor_categories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            dispatch_path = workspace / "dispatch_log.jsonl"
+            records = [
+                json.loads(line)
+                for line in dispatch_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            removed = next(
+                record
+                for record in records
+                if record.get("loop_id") == "loop_10"
+                and record.get("role") == "frontier_scout"
+            )
+            dispatch_path.write_text(
+                "".join(
+                    json.dumps(record) + "\n"
+                    for record in records
+                    if record is not removed
+                ),
+                encoding="utf-8",
+            )
+            (workspace / removed["delivery_path"]).unlink()
+            prepared = self._prepare(workspace, cycle_id)
+
+        codes = _failure_codes(prepared.result)
+        self.assertIn("REVISIT_SCOUT_FLOOR_MISSING", codes)
+        self.assertNotIn("REVISIT_SEARCH_FLOOR_MISSING", codes)
 
     # ------------------------------------------------------------------
     # Probe 1: sibling/global-history conflict must fail on all three routes
