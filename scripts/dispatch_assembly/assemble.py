@@ -35,6 +35,7 @@ try:
         render_prior_query_digest,
     )
     from ..source_cache import SOURCE_INDEX_FILENAME, render_source_bibliography
+    from ..revisit_contract import RevisitContractError, build_revisit_context
 except ImportError:
     from worker_role_catalog import (
         WorkerRole,
@@ -48,6 +49,7 @@ except ImportError:
         render_prior_query_digest,
     )
     from source_cache import SOURCE_INDEX_FILENAME, render_source_bibliography
+    from revisit_contract import RevisitContractError, build_revisit_context
 
 
 PLACEHOLDERS_HEADING = "\n## Placeholders"
@@ -86,6 +88,10 @@ def assemble_dispatch(
     attach_digest: bool = True,
     attach_sources: bool = True,
     out_path: str | None = None,
+    *,
+    revisit_cycle_id: str | None = None,
+    revisit_frontier_id: str | None = None,
+    revisit_claim_ids: tuple[str, ...] = (),
 ) -> AssembledDispatch:
     repo_root_path = Path(repo_root)
     workspace_path = Path(workspace)
@@ -101,6 +107,21 @@ def assemble_dispatch(
     for key, value in fields.items():
         if not NAME_FIELD_PATTERN.fullmatch(value):
             raise AssemblyError(f"name field {key} has an unsafe value: {value!r}")
+
+    revisit_requested = any(
+        (
+            revisit_cycle_id is not None,
+            revisit_frontier_id is not None,
+            bool(revisit_claim_ids),
+        )
+    )
+    if revisit_requested:
+        if not revisit_cycle_id or not revisit_frontier_id or not revisit_claim_ids:
+            raise AssemblyError(
+                "revisit dispatch requires cycle, frontier, and at least one claim"
+            )
+        if fields.get("loop") is None:
+            raise AssemblyError("revisit Scout/Challenge dispatch requires --loop")
 
     if out_path:
         try:
@@ -163,7 +184,28 @@ def assemble_dispatch(
         raise AssemblyError("path tokens remain after substitution")
 
     attachments: list[str] = []
-    if attach_digest and (workspace_path / "search_log.jsonl").exists():
+    if revisit_requested:
+        loop_value = fields["loop"]
+        try:
+            context = build_revisit_context(
+                workspace_path,
+                revisit_cycle_id,
+                revisit_frontier_id,
+                tuple(revisit_claim_ids),
+                worker.slug,
+                f"loop_{loop_value}",
+            )
+        except RevisitContractError as exc:
+            raise AssemblyError(f"revisit context failed: {exc}") from exc
+        _screen_inputs(worker, {"revisit_context": context.text})
+        text = text.rstrip() + "\n\n" + context.text.rstrip() + "\n"
+        attachments.extend(context.attachment_names)
+
+    if (
+        not revisit_requested
+        and attach_digest
+        and (workspace_path / "search_log.jsonl").exists()
+    ):
         try:
             digest_text = render_prior_query_digest(
                 build_prior_query_digest(workspace_path)
@@ -186,7 +228,11 @@ def assemble_dispatch(
         text = text.rstrip() + "\n\n" + digest_text
         attachments.append("prior_query_digest")
 
-    if attach_sources and (workspace_path / SOURCE_INDEX_FILENAME).exists():
+    if (
+        not revisit_requested
+        and attach_sources
+        and (workspace_path / SOURCE_INDEX_FILENAME).exists()
+    ):
         try:
             bibliography_text = render_source_bibliography(workspace_path)
         except ValueError as exc:
@@ -223,6 +269,10 @@ def assemble_dispatch(
     else:
         suggested["loop_id"] = None
         incomplete.insert(0, "loop_id")
+    if revisit_requested:
+        suggested["revisit_cycle_id"] = revisit_cycle_id
+        suggested["frontier_id"] = revisit_frontier_id
+        suggested["claim_ids"] = list(revisit_claim_ids)
     suggested["incomplete_fields"] = incomplete
 
     return AssembledDispatch(

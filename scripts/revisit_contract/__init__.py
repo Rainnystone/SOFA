@@ -68,6 +68,7 @@ from .store import (
     workspace_transaction,
 )
 from .render import render_cycle_markdown
+from .context import RevisitContext, build_revisit_context
 
 __all__ = (
     "ACTION_CLASSES",
@@ -122,6 +123,8 @@ __all__ = (
     "persist_pointer",
     "persist_cycle",
     "render_cycle_markdown",
+    "RevisitContext",
+    "build_revisit_context",
     "cycle_state_sha256",
     "empty_pointer",
     "evaluate_history",

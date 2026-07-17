@@ -1,5 +1,6 @@
 import copy
 import dataclasses
+import errno
 import hashlib
 import io
 import json
@@ -15,16 +16,24 @@ from pathlib import Path
 from unittest import mock
 
 import scripts.revisit_contract as revisit_contract
+import scripts.revisit_contract.context as revisit_context
 import scripts.revisit_contract.model as revisit_model
 import scripts.revisit_contract.store as revisit_store
 import scripts.revisit_cycle as revisit_cycle_cli
 import scripts.sofa_contract.evaluate as sofa_evaluate
 import scripts.timeliness_checker as timeliness_checker
-from scripts.frontier_lifecycle import create_frontier, make_registry, transition
+from scripts.frontier_lifecycle import (
+    bind_frontier_layer,
+    create_frontier,
+    make_registry,
+    set_layer_labels,
+    transition,
+)
 from scripts.sofa_contract import (
     RevisitCheckEffect,
     check_revisit_readiness,
 )
+from scripts.source_cache import EXCERPT_MAX_CHARS, excerpt_sha256
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVISIT_CYCLE_SCRIPT = REPO_ROOT / "scripts" / "revisit_cycle.py"
@@ -377,6 +386,102 @@ def make_task6_binding_workspace(root: Path) -> tuple[Path, str]:
         encoding="utf-8",
     )
     return workspace, "RC-0001"
+
+
+def make_task7_context_workspace(root: Path) -> tuple[Path, str, str]:
+    workspace, cycle_id = make_task6_binding_workspace(root)
+    frontier_id = add_task6_frontier(workspace)
+
+    registry_path = workspace / "frontier_registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry = set_layer_labels(
+        registry,
+        [(index, f"Layer {index}") for index in range(6)],
+    )
+    registry = bind_frontier_layer(registry, "F1", layer=0)
+    registry = bind_frontier_layer(
+        registry,
+        frontier_id,
+        layer=1,
+        parent_frontier="F1",
+    )
+    registry_path.write_text(
+        json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    bind_task6_frontier(
+        workspace,
+        cycle_id,
+        frontier_id=frontier_id,
+        action="added",
+    )
+
+    with (workspace / "evidence_ledger.md").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "## Loop 8: F2 - New qualification branch\n\n"
+            "Target-frontier evidence.\n\n"
+            "## Loop 9: F1 - Historical qualification timing\n\n"
+            "Unrelated-frontier evidence.\n\n"
+        )
+    search_records = (
+        {
+            "loop_id": "loop_8",
+            "query": "F2 current qualification milestone evidence",
+            "result_status": "completed",
+            "dead_ends": [
+                {
+                    "query": "F2 obsolete qualification rumor",
+                    "category": "stale",
+                }
+            ],
+            "evidence_refs": [
+                "https://target-frontier.example/qualification",
+                "src-001",
+            ],
+        },
+        {
+            "loop_id": "loop_9",
+            "query": "F1 unrelated legacy qualification search",
+            "result_status": "completed",
+            "dead_ends": [
+                {
+                    "query": "F1 unrelated dead end",
+                    "category": "irrelevant",
+                }
+            ],
+            "evidence_refs": [
+                "https://unrelated-frontier.example/legacy",
+                "src-002",
+            ],
+        },
+    )
+    (workspace / "search_log.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in search_records),
+        encoding="utf-8",
+    )
+
+    unrelated_excerpt = "Unrelated source excerpt that must never be rendered.\n"
+    unrelated_path = workspace / "sources" / "src-002.md"
+    unrelated_path.write_text(unrelated_excerpt, encoding="utf-8")
+    unrelated_record = {
+        "source_id": "src-002",
+        "url": "https://unrelated-source.example/item",
+        "title": "Unrelated source",
+        "retrieved": "2026-07-14",
+        "grade": "C",
+        "excerpt_path": "sources/src-002.md",
+        "sha256": hashlib.sha256(unrelated_excerpt.encode("utf-8")).hexdigest(),
+    }
+    with (workspace / "sources_index.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(unrelated_record) + "\n")
+
+    scout_output = workspace / "scouts" / "loop_8_scout.md"
+    scout_output.parent.mkdir(exist_ok=True)
+    scout_output.write_text(
+        "LEAKED_SCOUT_OUTPUT must never enter revisit context.\n",
+        encoding="utf-8",
+    )
+    return workspace, cycle_id, frontier_id
 
 
 def add_task6_frontier(
@@ -1372,6 +1477,591 @@ def make_drifted_task4_cycle():
     cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
     attach_valid_audit(cycle)
     return cycle
+
+
+class TestRevisitContext(unittest.TestCase):
+    def _replace_source_excerpt(
+        self,
+        workspace: Path,
+        source_id: str,
+        text: str,
+    ) -> Path:
+        records = [
+            json.loads(line)
+            for line in (workspace / "sources_index.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        record = next(row for row in records if row["source_id"] == source_id)
+        excerpt_path = workspace / record["excerpt_path"]
+        excerpt_path.write_text(text, encoding="utf-8")
+        record["sha256"] = excerpt_sha256(text)
+        (workspace / "sources_index.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in records),
+            encoding="utf-8",
+        )
+        return excerpt_path
+
+    def _build(
+        self,
+        workspace: Path,
+        cycle_id: str,
+        frontier_id: str,
+        *,
+        claim_ids: tuple[str, ...] | None = None,
+        role_slug: str = "frontier_scout",
+        loop_id: str = "loop_8",
+    ):
+        return revisit_contract.build_revisit_context(
+            workspace,
+            cycle_id,
+            frontier_id,
+            claim_ids
+            if claim_ids is not None
+            else (f"{cycle_id}-CL-01",),
+            role_slug,
+            loop_id,
+        )
+
+    def test_scout_context_is_target_filtered(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            builder = getattr(revisit_contract, "build_revisit_context", None)
+            self.assertTrue(
+                callable(builder),
+                "build_revisit_context must be exported by revisit_contract",
+            )
+
+            context = builder(
+                workspace,
+                cycle_id,
+                frontier_id,
+                (f"{cycle_id}-CL-01",),
+                "frontier_scout",
+                "loop_8",
+            )
+
+            self.assertEqual(("revisit_context",), context.attachment_names)
+            required = (
+                cycle_id,
+                f"{cycle_id}-TRG-01",
+                f"{cycle_id}-CL-01",
+                frontier_id,
+                "Layer: 1",
+                "Structural parent: F1",
+                "The named qualification milestone moved beyond the prior watch window.",
+                "Customer qualification completes inside the prior watch window.",
+                "Current qualification timing and counter-evidence.",
+                "F2 current qualification milestone evidence",
+                "F2 obsolete qualification rumor",
+                "target-frontier.example",
+                "src-001",
+                "Archived source excerpt for the qualification milestone.",
+            )
+            for value in required:
+                with self.subTest(required=value):
+                    self.assertIn(value, context.text)
+
+            forbidden = (
+                "F1 unrelated legacy qualification search",
+                "F1 unrelated dead end",
+                "unrelated-frontier.example",
+                "src-002",
+                "Unrelated source excerpt",
+                "Watch with Trigger",
+                "Confidence: medium",
+                "moderate",
+                "research status is",
+                "LEAKED_SCOUT_OUTPUT",
+                "Grade: B",
+                "Retrieved: 2026-07-14",
+            )
+            for value in forbidden:
+                with self.subTest(forbidden=value):
+                    self.assertNotIn(value, context.text)
+
+    def test_scout_context_renders_artifact_trigger_evidence_identifiers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            evidence_path = workspace / "evidence_ledger.md"
+            artifact_ref = {
+                "kind": "artifact",
+                "path": "evidence_ledger.md",
+                "sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+                "locator": "Loop 8 artifact trigger evidence",
+                "checked_at": "2026-07-14T12:45:00Z",
+            }
+            cycle["intake"]["triggers"][0]["evidence_refs"] = [artifact_ref]
+            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            attach_valid_audit(cycle)
+            revisit_contract.cycle_json_path(workspace, cycle_id).write_bytes(
+                revisit_contract.canonical_document_bytes(cycle)
+            )
+
+            context = self._build(workspace, cycle_id, frontier_id)
+
+            for value in (
+                "Artifact ref: evidence_ledger.md",
+                artifact_ref["sha256"],
+                "locator=Loop 8 artifact trigger evidence",
+                "checked_at=2026-07-14T12:45:00Z",
+            ):
+                with self.subTest(identifier=value):
+                    self.assertIn(value, context.text)
+
+    def test_scout_context_renders_source_trigger_id_and_checked_at(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+
+            context = self._build(workspace, cycle_id, frontier_id)
+
+            self.assertIn(
+                "Source ref: src-001; checked_at=2026-07-14T10:00:00Z",
+                context.text,
+            )
+
+    def test_scout_context_rejects_excerpt_drift_after_source_evaluation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            evaluation = revisit_context.evaluate_index(workspace)
+            excerpt_path = workspace / "sources" / "src-001.md"
+
+            def evaluate_then_drift(_workspace):
+                excerpt_path.write_text(
+                    "DRIFTED_UNVALIDATED_SOURCE_BYTES\n",
+                    encoding="utf-8",
+                )
+                return evaluation
+
+            with mock.patch.object(
+                revisit_context,
+                "evaluate_index",
+                side_effect=evaluate_then_drift,
+            ):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    r"hash|drift|registered",
+                ):
+                    self._build(workspace, cycle_id, frontier_id)
+
+    def test_scout_context_rejects_excerpt_over_character_cap(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            self._replace_source_excerpt(
+                workspace,
+                "src-001",
+                "x" * (EXCERPT_MAX_CHARS + 1),
+            )
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                r"cap|16000|too large|characters",
+            ):
+                self._build(workspace, cycle_id, frontier_id)
+
+    def test_scout_context_accepts_excerpt_exactly_at_character_cap(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            excerpt = "x" * EXCERPT_MAX_CHARS
+            self._replace_source_excerpt(workspace, "src-001", excerpt)
+
+            context = self._build(workspace, cycle_id, frontier_id)
+
+            self.assertIn(f"    {excerpt}\n", context.text)
+
+    def test_public_context_translates_registry_eloop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            with mock.patch.object(
+                Path,
+                "read_text",
+                side_effect=OSError(errno.ELOOP, "registry symlink loop"),
+            ):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    r"frontier registry is invalid|symlink loop",
+                ) as raised:
+                    self._build(workspace, cycle_id, frontier_id)
+
+            self.assertIsInstance(raised.exception.__cause__, OSError)
+            self.assertEqual(errno.ELOOP, raised.exception.__cause__.errno)
+
+    def test_public_context_translates_search_eloop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            with mock.patch.object(
+                revisit_context,
+                "build_prior_query_digest",
+                side_effect=OSError(errno.ELOOP, "search symlink loop"),
+            ):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    r"prior-query search trace is invalid|symlink loop",
+                ) as raised:
+                    self._build(workspace, cycle_id, frontier_id)
+
+            self.assertIsInstance(raised.exception.__cause__, OSError)
+            self.assertEqual(errno.ELOOP, raised.exception.__cause__.errno)
+
+    def test_public_context_translates_excerpt_eloop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            excerpt_path = mock.Mock()
+            excerpt_path.read_bytes.side_effect = OSError(
+                errno.ELOOP,
+                "excerpt symlink loop",
+            )
+            with mock.patch.object(
+                revisit_context,
+                "resolve_workspace_path",
+                return_value=excerpt_path,
+            ):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    r"cannot read source excerpt|symlink loop",
+                ) as raised:
+                    self._build(workspace, cycle_id, frontier_id)
+
+            self.assertIsInstance(raised.exception.__cause__, OSError)
+            self.assertEqual(errno.ELOOP, raised.exception.__cause__.errno)
+
+    def test_registry_read_expected_error_is_domain_but_eio_stays_loud(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            with mock.patch.object(
+                Path,
+                "read_text",
+                side_effect=PermissionError("registry permission denied"),
+            ):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    r"frontier registry is invalid|permission denied",
+                ):
+                    revisit_context._load_frontier(workspace, frontier_id)
+
+            with mock.patch.object(
+                Path,
+                "read_text",
+                side_effect=OSError(errno.EIO, "registry I/O failure"),
+            ):
+                with self.assertRaises(OSError) as raised:
+                    revisit_context._load_frontier(workspace, frontier_id)
+            self.assertEqual(errno.EIO, raised.exception.errno)
+
+    def test_search_owner_error_is_domain_but_eio_stays_loud(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            with mock.patch.object(
+                revisit_context,
+                "build_prior_query_digest",
+                side_effect=ValueError("malformed target search trace"),
+            ):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    r"prior-query search trace is invalid|malformed",
+                ):
+                    self._build(workspace, cycle_id, frontier_id)
+
+            with mock.patch.object(
+                revisit_context,
+                "build_prior_query_digest",
+                side_effect=OSError(errno.EIO, "search I/O failure"),
+            ):
+                with self.assertRaises(OSError) as raised:
+                    self._build(workspace, cycle_id, frontier_id)
+            self.assertEqual(errno.EIO, raised.exception.errno)
+
+    def test_excerpt_read_expected_error_is_domain_but_eio_stays_loud(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            missing_path = mock.Mock()
+            missing_path.read_bytes.side_effect = FileNotFoundError(
+                "selected excerpt missing"
+            )
+            with mock.patch.object(
+                revisit_context,
+                "resolve_workspace_path",
+                return_value=missing_path,
+            ):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    r"cannot read source excerpt|missing",
+                ):
+                    self._build(workspace, cycle_id, frontier_id)
+
+            eio_path = mock.Mock()
+            eio_path.read_bytes.side_effect = OSError(
+                errno.EIO,
+                "selected excerpt I/O failure",
+            )
+            with mock.patch.object(
+                revisit_context,
+                "resolve_workspace_path",
+                return_value=eio_path,
+            ):
+                with self.assertRaises(OSError) as raised:
+                    self._build(workspace, cycle_id, frontier_id)
+            self.assertEqual(errno.EIO, raised.exception.errno)
+
+    def test_cycle_and_source_owner_unexpected_io_remain_unwrapped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            with mock.patch.object(
+                revisit_context,
+                "load_cycle",
+                side_effect=OSError(errno.EIO, "cycle I/O failure"),
+            ):
+                with self.assertRaises(OSError) as raised:
+                    self._build(workspace, cycle_id, frontier_id)
+            self.assertEqual(errno.EIO, raised.exception.errno)
+
+            with mock.patch.object(
+                revisit_context,
+                "evaluate_index",
+                side_effect=OSError(errno.EIO, "source evaluation I/O failure"),
+            ):
+                with self.assertRaises(OSError) as raised:
+                    self._build(workspace, cycle_id, frontier_id)
+            self.assertEqual(errno.EIO, raised.exception.errno)
+
+    def test_revisit_context_value_is_frozen(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            context = self._build(workspace, cycle_id, frontier_id)
+
+            with self.assertRaises(dataclasses.FrozenInstanceError):
+                context.text = "mutated"
+
+    def test_rejects_unsupported_role(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                r"frontier_scout|challenge_probe|only",
+            ):
+                self._build(
+                    workspace,
+                    cycle_id,
+                    frontier_id,
+                    role_slug="financial_bridge",
+                )
+
+    def test_rejects_unknown_empty_and_unbound_targets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+
+            with self.subTest("unknown cycle"):
+                with self.assertRaises(revisit_contract.RevisitContractError):
+                    self._build(workspace, "RC-9999", frontier_id)
+            with self.subTest("unknown frontier"):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError, r"frontier|F99"
+                ):
+                    self._build(workspace, cycle_id, "F99")
+            with self.subTest("unknown claim"):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError, r"claim|CL-99"
+                ):
+                    self._build(
+                        workspace,
+                        cycle_id,
+                        frontier_id,
+                        claim_ids=(f"{cycle_id}-CL-99",),
+                    )
+            with self.subTest("empty claim subset"):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError, r"claim|empty|non-empty"
+                ):
+                    self._build(
+                        workspace,
+                        cycle_id,
+                        frontier_id,
+                        claim_ids=(),
+                    )
+
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            extra_claim = copy.deepcopy(cycle["intake"]["selected_claims"][0])
+            extra_claim["claim_id"] = f"{cycle_id}-CL-02"
+            extra_claim["source_ref"]["historical_claim_id"] = "C2"
+            cycle["intake"]["selected_claims"].append(extra_claim)
+            extra_resolution = copy.deepcopy(cycle["claim_resolutions"][0])
+            extra_resolution["claim_id"] = extra_claim["claim_id"]
+            cycle["claim_resolutions"].append(extra_resolution)
+            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            attach_valid_audit(cycle)
+            revisit_contract.cycle_json_path(workspace, cycle_id).write_bytes(
+                revisit_contract.canonical_document_bytes(cycle)
+            )
+            with self.subTest("known claim not bound to target frontier"):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError, r"claim|bound|frontier"
+                ):
+                    self._build(
+                        workspace,
+                        cycle_id,
+                        frontier_id,
+                        claim_ids=(extra_claim["claim_id"],),
+                    )
+
+    def test_rejects_malformed_or_missing_source_cache_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            (workspace / "sources_index.jsonl").write_text(
+                "not-json\n", encoding="utf-8"
+            )
+            with self.subTest("malformed source cache"):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    r"source cache|SOURCE_INDEX_MALFORMED",
+                ):
+                    self._build(workspace, cycle_id, frontier_id)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            (workspace / "sources" / "src-001.md").unlink()
+            with self.subTest("missing excerpt"):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    r"source cache|SOURCE_EXCERPT_MISSING|missing excerpt",
+                ):
+                    self._build(workspace, cycle_id, frontier_id)
+
+    def test_rejects_malformed_target_search_trace_with_domain_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            (workspace / "search_log.jsonl").write_text(
+                "{not-json\n", encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                r"prior-query|search trace|search_log",
+            ):
+                self._build(workspace, cycle_id, frontier_id)
+
+    def test_rejects_loop_at_or_before_cycle_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            for loop_id in ("loop_7", "loop_6"):
+                with self.subTest(loop_id=loop_id):
+                    with self.assertRaisesRegex(
+                        revisit_contract.RevisitContractError,
+                        r"after cycle boundary|loop",
+                    ):
+                        self._build(
+                            workspace,
+                            cycle_id,
+                            frontier_id,
+                            loop_id=loop_id,
+                        )
+
+    def test_challenge_context_exposes_only_ids_and_accepted_evidence_refs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            resolution = cycle["claim_resolutions"][0]
+            accepted_ref = {
+                "kind": "artifact",
+                "path": "evidence_ledger.md",
+                "sha256": hashlib.sha256(
+                    (workspace / "evidence_ledger.md").read_bytes()
+                ).hexdigest(),
+                "locator": "Loop 8 accepted evidence",
+                "checked_at": "2026-07-14T12:30:00Z",
+            }
+            resolution.update(
+                {
+                    "status": "confirmed",
+                    "current_evidence_refs": [accepted_ref],
+                    "current_grade": "B",
+                    "current_confidence": "medium",
+                    "bound_frontier_ids": [frontier_id],
+                    "rationale": "INVENTED_RATIONALE must remain private.",
+                }
+            )
+            attach_valid_audit(cycle)
+            revisit_contract.cycle_json_path(workspace, cycle_id).write_bytes(
+                revisit_contract.canonical_document_bytes(cycle)
+            )
+
+            context = self._build(
+                workspace,
+                cycle_id,
+                frontier_id,
+                role_slug="challenge_probe",
+            )
+
+            required = (
+                cycle_id,
+                "loop_8",
+                frontier_id,
+                f"{cycle_id}-CL-01",
+                "evidence_ledger.md",
+                accepted_ref["sha256"],
+                "Loop 8 accepted evidence",
+                "2026-07-14T12:30:00Z",
+                "Grade: B",
+            )
+            for value in required:
+                with self.subTest(required=value):
+                    self.assertIn(value, context.text)
+            forbidden = (
+                "LEAKED_SCOUT_OUTPUT",
+                "INVENTED_RATIONALE",
+                "Customer qualification completes inside the prior watch window.",
+                "Watch with Trigger",
+                "medium",
+                "research status is",
+                "Layer: 1",
+                "Structural parent: F1",
+            )
+            for value in forbidden:
+                with self.subTest(forbidden=value):
+                    self.assertNotIn(value, context.text)
 
 
 class TestRevisitPackageBootstrap(unittest.TestCase):
@@ -11209,6 +11899,8 @@ class TestCycleSchema(unittest.TestCase):
             "RevisitIssue",
             "RevisitHistoryFact",
             "RevisitContractError",
+            "RevisitContext",
+            "build_revisit_context",
             "SOURCE_EVIDENCE_KEYS",
             "ARTIFACT_EVIDENCE_KEYS",
             "validate_evidence_ref",
