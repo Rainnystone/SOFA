@@ -6,6 +6,7 @@ import copy
 import html
 import re
 import unicodedata
+from collections import Counter
 from typing import Any
 
 
@@ -806,26 +807,29 @@ def _validate_v3_review_decisions(frontier: dict[str, Any], frontier_id: str) ->
 def _validate_v3_review_lifecycle_coherence(
     frontier: dict[str, Any], frontier_id: str
 ) -> None:
-    """Each review decision must match a lifecycle transition (same to+at_loop).
+    """Each review consumes a distinct matching lifecycle transition occurrence.
 
-    A later legal reactivation may follow the matched transition, so the match
-    only needs to exist somewhere in the lifecycle, not after the review.
+    The transition has the same ``(to, at_loop)`` as the review's
+    ``(decision, at_loop)``. Matching remains history-wide, so a later legal
+    reactivation may follow the consumed transition.
     """
     review_decisions = frontier.get("review_decisions") or []
     lifecycle = frontier.get("lifecycle") or []
-    if not review_decisions or not lifecycle:
+    if not review_decisions:
         return
 
-    transitions = {(row.get("to"), row.get("at_loop")) for row in lifecycle}
+    transitions = Counter((row.get("to"), row.get("at_loop")) for row in lifecycle)
     for position, row in enumerate(review_decisions):
         decision = row.get("decision")
         at_loop = row.get("at_loop")
-        if (decision, at_loop) not in transitions:
+        transition = (decision, at_loop)
+        if transitions[transition] == 0:
             location = f"frontier {frontier_id}.review_decisions[{position}]"
             raise LifecycleError(
                 f"{location} decision={decision} at_loop={at_loop} has no matching "
                 "lifecycle transition"
             )
+        transitions[transition] -= 1
 
 
 def _validate_v3_evidence_pointers(frontier: dict[str, Any], frontier_id: str) -> None:

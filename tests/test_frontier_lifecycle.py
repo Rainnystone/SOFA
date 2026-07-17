@@ -1009,6 +1009,131 @@ class TestFrontierLifecycle(unittest.TestCase):
             self.module.validate_registry(registry)
         self.assertEqual(original, registry)
 
+    def test_v3_review_decisions_require_nonempty_lifecycle_history(self):
+        for lifecycle_state in ("missing", "empty"):
+            with self.subTest(lifecycle_state=lifecycle_state):
+                registry = self._two_frontier_v3_registry()
+                frontier = registry["frontiers"][0]
+                frontier["status"] = "Continued"
+                frontier["review_count"] = 1
+                frontier["review_decisions"] = [
+                    self._canonical_review_row(
+                        review_number=1,
+                        at_loop=3,
+                        decision="Continued",
+                    )
+                ]
+                if lifecycle_state == "missing":
+                    frontier.pop("lifecycle")
+                else:
+                    frontier["lifecycle"] = []
+                original = copy.deepcopy(registry)
+
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(registry)
+
+                self.assertEqual(original, registry)
+
+    def test_v3_review_decisions_cannot_share_one_matching_transition(self):
+        registry = self._two_frontier_v3_registry()
+        frontier = registry["frontiers"][0]
+        frontier["status"] = "Continued"
+        frontier["review_count"] = 2
+        frontier["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Active", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Continued", at_loop=3, ts=None),
+        ]
+        frontier["review_decisions"] = [
+            self._canonical_review_row(
+                review_number=1,
+                at_loop=3,
+                decision="Continued",
+            ),
+            self._canonical_review_row(
+                review_number=2,
+                at_loop=3,
+                decision="Continued",
+            ),
+        ]
+        original = copy.deepcopy(registry)
+
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+
+        self.assertEqual(original, registry)
+
+    def test_v3_two_reviews_with_two_matching_transitions_validate(self):
+        registry = self._two_frontier_v3_registry()
+        frontier = registry["frontiers"][0]
+        frontier["status"] = "Continued"
+        frontier["review_count"] = 2
+        frontier["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Active", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Continued", at_loop=3, ts=None),
+            self._canonical_lifecycle_row(to="Continued", at_loop=3, ts=None),
+        ]
+        frontier["review_decisions"] = [
+            self._canonical_review_row(
+                review_number=1,
+                at_loop=3,
+                decision="Continued",
+            ),
+            self._canonical_review_row(
+                review_number=2,
+                at_loop=3,
+                decision="Continued",
+            ),
+        ]
+        original = copy.deepcopy(registry)
+
+        result = self.module.validate_registry(registry)
+
+        self.assertIs(registry, result)
+        self.assertEqual(original, registry)
+
+    def test_v3_writer_history_validates_without_mutating_input(self):
+        registry = self.v3_registry()
+        registry = self.module.transition(
+            registry,
+            "F1",
+            "Continued",
+            {"F1": 3},
+            mode="ticker",
+            action="review",
+            rationale="first review",
+            at_loop=3,
+            ts="2026-06-24T00:00:00Z",
+        )
+        registry = self.module.transition(
+            registry,
+            "F1",
+            "Active",
+            {"F1": 3},
+            mode="ticker",
+            action="reactivate",
+            at_loop=4,
+            ts="2026-06-25T00:00:00Z",
+        )
+        registry = self.module.transition(
+            registry,
+            "F1",
+            "Continued",
+            {"F1": 6},
+            mode="ticker",
+            action="review",
+            rationale="second review",
+            at_loop=6,
+            ts="2026-06-27T00:00:00Z",
+        )
+        original = copy.deepcopy(registry)
+
+        result = self.module.validate_registry(registry)
+
+        self.assertIs(registry, result)
+        self.assertEqual(original, registry)
+
     def test_v3_max_reviews_bound_enforced_on_review_rows(self):
         registry = self._two_frontier_v3_registry()
         for frontier in registry["frontiers"]:
