@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
-from .model import validate_cycle
+from .model import RevisitContractError, validate_cycle
 
 
 def _display(value: Any) -> str:
@@ -357,3 +357,43 @@ def render_cycle_markdown(cycle: dict[str, Any]) -> str:
         ),
     )
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def render_report_metadata(cycle: dict[str, Any]) -> str:
+    validate_cycle(cycle)
+    if cycle["status"] not in {"ready_for_report", "completed"}:
+        raise RevisitContractError(
+            "report metadata requires a ready or completed cycle"
+        )
+    assessment = cycle["decision_assessment"]
+    if assessment is None:
+        raise RevisitContractError(
+            "report metadata requires a deterministic decision assessment"
+        )
+    base = cycle["intake"]["base_revision"]
+
+    def joined(values: list[str]) -> str:
+        return ", ".join(values) if values else "none"
+
+    rows = (
+        ("Cycle ID", cycle["cycle_id"]),
+        ("Revision ID", cycle["candidate_revision_id"]),
+        ("Revision of", base["revision_id"]),
+        ("Base report SHA-256", base["report_sha256"]),
+        ("Base action class", base["action_class"]),
+        ("Current action class", assessment["new_action_class"]),
+        ("Change class", assessment["change_class"]),
+        ("Supporting claims", joined(assessment["supporting_claim_ids"])),
+        ("Blocked claims", joined(assessment["blocked_claim_ids"])),
+        ("Required reruns", joined(assessment["required_reruns"])),
+    )
+    lines = [
+        "<!-- sofa:revisit-revision:start -->",
+        "## Revisit Revision Metadata",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        *(f"| {_table_cell(label)} | {_table_cell(value)} |" for label, value in rows),
+        "<!-- sofa:revisit-revision:end -->",
+    ]
+    return "\n".join(lines) + "\n"

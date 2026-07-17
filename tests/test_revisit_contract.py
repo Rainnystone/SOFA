@@ -2,6 +2,7 @@ import copy
 import dataclasses
 import errno
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -21,6 +22,7 @@ import scripts.revisit_contract.model as revisit_model
 import scripts.revisit_contract.store as revisit_store
 import scripts.revisit_cycle as revisit_cycle_cli
 import scripts.sofa_contract.evaluate as sofa_evaluate
+import scripts.sofa_contract.revisit_readiness as revisit_readiness
 import scripts.timeliness_checker as timeliness_checker
 from scripts.frontier_lifecycle import (
     bind_frontier_layer,
@@ -90,6 +92,21 @@ def complete_ticker_report_bytes() -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def complete_revisit_report_bytes(cycle: dict) -> bytes:
+    return (
+        complete_ticker_report_bytes()
+        + revisit_contract.render_report_metadata(cycle).encode("utf-8")
+        + (
+            "\n## Trigger Delta\nObserved trigger validated.\n"
+            "## Claim Delta\nSelected claim confirmed.\n"
+            "## Evidence Freshness Delta\nCurrent evidence checked.\n"
+            "## Frontier Delta\nThree new loops reviewed.\n"
+            "## Financial/Red-Team Delta\nNo mechanical rerun required.\n"
+            "## Unresolved or Blocked Gaps\nNone.\n"
+        ).encode("utf-8")
+    )
 
 
 def make_registration_workspace(root: Path, *, mode: str = "ticker") -> tuple[Path, Path]:
@@ -722,6 +739,116 @@ def make_task6_ready_workspace(
     return workspace, cycle_id
 
 
+def make_task8_pre_report_workspace(
+    root: Path,
+    change_class: str,
+) -> tuple[Path, str]:
+    workspace, cycle_id = make_task6_binding_workspace(root)
+    bind_task6_reactivated_frontier(workspace, cycle_id)
+    loop_ids = append_task6_loops(workspace, 3)
+    write_task6_search_and_dispatch(workspace, loop_ids)
+    review_task6_frontier(workspace)
+
+    resolution = make_confirmed_resolution_request()
+    resolution["bound_frontier_ids"] = ["F1"]
+    resolution["current_evidence_refs"] = [
+        {
+            "kind": "source",
+            "source_id": "src-001",
+            "checked_at": "2026-07-14T12:00:00Z",
+        }
+    ]
+    resolution_path = root / f"task8-{change_class}-resolution.json"
+    resolution_path.write_text(
+        json.dumps(resolution, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    resolved = run_revisit_cycle_cli(
+        workspace,
+        "resolve-claim",
+        cycle_id,
+        f"{cycle_id}-CL-01",
+        "--resolution-file",
+        str(resolution_path),
+    )
+    if resolved.returncode != 0:
+        raise AssertionError(resolved.stderr)
+
+    assessment = make_decision_assessment_request()
+    if change_class == "financial_or_risk_change":
+        assessment["financial_bridge_affected"] = True
+        assessment["financial_bridge_rationale"] = (
+            "The accepted claim changes the affected financial transmission."
+        )
+    elif change_class == "action_class_change":
+        assessment["new_action_class"] = "Reject"
+        assessment["financial_bridge_affected"] = True
+        assessment["financial_bridge_rationale"] = (
+            "The new action class requires a full financial bridge."
+        )
+    assessment_path = root / f"task8-{change_class}-assessment.json"
+    assessment_path.write_text(
+        json.dumps(assessment, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    assessed = run_revisit_cycle_cli(
+        workspace,
+        "assess-decision",
+        cycle_id,
+        "--assessment-file",
+        str(assessment_path),
+    )
+    if assessed.returncode != 0:
+        raise AssertionError(assessed.stderr)
+    return workspace, cycle_id
+
+
+def record_task8_rerun(
+    workspace: Path,
+    cycle_id: str,
+    *,
+    kind: str,
+    path: str,
+    scope: str | None = None,
+    round_number: int | None = None,
+    dispatch_role: str | None = None,
+) -> None:
+    artifact = workspace / path
+    artifact.parent.mkdir(exist_ok=True)
+    card = "financial-bridge" if kind == "bridge" else "red-team"
+    artifact.write_text(
+        f"# Cycle rerun {path}\n\nMethod cards loaded: {card}.\n",
+        encoding="utf-8",
+    )
+    arguments = [
+        "record-rerun",
+        cycle_id,
+        "--kind",
+        kind,
+        "--path",
+        path,
+    ]
+    if scope is not None:
+        arguments.extend(("--scope", scope))
+    if round_number is not None:
+        arguments.extend(("--round", str(round_number)))
+    result = run_revisit_cycle_cli(workspace, *arguments)
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    if dispatch_role is not None:
+        dispatch_path = workspace / "dispatch_log.jsonl"
+        record = {
+            "dispatch_id": f"dispatch_{kind}_{round_number or 0}",
+            "loop_id": "loop_10",
+            "role": dispatch_role,
+            "mechanism": "host_subagent",
+            "delivery_path": path,
+            "status": "delivered",
+        }
+        with dispatch_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+
+
 def make_task6_added_ready_workspace(root: Path) -> tuple[Path, str, str]:
     workspace, cycle_id = make_task6_binding_workspace(root)
     frontier_id = add_task6_frontier(workspace, initial_status="Active")
@@ -1102,6 +1229,13 @@ def run_revisit_cycle_cli(workspace: Path, *arguments: str, env=None):
     )
 
 
+def evaluate_task8_report_candidate(workspace: Path, cycle_id: str):
+    return sofa_evaluate._prepare_revisit_report_for_publication(
+        workspace,
+        cycle_id,
+    ).result
+
+
 def snapshot_tree(root: Path) -> dict[str, tuple[str, bytes | None]]:
     snapshot = {}
     for path in sorted(root.rglob("*")):
@@ -1394,18 +1528,19 @@ def make_populated_cycle():
     }
     cycle["rerun_artifacts"] = [
         {
-            "kind": "delta-frontier-review",
+            "kind": "bridge",
             "scope": "affected",
-            "round": 1,
-            "path": "artifacts/delta-frontier-review.json",
+            "round": None,
+            "path": "financials/RC-0001_TEST_bridge.md",
             "sha256": "e" * 64,
             "recorded_at": timestamp,
         }
     ]
+    cycle["status"] = "ready_for_report"
     cycle["report_candidate"] = {
         "revision_id": "REV-0002",
         "revision_of": "REV-0001",
-        "report_path": "reports/revision-0002.md",
+        "report_path": "reports/revision_REV-0002.md",
         "report_sha256": "f" * 64,
         "registered_at": timestamp,
     }
@@ -1459,14 +1594,94 @@ def make_history_cycle(cycle_number, revision_number, status="aborted"):
         cycle_id=f"RC-{cycle_number:04d}",
         candidate_revision_id=f"REV-{revision_number:04d}",
     )
-    cycle["status"] = status
     if status == "completed":
-        cycle["completed_at"] = "2026-07-15T02:00:00Z"
-    elif status == "aborted":
-        cycle["aborted_at"] = "2026-07-15T02:00:00Z"
-        cycle["abort_reason"] = "Historical test reservation."
-    attach_valid_audit(cycle)
-    return cycle
+        cycle["status"] = "ready_for_report"
+        cycle["report_candidate"] = {
+            "revision_id": cycle["candidate_revision_id"],
+            "revision_of": cycle["intake"]["base_revision"]["revision_id"],
+            "report_path": (
+                f"reports/HISTORY_{cycle['candidate_revision_id']}.md"
+            ),
+            "report_sha256": "f" * 64,
+            "registered_at": "2026-07-15T01:59:00Z",
+        }
+        attach_valid_audit(cycle)
+        completed = copy.deepcopy(cycle)
+        completed["status"] = "completed"
+        completed["completed_at"] = "2026-07-15T02:00:00Z"
+        return revisit_model.with_audit(
+            cycle,
+            completed,
+            "publish",
+            [cycle["cycle_id"], cycle["candidate_revision_id"]],
+            "2026-07-15T02:00:00Z",
+        )
+    if status == "aborted":
+        aborted = copy.deepcopy(cycle)
+        aborted["status"] = "aborted"
+        aborted["aborted_at"] = "2026-07-15T02:00:00Z"
+        aborted["abort_reason"] = "Historical test reservation."
+        return revisit_model.with_audit(
+            cycle,
+            aborted,
+            "abort",
+            [cycle["cycle_id"]],
+            "2026-07-15T02:00:00Z",
+        )
+    cycle["status"] = status
+    return attach_valid_audit(cycle)
+
+
+def make_terminal_cycle_fixture(
+    cycle,
+    status,
+    *,
+    timestamp="2026-07-15T02:00:00Z",
+    report_path=None,
+    report_sha256=None,
+    abort_reason="Historical test reservation.",
+):
+    previous = copy.deepcopy(cycle)
+    previous["status"] = "active"
+    previous["completed_at"] = None
+    previous["aborted_at"] = None
+    previous["abort_reason"] = None
+    if status == "completed":
+        previous["status"] = "ready_for_report"
+        if previous["report_candidate"] is None:
+            previous["report_candidate"] = {
+                "revision_id": previous["candidate_revision_id"],
+                "revision_of": previous["intake"]["base_revision"]["revision_id"],
+                "report_path": report_path
+                or f"reports/HISTORY_{previous['candidate_revision_id']}.md",
+                "report_sha256": report_sha256 or "f" * 64,
+                "registered_at": "2026-07-15T01:59:00Z",
+            }
+        attach_valid_audit(previous)
+        terminal = copy.deepcopy(previous)
+        terminal["status"] = "completed"
+        terminal["completed_at"] = timestamp
+        return revisit_model.with_audit(
+            previous,
+            terminal,
+            "publish",
+            [previous["cycle_id"], previous["candidate_revision_id"]],
+            timestamp,
+        )
+    if status == "aborted":
+        attach_valid_audit(previous)
+        terminal = copy.deepcopy(previous)
+        terminal["status"] = "aborted"
+        terminal["aborted_at"] = timestamp
+        terminal["abort_reason"] = abort_reason
+        return revisit_model.with_audit(
+            previous,
+            terminal,
+            "abort",
+            [previous["cycle_id"]],
+            timestamp,
+        )
+    raise AssertionError(f"unsupported terminal fixture status: {status}")
 
 
 def make_drifted_task4_cycle():
@@ -3882,17 +4097,22 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                     if status != "active":
                         cycle_path = workspace / "revisit_cycles" / "RC-0001.json"
                         previous = revisit_contract.load_cycle(workspace, "RC-0001")
-                        updated = copy.deepcopy(previous)
-                        updated["status"] = status
                         if status == "completed":
-                            updated["completed_at"] = "2026-07-15T05:00:00Z"
-                        transitioned = revisit_model.with_audit(
-                            previous,
-                            updated,
-                            f"test-{status}",
-                            ["RC-0001"],
-                            "2026-07-15T05:00:00Z",
-                        )
+                            transitioned = make_terminal_cycle_fixture(
+                                previous,
+                                "completed",
+                                timestamp="2026-07-15T05:00:00Z",
+                            )
+                        else:
+                            updated = copy.deepcopy(previous)
+                            updated["status"] = status
+                            transitioned = revisit_model.with_audit(
+                                previous,
+                                updated,
+                                f"test-{status}",
+                                ["RC-0001"],
+                                "2026-07-15T05:00:00Z",
+                            )
                         revisit_contract.persist_cycle(
                             workspace,
                             transitioned,
@@ -4176,19 +4396,8 @@ class TestRevisitCycleAllocation(unittest.TestCase):
             }
         )
 
-        aborted = make_minimal_cycle()
-        aborted["status"] = "aborted"
-        aborted["aborted_at"] = "2026-07-15T01:00:00Z"
-        aborted["abort_reason"] = "Evidence access ended."
-        aborted["candidate_revision_id"] = "REV-0002"
-        attach_valid_audit(aborted)
-
-        completed = make_minimal_cycle(
-            cycle_id="RC-0004", candidate_revision_id="REV-0007"
-        )
-        completed["status"] = "completed"
-        completed["completed_at"] = "2026-07-15T02:00:00Z"
-        attach_valid_audit(completed)
+        aborted = make_history_cycle(1, 2, "aborted")
+        completed = make_history_cycle(4, 7, "completed")
         published = make_history_cycle(3, 3, "completed")
 
         original_pointer = copy.deepcopy(pointer)
@@ -4268,19 +4477,36 @@ class TestRevisitCycleStatusCli(unittest.TestCase):
         if condition == "ready":
             cycle["status"] = "ready_for_report"
         elif condition == "aborted":
-            cycle["status"] = "aborted"
-            cycle["aborted_at"] = "2026-07-15T03:00:00Z"
-            cycle["abort_reason"] = "The selected proof became unavailable."
+            cycle = make_terminal_cycle_fixture(
+                cycle,
+                "aborted",
+                timestamp="2026-07-15T03:00:00Z",
+                abort_reason="The selected proof became unavailable.",
+            )
         elif condition in {"published", "completed-unpublished"}:
-            cycle["status"] = "completed"
-            cycle["completed_at"] = "2026-07-15T03:00:00Z"
+            candidate_report_path = workspace / "reports" / "STATUS_REV-0002.md"
+            candidate_report_path.write_bytes(report_payload)
+            cycle = make_terminal_cycle_fixture(
+                cycle,
+                "completed",
+                timestamp="2026-07-15T03:00:00Z",
+                report_path="reports/STATUS_REV-0002.md",
+                report_sha256=hashlib.sha256(report_payload).hexdigest(),
+            )
         if condition == "published":
             pointer["current_revision"] = make_revisit_revision()
+            pointer["current_revision"]["report_path"] = (
+                "reports/STATUS_REV-0002.md"
+            )
         if pointer["current_revision"] is not None:
             pointer["current_revision"]["report_sha256"] = hashlib.sha256(
                 report_payload
             ).hexdigest()
-        if cycle is not None:
+        if cycle is not None and condition not in {
+            "aborted",
+            "published",
+            "completed-unpublished",
+        }:
             attach_valid_audit(cycle)
 
         (workspace / revisit_contract.POINTER_FILENAME).write_bytes(
@@ -4664,9 +4890,11 @@ class TestRevisitCycleStatusCli(unittest.TestCase):
                     cycle_id=cycle_id,
                     candidate_revision_id=candidate_revision_id,
                 )
-                cycle["status"] = "completed"
-                cycle["completed_at"] = "2026-07-15T03:00:00Z"
-                attach_valid_audit(cycle)
+                cycle = make_terminal_cycle_fixture(
+                    cycle,
+                    "completed",
+                    timestamp="2026-07-15T03:00:00Z",
+                )
                 revisit_contract.persist_cycle(
                     workspace, cycle, expected_sha256=None
                 )
@@ -4748,17 +4976,22 @@ class TestRevisitCycleAbortCli(unittest.TestCase):
     def transition_cycle_for_test(self, workspace, *, status):
         cycle_path = workspace / "revisit_cycles" / "RC-0001.json"
         previous = revisit_contract.load_cycle(workspace, "RC-0001")
-        updated = copy.deepcopy(previous)
-        updated["status"] = status
         if status == "completed":
-            updated["completed_at"] = "2026-07-15T04:00:00Z"
-        transitioned = revisit_model.with_audit(
-            previous,
-            updated,
-            f"test-{status}",
-            ["RC-0001"],
-            "2026-07-15T04:00:00Z",
-        )
+            transitioned = make_terminal_cycle_fixture(
+                previous,
+                "completed",
+                timestamp="2026-07-15T04:00:00Z",
+            )
+        else:
+            updated = copy.deepcopy(previous)
+            updated["status"] = status
+            transitioned = revisit_model.with_audit(
+                previous,
+                updated,
+                f"test-{status}",
+                ["RC-0001"],
+                "2026-07-15T04:00:00Z",
+            )
         revisit_contract.persist_cycle(
             workspace,
             transitioned,
@@ -6032,6 +6265,65 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
             return workspace, cycle_id
 
         self.assert_revisit_failure(make_workspace, expected_code)
+
+    def test_public_selection_keeps_loud_failure_for_missing_validated_cycle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, _cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            impossible_history = mock.Mock(
+                issues=(),
+                nonterminal_cycle_ids=("RC-9999",),
+                completed_unpublished_cycle_ids=(),
+            )
+            with mock.patch.object(
+                revisit_readiness,
+                "evaluate_history",
+                return_value=impossible_history,
+            ):
+                with self.assertRaisesRegex(
+                    revisit_readiness.ReadinessPlanError,
+                    "eligible history cycle lacks its validated document",
+                ):
+                    revisit_readiness.evaluate_revisit_readiness(workspace)
+
+    def test_public_revisit_report_is_exact_two_argument_readiness_adapter(self):
+        workspace = "workspace-token"
+        cycle_id = "RC-0007"
+        expected = object()
+        with mock.patch.object(
+            revisit_readiness,
+            "evaluate_revisit_readiness",
+            return_value=expected,
+        ) as readiness_seam:
+            with self.subTest(contract="signature"):
+                self.assertEqual(
+                    ("workspace", "cycle_id"),
+                    tuple(
+                        inspect.signature(
+                            sofa_evaluate.evaluate_revisit_report
+                        ).parameters
+                    ),
+                )
+            for contract, args, kwargs in (
+                (
+                    "third positional",
+                    (workspace, cycle_id, False),
+                    {},
+                ),
+                (
+                    "obsolete keyword",
+                    (workspace, cycle_id),
+                    {"require" + "_candidate": False},
+                ),
+            ):
+                with self.subTest(contract=contract):
+                    with self.assertRaises(TypeError):
+                        sofa_evaluate.evaluate_revisit_report(*args, **kwargs)
+
+            readiness_seam.reset_mock()
+            actual = sofa_evaluate.evaluate_revisit_report(workspace, cycle_id)
+
+        self.assertIs(expected, actual)
+        readiness_seam.assert_called_once_with(workspace, cycle_id)
 
     def test_revisit_rejects_delivered_worker_missing_method_cards(self):
         self.assert_invalid_worker_output_rejected(
@@ -8698,6 +8990,9 @@ class TestRevisitDecisionAssessmentMutation(unittest.TestCase):
     def test_assessment_support_may_be_a_subset_of_terminal_positive_claims(self):
         cycle = make_populated_cycle()
         cycle["decision_assessment"] = None
+        cycle["rerun_artifacts"] = []
+        cycle["report_candidate"] = None
+        cycle["status"] = "active"
         attach_valid_audit(cycle)
 
         proposed = revisit_contract.assess_decision(
@@ -10723,7 +11018,6 @@ class TestCycleSchema(unittest.TestCase):
                 self.assert_contract_error(
                     lambda: revisit_contract.validate_cycle(cycle), pattern
                 )
-
     def test_task4_resolution_and_start_audit_coverage_are_canonical(self):
         resolution_cases = (
             (
@@ -11915,6 +12209,9 @@ class TestCycleSchema(unittest.TestCase):
             "assess_decision",
             "derive_change_class",
             "derive_rerun_requirements",
+            "record_rerun",
+            "register_report_candidate",
+            "complete_cycle",
             "allocate_cycle_and_revision_ids",
             "evaluate_history",
             "create_cycle",
@@ -11937,6 +12234,7 @@ class TestCycleSchema(unittest.TestCase):
             "persist_cycle",
             "RevisitPersistenceRollbackError",
             "render_cycle_markdown",
+            "render_report_metadata",
             "semantic_sha256",
             "state_without_audit",
             "cycle_state_sha256",
@@ -12023,17 +12321,16 @@ class TestCycleSchema(unittest.TestCase):
         attach_valid_audit(ready)
         cycles.append(ready)
 
-        completed = make_populated_cycle()
-        completed["status"] = "completed"
-        completed["completed_at"] = "2026-07-15T02:00:00Z"
-        attach_valid_audit(completed)
+        completed = make_terminal_cycle_fixture(
+            make_populated_cycle(), "completed"
+        )
         cycles.append(completed)
 
-        aborted = make_minimal_cycle()
-        aborted["status"] = "aborted"
-        aborted["aborted_at"] = "2026-07-15T02:00:00Z"
-        aborted["abort_reason"] = "Primary evidence became unavailable."
-        attach_valid_audit(aborted)
+        aborted = make_terminal_cycle_fixture(
+            make_minimal_cycle(),
+            "aborted",
+            abort_reason="Primary evidence became unavailable.",
+        )
         cycles.append(aborted)
 
         for cycle in cycles:
@@ -12098,8 +12395,8 @@ class TestCycleSchema(unittest.TestCase):
 
         rerun_cases = (
             ("kind", "", "rerun_artifacts.*kind must be non-empty text"),
-            ("scope", "partial", "rerun_artifacts.*scope is unsupported"),
-            ("round", True, "rerun_artifacts.*round must be an integer >= 1"),
+            ("scope", "partial", "bridge rerun requires affected or full scope"),
+            ("round", True, "bridge rerun round must be null"),
             ("path", "", "rerun_artifacts.*path must be non-empty text"),
             ("sha256", "bad", "rerun_artifacts.*sha256 must be a lowercase"),
             (
@@ -12158,3 +12455,2339 @@ class TestCycleSchema(unittest.TestCase):
                 self.assert_contract_error(
                     lambda: revisit_contract.validate_cycle(cycle), pattern
                 )
+
+
+class TestTask8RerunArtifacts(unittest.TestCase):
+    def test_task8_public_transition_and_render_interfaces_are_exported(self):
+        for name in (
+            "record_rerun",
+            "register_report_candidate",
+            "complete_cycle",
+            "render_report_metadata",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(callable(getattr(revisit_contract, name, None)), name)
+
+    @staticmethod
+    def _active_assessed_cycle():
+        cycle = make_populated_cycle()
+        cycle["rerun_artifacts"] = []
+        cycle["report_candidate"] = None
+        cycle["status"] = "active"
+        cycle["completed_at"] = None
+        return attach_valid_audit(cycle)
+
+    @staticmethod
+    def _artifact(kind, path, *, scope=None, round_number=None, digest="1" * 64):
+        return {
+            "kind": kind,
+            "scope": scope,
+            "round": round_number,
+            "path": path,
+            "sha256": digest,
+            "recorded_at": "2026-07-14T14:00:00Z",
+        }
+
+    def test_old_bridge_path_without_cycle_id_is_rejected(self):
+        cycle = self._active_assessed_cycle()
+        artifact = self._artifact(
+            "bridge",
+            "financials/AXTI_bridge.md",
+            scope="affected",
+        )
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "cycle-specific bridge path",
+        ):
+            revisit_contract.record_rerun(cycle, artifact)
+
+    def test_all_allowed_rerun_rows_are_exact_copy_on_write_records(self):
+        cycle = self._active_assessed_cycle()
+        rows = (
+            self._artifact(
+                "bridge",
+                "financials/RC-0001_AXTI_bridge.md",
+                scope="full",
+                digest="1" * 64,
+            ),
+            self._artifact(
+                "redteam_attack",
+                "redteam/RC-0001_round1_redteam.md",
+                round_number=1,
+                digest="2" * 64,
+            ),
+            self._artifact(
+                "redteam_defense",
+                "redteam/RC-0001_round1_defense.md",
+                round_number=1,
+                digest="3" * 64,
+            ),
+            self._artifact(
+                "thesis_revision",
+                "redteam/RC-0001_thesis_revision.md",
+                digest="4" * 64,
+            ),
+        )
+        original = copy.deepcopy(cycle)
+        updated = cycle
+        for index, row in enumerate(rows, start=1):
+            previous = updated
+            proposed = revisit_contract.record_rerun(previous, row)
+            updated = revisit_model.with_audit(
+                previous,
+                proposed,
+                "record-rerun",
+                [row["path"]],
+                f"2026-07-14T14:00:0{index}Z",
+            )
+        self.assertEqual(original, cycle)
+        self.assertEqual(list(rows), updated["rerun_artifacts"])
+        self.assertIs(updated, revisit_contract.validate_cycle(updated))
+
+    def test_rerun_kind_applicability_path_hash_and_uniqueness_are_strict(self):
+        valid = self._artifact(
+            "bridge",
+            "financials/RC-0001_AXTI_bridge.md",
+            scope="affected",
+        )
+        cases = (
+            ({**valid, "kind": "other"}, "rerun artifact kind is unsupported"),
+            ({**valid, "scope": None}, "bridge rerun requires affected or full scope"),
+            ({**valid, "round": 1}, "bridge rerun round must be null"),
+            (
+                self._artifact(
+                    "redteam_attack",
+                    "redteam/RC-0001_round1_redteam.md",
+                    scope="full",
+                    round_number=1,
+                ),
+                "red-team rerun scope must be null",
+            ),
+            (
+                self._artifact(
+                    "redteam_attack",
+                    "redteam/RC-0001_round2_redteam.md",
+                    round_number=1,
+                ),
+                "red-team rerun path must match its round",
+            ),
+            (
+                self._artifact(
+                    "thesis_revision",
+                    "redteam/RC-0002_thesis_revision.md",
+                ),
+                "cycle-specific thesis revision path",
+            ),
+        )
+        for artifact, pattern in cases:
+            with self.subTest(pattern=pattern):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    pattern,
+                ):
+                    revisit_contract.record_rerun(
+                        self._active_assessed_cycle(), artifact
+                    )
+
+        previous = self._active_assessed_cycle()
+        first = revisit_model.with_audit(
+            previous,
+            revisit_contract.record_rerun(previous, valid),
+            "record-rerun",
+            [valid["path"]],
+            "2026-07-14T14:00:01Z",
+        )
+        for duplicate in (
+            {**valid, "sha256": "2" * 64},
+            {**valid, "path": "financials/RC-0001_OTHER_bridge.md"},
+        ):
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "rerun artifact (path|hash) is already registered",
+            ):
+                revisit_contract.record_rerun(first, duplicate)
+
+    def test_record_rerun_cli_grammar_is_exact(self):
+        parser = revisit_cycle_cli.build_parser()
+        for kind in (
+            "bridge",
+            "redteam-attack",
+            "redteam-defense",
+            "thesis-revision",
+        ):
+            with self.subTest(kind=kind):
+                args = parser.parse_args(
+                    [
+                        "workspace",
+                        "record-rerun",
+                        "RC-0001",
+                        "--kind",
+                        kind,
+                        "--path",
+                        "artifact.md",
+                    ]
+                )
+                self.assertEqual(kind, args.kind)
+
+    def test_record_rerun_cli_hashes_exact_bytes_and_appends_one_audit_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = make_task6_ready_workspace(Path(directory))
+            artifact = workspace / "financials" / f"{cycle_id}_TEST_bridge.md"
+            artifact.parent.mkdir()
+            payload = b"cycle-specific bridge bytes\r\n"
+            artifact.write_bytes(payload)
+            before = revisit_contract.load_cycle(workspace, cycle_id)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "record-rerun",
+                cycle_id,
+                "--kind",
+                "bridge",
+                "--scope",
+                "affected",
+                "--path",
+                artifact.relative_to(workspace).as_posix(),
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            after = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual("active", after["status"])
+            self.assertEqual(len(before["audit"]) + 1, len(after["audit"]))
+            self.assertEqual("record-rerun", after["audit"][-1]["command"])
+            self.assertEqual(
+                hashlib.sha256(payload).hexdigest(),
+                after["rerun_artifacts"][0]["sha256"],
+            )
+            self.assertEqual(payload, artifact.read_bytes())
+
+
+class TestTask8ReportMetadata(unittest.TestCase):
+    @staticmethod
+    def _ready_model_cycle():
+        cycle = make_terminal_model_cycle("confirmed")
+        proposed = revisit_contract.assess_decision(
+            cycle, make_decision_assessment_request()
+        )
+        cycle = revisit_model.with_audit(
+            cycle,
+            proposed,
+            "assess-decision",
+            ["RC-0001"],
+            "2026-07-15T00:30:00Z",
+        )
+        proposed = revisit_contract.mark_ready_for_report(cycle)
+        return revisit_model.with_audit(
+            cycle,
+            proposed,
+            "check",
+            ["RC-0001"],
+            "2026-07-15T00:31:00Z",
+        )
+
+    def test_render_report_metadata_matches_entire_managed_block_bytes(self):
+        cycle = self._ready_model_cycle()
+        expected = (
+            "<!-- sofa:revisit-revision:start -->\n"
+            "## Revisit Revision Metadata\n"
+            "\n"
+            "| Field | Value |\n"
+            "| --- | --- |\n"
+            "| Cycle ID | RC-0001 |\n"
+            "| Revision ID | REV-0002 |\n"
+            "| Revision of | REV-0001 |\n"
+            f"| Base report SHA-256 | {'a' * 64} |\n"
+            "| Base action class | Watch with Trigger |\n"
+            "| Current action class | Watch with Trigger |\n"
+            "| Change class | evidence_or_claim_only |\n"
+            "| Supporting claims | RC-0001-CL-01 |\n"
+            "| Blocked claims | none |\n"
+            "| Required reruns | delta-frontier-review |\n"
+            "<!-- sofa:revisit-revision:end -->\n"
+        )
+        self.assertEqual(expected, revisit_contract.render_report_metadata(cycle))
+        self.assertNotIn("2026-", revisit_contract.render_report_metadata(cycle))
+
+    def test_candidate_requires_all_ordinary_and_revisit_report_areas(self):
+        cycle = self._ready_model_cycle()
+        metadata = revisit_contract.render_report_metadata(cycle)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            reports = workspace / "reports"
+            reports.mkdir()
+            report = reports / "TEST_REV-0002.md"
+            ordinary_only = complete_ticker_report_bytes() + metadata.encode("utf-8")
+            report.write_bytes(ordinary_only)
+
+            missing = sofa_evaluate.evaluate_specific_ticker_report(
+                workspace,
+                "reports/TEST_REV-0002.md",
+                expected_sha256=hashlib.sha256(ordinary_only).hexdigest(),
+                expected_metadata=metadata,
+            )
+            self.assertFalse(missing.passed)
+            self.assertEqual(
+                {
+                    "FINAL_REPORT_MISSING_TRIGGER_DELTA",
+                    "FINAL_REPORT_MISSING_CLAIM_DELTA",
+                    "FINAL_REPORT_MISSING_EVIDENCE_FRESHNESS_DELTA",
+                    "FINAL_REPORT_MISSING_FRONTIER_DELTA",
+                    "FINAL_REPORT_MISSING_FINANCIAL_REDTEAM_DELTA",
+                    "FINAL_REPORT_MISSING_UNRESOLVED_BLOCKED_GAPS",
+                },
+                {issue.code for issue in missing.failures},
+            )
+
+            revisit_sections = (
+                "\n## Trigger Delta\n"
+                "## Claim Delta\n"
+                "## Evidence Freshness Delta\n"
+                "## Frontier Delta\n"
+                "## Financial/Red-Team Delta\n"
+                "## Unresolved or Blocked Gaps\nNone.\n"
+            ).encode("utf-8")
+            complete = ordinary_only + revisit_sections
+            report.write_bytes(complete)
+            accepted = sofa_evaluate.evaluate_specific_ticker_report(
+                workspace,
+                "reports/TEST_REV-0002.md",
+                expected_sha256=hashlib.sha256(complete).hexdigest(),
+                expected_metadata=metadata,
+            )
+            self.assertTrue(accepted.passed, [item.display() for item in accepted.failures])
+
+            delta_only = metadata.encode("utf-8") + revisit_sections
+            report.write_bytes(delta_only)
+            rejected = sofa_evaluate.evaluate_specific_ticker_report(
+                workspace,
+                "reports/TEST_REV-0002.md",
+                expected_sha256=hashlib.sha256(delta_only).hexdigest(),
+                expected_metadata=metadata,
+            )
+            self.assertFalse(rejected.passed)
+            self.assertIn(
+                "FINAL_REPORT_MISSING_CONFIDENCE",
+                {issue.code for issue in rejected.failures},
+            )
+
+    def test_render_report_metadata_cli_is_exact_and_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = make_task6_ready_workspace(Path(directory))
+            checked = run_revisit_cycle_cli(workspace, "check", cycle_id)
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            expected = revisit_contract.render_report_metadata(cycle)
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "render-report-metadata",
+                cycle_id,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(expected, result.stdout)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+
+class TestTask8ReportCandidate(unittest.TestCase):
+    def test_candidate_registration_is_ready_only_copy_on_write_and_one_time(self):
+        cycle = TestTask8ReportMetadata._ready_model_cycle()
+        candidate = {
+            "revision_id": "REV-0002",
+            "revision_of": "REV-0001",
+            "report_path": "reports/TEST_SOFA_Report_2026-07-14_REV-0002.md",
+            "report_sha256": "f" * 64,
+            "registered_at": "2026-07-14T15:00:00Z",
+        }
+        original = copy.deepcopy(cycle)
+        proposed = revisit_contract.register_report_candidate(cycle, candidate)
+        registered = revisit_model.with_audit(
+            cycle,
+            proposed,
+            "register-report",
+            ["REV-0002"],
+            "2026-07-14T15:00:00Z",
+        )
+        self.assertEqual(original, cycle)
+        self.assertEqual(candidate, registered["report_candidate"])
+        before = revisit_contract.canonical_document_bytes(registered)
+        changed = {**candidate, "report_sha256": "e" * 64}
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "report candidate is already registered",
+        ):
+            revisit_contract.register_report_candidate(registered, changed)
+        self.assertEqual(before, revisit_contract.canonical_document_bytes(registered))
+
+        active = copy.deepcopy(cycle)
+        active["status"] = "active"
+        attach_valid_audit(active)
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "ready_for_report",
+        ):
+            revisit_contract.register_report_candidate(active, candidate)
+
+    def test_candidate_path_requires_an_exact_reserved_revision_token(self):
+        cycle = TestTask8ReportMetadata._ready_model_cycle()
+        candidate = {
+            "revision_id": "REV-0002",
+            "revision_of": "REV-0001",
+            "report_path": "reports/TEST_REV-0002.md",
+            "report_sha256": "f" * 64,
+            "registered_at": "2026-07-14T15:00:00Z",
+        }
+        for report_path in (
+            "reports/TEST_XREV-0002.md",
+            "reports/TEST_REV-00020.md",
+            "reports/TEST_REV-0003.md",
+        ):
+            with self.subTest(report_path=report_path):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    "containing the reserved revision ID",
+                ):
+                    revisit_contract.register_report_candidate(
+                        cycle,
+                        {**candidate, "report_path": report_path},
+                    )
+
+    def test_register_report_cli_records_exact_complete_candidate_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = make_task6_ready_workspace(Path(directory))
+            checked = run_revisit_cycle_cli(workspace, "check", cycle_id)
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            current_before = (workspace / revisit_contract.POINTER_FILENAME).read_bytes()
+            report = (
+                workspace
+                / "reports"
+                / "TEST_SOFA_Report_2026-07-14_REV-0002.md"
+            )
+            payload = complete_revisit_report_bytes(cycle)
+            report.write_bytes(payload)
+
+            first = run_revisit_cycle_cli(
+                workspace,
+                "register-report",
+                cycle_id,
+                "--report",
+                report.relative_to(workspace).as_posix(),
+            )
+            self.assertEqual(0, first.returncode, first.stderr)
+            registered = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(
+                hashlib.sha256(payload).hexdigest(),
+                registered["report_candidate"]["report_sha256"],
+            )
+            self.assertEqual("register-report", registered["audit"][-1]["command"])
+            self.assertEqual(
+                current_before,
+                (workspace / revisit_contract.POINTER_FILENAME).read_bytes(),
+            )
+
+            cycle_bytes = (
+                workspace
+                / revisit_contract.CYCLES_DIRNAME
+                / f"{cycle_id}.json"
+            ).read_bytes()
+            report.write_bytes(payload + b"one byte of drift")
+            second = run_revisit_cycle_cli(
+                workspace,
+                "register-report",
+                cycle_id,
+                "--report",
+                report.relative_to(workspace).as_posix(),
+            )
+            self.assertEqual(2, second.returncode)
+            self.assertIn("already registered", second.stderr)
+            self.assertEqual(
+                cycle_bytes,
+                (
+                    workspace
+                    / revisit_contract.CYCLES_DIRNAME
+                    / f"{cycle_id}.json"
+                ).read_bytes(),
+            )
+
+    def test_register_report_binds_sibling_candidate_history_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = TestTask8FinalEvaluation._ready_workspace(
+                Path(directory)
+            )
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            report = workspace / "reports" / "SHARED_REV-0002_REV-0003.md"
+            report.write_bytes(complete_revisit_report_bytes(cycle))
+
+            def completed_sibling(report_path):
+                ready = make_minimal_cycle(
+                    cycle_id="RC-0002", candidate_revision_id="REV-0003"
+                )
+                ready["status"] = "ready_for_report"
+                ready["report_candidate"] = {
+                    "revision_id": "REV-0003",
+                    "revision_of": "REV-0001",
+                    "report_path": report_path,
+                    "report_sha256": "f" * 64,
+                    "registered_at": "2026-07-15T01:30:00Z",
+                }
+                attach_valid_audit(ready)
+                completed = copy.deepcopy(ready)
+                completed["status"] = "completed"
+                completed["completed_at"] = "2026-07-15T02:00:00Z"
+                return revisit_model.with_audit(
+                    ready,
+                    completed,
+                    "publish",
+                    ["RC-0002", "REV-0003"],
+                    "2026-07-15T02:00:00Z",
+                )
+
+            sibling = completed_sibling("reports/OTHER_REV-0003.md")
+            revisit_contract.persist_cycle(
+                workspace,
+                sibling,
+                expected_sha256=None,
+            )
+            target_cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            target_before = target_cycle_path.read_bytes()
+            real_evaluator = revisit_cycle_cli.evaluate_specific_ticker_report
+
+            def claim_same_path_after_history_scan(*args, **kwargs):
+                if args[1] != report.relative_to(workspace).as_posix():
+                    return real_evaluator(*args, **kwargs)
+                mutated = completed_sibling(
+                    "reports/SHARED_REV-0002_REV-0003.md"
+                )
+                sibling_json = (
+                    workspace
+                    / revisit_contract.CYCLES_DIRNAME
+                    / "RC-0002.json"
+                )
+                sibling_md = (
+                    workspace
+                    / revisit_contract.CYCLES_DIRNAME
+                    / "RC-0002.md"
+                )
+                sibling_md.write_text(
+                    revisit_contract.render_cycle_markdown(mutated),
+                    encoding="utf-8",
+                )
+                sibling_json.write_bytes(
+                    revisit_contract.canonical_document_bytes(mutated)
+                )
+                return real_evaluator(*args, **kwargs)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "evaluate_specific_ticker_report",
+                    side_effect=claim_same_path_after_history_scan,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [
+                        str(workspace),
+                        "register-report",
+                        cycle_id,
+                        "--report",
+                        report.relative_to(workspace).as_posix(),
+                    ]
+                )
+
+            self.assertEqual(2, result)
+            self.assertIn("RC-0002.json", stderr.getvalue())
+            self.assertEqual(target_before, target_cycle_path.read_bytes())
+
+    def test_register_report_rejects_historical_base_report_path_without_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, original_cycle_id = (
+                TestTask8FinalEvaluation._ready_workspace(Path(directory))
+            )
+            self.assertEqual("RC-0001", original_cycle_id)
+            original_path = revisit_contract.cycle_json_path(
+                workspace, original_cycle_id
+            )
+            target = revisit_contract.load_cycle(workspace, original_cycle_id)
+            target = json.loads(
+                json.dumps(target)
+                .replace("RC-0001", "RC-0002")
+                .replace("REV-0002", "REV-0003")
+            )
+            target["intake_sha256"] = revisit_contract.intake_sha256(
+                target["intake"]
+            )
+            attach_valid_audit(target)
+            revisit_contract.persist_cycle(
+                workspace,
+                target,
+                expected_sha256=None,
+            )
+
+            report = workspace / "reports" / "HISTORICAL_BASE_REV-0003.md"
+            report.write_bytes(complete_revisit_report_bytes(target))
+            relative = report.relative_to(workspace).as_posix()
+            history = make_minimal_cycle(
+                cycle_id="RC-0001",
+                candidate_revision_id="REV-0002",
+            )
+            history["intake"]["base_revision"]["report_path"] = relative
+            history["intake"]["base_revision"]["report_sha256"] = hashlib.sha256(
+                report.read_bytes()
+            ).hexdigest()
+            history["intake_sha256"] = revisit_contract.intake_sha256(
+                history["intake"]
+            )
+            attach_valid_audit(history)
+            aborted = copy.deepcopy(history)
+            aborted["status"] = "aborted"
+            aborted["aborted_at"] = "2026-07-15T02:00:00Z"
+            aborted["abort_reason"] = "Historical test reservation."
+            history = revisit_model.with_audit(
+                history,
+                aborted,
+                "abort",
+                ["RC-0001"],
+                "2026-07-15T02:00:00Z",
+            )
+            revisit_contract.persist_cycle(
+                workspace,
+                history,
+                expected_sha256=revisit_contract.sha256_file(original_path),
+            )
+            before = snapshot_tree(workspace)
+
+            result = run_revisit_cycle_cli(
+                workspace,
+                "register-report",
+                "RC-0002",
+                "--report",
+                relative,
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("already registered", result.stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_registered_candidate_can_be_preserved_by_terminal_abort(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = TestTask8FinalEvaluation._ready_workspace(
+                Path(directory)
+            )
+            report = TestTask8FinalEvaluation._register_candidate(
+                workspace,
+                cycle_id,
+            )
+            before = revisit_contract.load_cycle(workspace, cycle_id)
+            candidate = copy.deepcopy(before["report_candidate"])
+            pointer_bytes = (
+                workspace / revisit_contract.POINTER_FILENAME
+            ).read_bytes()
+            report.write_bytes(report.read_bytes() + b"candidate drift")
+            drifted_report = report.read_bytes()
+
+            aborted = run_revisit_cycle_cli(
+                workspace,
+                "abort",
+                cycle_id,
+                "--reason",
+                "The registered candidate drifted before publication.",
+            )
+
+            self.assertEqual(0, aborted.returncode, aborted.stderr)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual("aborted", cycle["status"])
+            self.assertEqual(candidate, cycle["report_candidate"])
+            self.assertEqual("abort", cycle["audit"][-1]["command"])
+            self.assertEqual(len(before["audit"]) + 1, len(cycle["audit"]))
+            self.assertEqual(
+                pointer_bytes,
+                (workspace / revisit_contract.POINTER_FILENAME).read_bytes(),
+            )
+            self.assertEqual(drifted_report, report.read_bytes())
+
+
+class TestTask8FinalEvaluation(unittest.TestCase):
+    @staticmethod
+    def _ready_workspace(root: Path):
+        workspace, cycle_id = make_task6_ready_workspace(root)
+        checked = run_revisit_cycle_cli(workspace, "check", cycle_id)
+        if checked.returncode != 0:
+            raise AssertionError(checked.stderr)
+        return workspace, cycle_id
+
+    @staticmethod
+    def _register_candidate(
+        workspace: Path,
+        cycle_id: str,
+        report_name: str = "TEST_SOFA_Report_REV-0002.md",
+    ) -> Path:
+        cycle = revisit_contract.load_cycle(workspace, cycle_id)
+        report = workspace / "reports" / report_name
+        report.write_bytes(complete_revisit_report_bytes(cycle))
+        registered = run_revisit_cycle_cli(
+            workspace,
+            "register-report",
+            cycle_id,
+            "--report",
+            report.relative_to(workspace).as_posix(),
+        )
+        if registered.returncode != 0:
+            raise AssertionError(registered.stderr)
+        return report
+
+    @classmethod
+    def _action_workspace_with_candidate(
+        cls,
+        root: Path,
+        report_name: str = "TEST_SOFA_Report_REV-0002.md",
+        extra_bridges: tuple[tuple[str, str], ...] = (),
+        extra_tickers: tuple[str, ...] = (),
+    ):
+        workspace, cycle_id = make_task8_pre_report_workspace(
+            root,
+            "action_class_change",
+        )
+        if extra_tickers:
+            framing_path = workspace / "framing_contract.json"
+            framing = json.loads(framing_path.read_text(encoding="utf-8"))
+            framing["subject_resolution"]["tickers"].extend(extra_tickers)
+            framing_path.write_text(
+                json.dumps(framing, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            cycle["intake"]["framing"]["sha256"] = hashlib.sha256(
+                framing_path.read_bytes()
+            ).hexdigest()
+            cycle["intake"]["framing"]["snapshot"]["subject_resolution"] = (
+                copy.deepcopy(framing["subject_resolution"])
+            )
+            cycle["intake_sha256"] = revisit_contract.intake_sha256(
+                cycle["intake"]
+            )
+            cycle["audit"][-1]["post_state_sha256"] = (
+                revisit_contract.cycle_state_sha256(cycle)
+            )
+            revisit_contract.cycle_json_path(workspace, cycle_id).write_bytes(
+                revisit_contract.canonical_document_bytes(cycle)
+            )
+            (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.md"
+            ).write_text(
+                revisit_contract.render_cycle_markdown(cycle),
+                encoding="utf-8",
+            )
+        record_task8_rerun(
+            workspace,
+            cycle_id,
+            kind="bridge",
+            path="financials/RC-0001_TEST_bridge.md",
+            scope="full",
+            dispatch_role="financial_bridge",
+        )
+        for round_number in (1, 2):
+            record_task8_rerun(
+                workspace,
+                cycle_id,
+                kind="redteam-attack",
+                path=f"redteam/RC-0001_round{round_number}_redteam.md",
+                round_number=round_number,
+                dispatch_role="red_team",
+            )
+            record_task8_rerun(
+                workspace,
+                cycle_id,
+                kind="redteam-defense",
+                path=f"redteam/RC-0001_round{round_number}_defense.md",
+                round_number=round_number,
+            )
+        record_task8_rerun(
+            workspace,
+            cycle_id,
+            kind="thesis-revision",
+            path="redteam/RC-0001_thesis_revision.md",
+        )
+        for index, (path, scope) in enumerate(extra_bridges, start=1):
+            record_task8_rerun(
+                workspace,
+                cycle_id,
+                kind="bridge",
+                path=path,
+                scope=scope,
+            )
+            dispatch_path = workspace / "dispatch_log.jsonl"
+            dispatch_record = {
+                "dispatch_id": f"dispatch_extra_bridge_{index}",
+                "loop_id": "loop_10",
+                "role": "financial_bridge",
+                "mechanism": "host_subagent",
+                "delivery_path": path,
+                "status": "delivered",
+            }
+            with dispatch_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(dispatch_record) + "\n")
+        checked = run_revisit_cycle_cli(workspace, "check", cycle_id)
+        if checked.returncode != 0:
+            raise AssertionError(checked.stderr)
+        report = cls._register_candidate(
+            workspace,
+            cycle_id,
+            report_name,
+        )
+        return workspace, cycle_id, report
+
+    def test_final_requires_exact_registered_candidate_and_is_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = self._ready_workspace(Path(directory))
+            missing = evaluate_task8_report_candidate(workspace, cycle_id)
+            self.assertIn(
+                "REVISIT_REPORT_CANDIDATE_MISSING",
+                {issue.code for issue in missing.failures},
+            )
+
+            report = self._register_candidate(workspace, cycle_id)
+            write_complete = workspace / "reports" / "old-complete-mask.md"
+            write_complete.write_bytes(complete_ticker_report_bytes())
+            before = snapshot_tree(workspace)
+            final = evaluate_task8_report_candidate(workspace, cycle_id)
+            self.assertTrue(final.passed, [item.display() for item in final.failures])
+            self.assertEqual(before, snapshot_tree(workspace))
+
+            report.write_bytes(report.read_bytes() + b"candidate drift")
+            drifted = evaluate_task8_report_candidate(workspace, cycle_id)
+            self.assertIn(
+                "REVISIT_REPORT_HASH_DRIFT",
+                {issue.code for issue in drifted.failures},
+            )
+
+    def test_final_rejects_wrong_candidate_identity_and_reserved_path(self):
+        mutations = (
+            (
+                "identity",
+                lambda candidate: candidate.update({"revision_id": "REV-0003"}),
+            ),
+            (
+                "path",
+                lambda candidate: candidate.update(
+                    {"report_path": "reports/wrong-revision.md"}
+                ),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                workspace, cycle_id = self._ready_workspace(Path(directory))
+                self._register_candidate(workspace, cycle_id)
+                cycle = revisit_contract.load_cycle(workspace, cycle_id)
+                mutate(cycle["report_candidate"])
+                attach_valid_audit(cycle)
+                cycle_path = (
+                    workspace
+                    / revisit_contract.CYCLES_DIRNAME
+                    / f"{cycle_id}.json"
+                )
+                cycle_path.write_bytes(
+                    revisit_contract.canonical_document_bytes(cycle)
+                )
+
+                result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+                self.assertIn(
+                    "REVISIT_REPORT_CANDIDATE_MISSING",
+                    {issue.code for issue in result.failures},
+                )
+
+    def test_final_rejects_exact_hash_with_wrong_derived_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = self._ready_workspace(Path(directory))
+            report = self._register_candidate(workspace, cycle_id)
+            payload = report.read_bytes().replace(
+                b"| Change class | evidence_or_claim_only |",
+                b"| Change class | action_class_change |",
+                1,
+            )
+            report.write_bytes(payload)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            cycle["report_candidate"]["report_sha256"] = hashlib.sha256(
+                payload
+            ).hexdigest()
+            attach_valid_audit(cycle)
+            cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            cycle_path.write_bytes(revisit_contract.canonical_document_bytes(cycle))
+            (workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.md").write_text(
+                revisit_contract.render_cycle_markdown(cycle),
+                encoding="utf-8",
+            )
+
+            result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+            self.assertIn(
+                "REVISIT_REPORT_METADATA_MISMATCH",
+                {issue.code for issue in result.failures},
+            )
+
+    def test_final_rejects_base_report_drift_after_candidate_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = self._ready_workspace(Path(directory))
+            self._register_candidate(workspace, cycle_id)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            base_report = workspace / cycle["intake"]["base_revision"]["report_path"]
+            base_report.write_bytes(base_report.read_bytes() + b"base drift")
+
+            result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+            self.assertIn(
+                "REVISIT_BASE_REPORT_DRIFT",
+                {issue.code for issue in result.failures},
+            )
+
+    def test_check_final_uses_same_verdict_and_never_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = self._ready_workspace(Path(directory))
+            self._register_candidate(workspace, cycle_id)
+            before = snapshot_tree(workspace)
+            result = run_revisit_cycle_cli(workspace, "check", cycle_id, "--final")
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("REVISIT FINAL CHECK PASSED", result.stdout)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_final_rechecks_candidate_generation_after_single_payload_owner_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = self._ready_workspace(Path(directory))
+            report = self._register_candidate(workspace, cycle_id)
+            real_owner = sofa_evaluate._evaluate_specific_ticker_report_document
+
+            def drift_after_owner_read(report_path, payload, **kwargs):
+                result = real_owner(report_path, payload, **kwargs)
+                if report_path == report.relative_to(workspace).as_posix():
+                    report.write_bytes(payload + b"post-owner drift")
+                return result
+
+            with mock.patch.object(
+                sofa_evaluate,
+                "_evaluate_specific_ticker_report_document",
+                side_effect=drift_after_owner_read,
+            ):
+                result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+            self.assertIn(
+                "REVISIT_REPORT_HASH_DRIFT",
+                {issue.code for issue in result.failures},
+            )
+
+    def test_final_rechecks_readiness_closure_after_candidate_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = self._ready_workspace(Path(directory))
+            self._register_candidate(workspace, cycle_id)
+            cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            cycle_bytes = cycle_path.read_bytes()
+            pointer_bytes = pointer_path.read_bytes()
+            registry = workspace / "frontier_registry.json"
+            real_final_owner = sofa_evaluate._evaluate_revisit_report_impl
+
+            def drift_after_final_owner(*args, **kwargs):
+                result = real_final_owner(*args, **kwargs)
+                registry.write_bytes(registry.read_bytes() + b"\n")
+                return result
+
+            with mock.patch.object(
+                sofa_evaluate,
+                "_evaluate_revisit_report_impl",
+                side_effect=drift_after_final_owner,
+            ):
+                result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+            self.assertIn(
+                "REVISIT_AUTHORITY_DRIFT",
+                {issue.code for issue in result.failures},
+            )
+            self.assertEqual(cycle_bytes, cycle_path.read_bytes())
+            self.assertEqual(pointer_bytes, pointer_path.read_bytes())
+
+    def test_final_keeps_candidate_and_rerun_post_owner_drift_codes_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, report = self._action_workspace_with_candidate(
+                Path(directory)
+            )
+            defense = workspace / "redteam" / "RC-0001_round1_defense.md"
+            real_owner = sofa_evaluate._evaluate_specific_ticker_report_document
+
+            def drift_rerun_after_candidate_owner(report_path, payload, **kwargs):
+                result = real_owner(report_path, payload, **kwargs)
+                if report_path == report.relative_to(workspace).as_posix():
+                    defense.write_bytes(defense.read_bytes() + b"post-owner drift")
+                return result
+
+            with mock.patch.object(
+                sofa_evaluate,
+                "_evaluate_specific_ticker_report_document",
+                side_effect=drift_rerun_after_candidate_owner,
+            ):
+                result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+            codes = {issue.code for issue in result.failures}
+            self.assertIn("REVISIT_RERUN_ARTIFACT_MISSING", codes)
+            self.assertNotIn("REVISIT_REPORT_HASH_DRIFT", codes)
+
+    def test_financial_row_requires_exact_bridge_artifact_and_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, cycle_id = make_task8_pre_report_workspace(
+                root,
+                "financial_or_risk_change",
+            )
+            checked = run_revisit_cycle_cli(workspace, "check", cycle_id)
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            self._register_candidate(workspace, cycle_id)
+
+            missing = evaluate_task8_report_candidate(workspace, cycle_id)
+            self.assertIn(
+                "REVISIT_RERUN_ARTIFACT_MISSING",
+                {issue.code for issue in missing.failures},
+            )
+
+    def test_bridge_path_must_match_one_frozen_resolved_ticker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = make_task8_pre_report_workspace(
+                Path(directory),
+                "financial_or_risk_change",
+            )
+            wrong_path = "financials/RC-0001_WRONG_bridge.md"
+            record_task8_rerun(
+                workspace,
+                cycle_id,
+                kind="bridge",
+                path=wrong_path,
+                scope="affected",
+                dispatch_role="financial_bridge",
+            )
+            checked = run_revisit_cycle_cli(workspace, "check", cycle_id)
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            self._register_candidate(workspace, cycle_id)
+
+            result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+            issues = [
+                issue
+                for issue in result.failures
+                if issue.code == "REVISIT_RERUN_ARTIFACT_MISSING"
+            ]
+            self.assertTrue(
+                any(issue.path == wrong_path for issue in issues),
+                [issue.display() for issue in result.failures],
+            )
+
+    def test_bridge_path_accepts_any_frozen_resolved_ticker_member(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = make_task8_pre_report_workspace(
+                Path(directory),
+                "financial_or_risk_change",
+            )
+            framing_path = workspace / "framing_contract.json"
+            framing = json.loads(framing_path.read_text(encoding="utf-8"))
+            framing["subject_resolution"]["tickers"] = ["ALT", "TEST"]
+            framing_path.write_text(
+                json.dumps(framing, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            cycle["intake"]["framing"]["sha256"] = hashlib.sha256(
+                framing_path.read_bytes()
+            ).hexdigest()
+            cycle["intake"]["framing"]["snapshot"]["subject_resolution"] = (
+                copy.deepcopy(framing["subject_resolution"])
+            )
+            cycle["intake_sha256"] = revisit_contract.intake_sha256(
+                cycle["intake"]
+            )
+            cycle["audit"][-1]["post_state_sha256"] = (
+                revisit_contract.cycle_state_sha256(cycle)
+            )
+            cycle_path = revisit_contract.cycle_json_path(workspace, cycle_id)
+            cycle_path.write_bytes(revisit_contract.canonical_document_bytes(cycle))
+            (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.md"
+            ).write_text(
+                revisit_contract.render_cycle_markdown(cycle),
+                encoding="utf-8",
+            )
+            valid_path = "financials/RC-0001_TEST_bridge.md"
+            record_task8_rerun(
+                workspace,
+                cycle_id,
+                kind="bridge",
+                path=valid_path,
+                scope="affected",
+                dispatch_role="financial_bridge",
+            )
+            checked = run_revisit_cycle_cli(workspace, "check", cycle_id)
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            self._register_candidate(workspace, cycle_id)
+
+            result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+            self.assertTrue(
+                result.passed,
+                [issue.display() for issue in result.failures],
+            )
+
+    def test_action_row_requires_each_exact_redteam_artifact_member(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = make_task8_pre_report_workspace(
+                Path(directory),
+                "action_class_change",
+            )
+            record_task8_rerun(
+                workspace,
+                cycle_id,
+                kind="bridge",
+                path="financials/RC-0001_TEST_bridge.md",
+                scope="full",
+                dispatch_role="financial_bridge",
+            )
+            record_task8_rerun(
+                workspace,
+                cycle_id,
+                kind="redteam-attack",
+                path="redteam/RC-0001_round1_redteam.md",
+                round_number=1,
+                dispatch_role="red_team",
+            )
+            for round_number in (1, 2):
+                record_task8_rerun(
+                    workspace,
+                    cycle_id,
+                    kind="redteam-defense",
+                    path=f"redteam/RC-0001_round{round_number}_defense.md",
+                    round_number=round_number,
+                )
+            record_task8_rerun(
+                workspace,
+                cycle_id,
+                kind="thesis-revision",
+                path="redteam/RC-0001_thesis_revision.md",
+            )
+            checked = run_revisit_cycle_cli(workspace, "check", cycle_id)
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            self._register_candidate(workspace, cycle_id)
+
+            result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+            issues = [
+                issue
+                for issue in result.failures
+                if issue.code == "REVISIT_RERUN_ARTIFACT_MISSING"
+            ]
+            self.assertTrue(
+                any("redteam-round-2" in (issue.evidence or "") for issue in issues),
+                [issue.display() for issue in result.failures],
+            )
+
+    def test_bridge_and_attack_dispatch_role_path_mismatches_are_distinct(self):
+        mismatches = (
+            "financials/RC-0001_TEST_bridge.md",
+            "redteam/RC-0001_round1_redteam.md",
+        )
+        for delivery_path in mismatches:
+            with (
+                self.subTest(delivery_path=delivery_path),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                workspace, cycle_id, _ = self._action_workspace_with_candidate(
+                    Path(directory)
+                )
+                dispatch_path = workspace / "dispatch_log.jsonl"
+                records = [
+                    json.loads(line)
+                    for line in dispatch_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                for record in records:
+                    if record.get("delivery_path") == delivery_path:
+                        record["role"] = "evidence_scout"
+                dispatch_path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records),
+                    encoding="utf-8",
+                )
+
+                result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+                issues = [
+                    issue
+                    for issue in result.failures
+                    if issue.code == "REVISIT_RERUN_DISPATCH_MISSING"
+                ]
+                self.assertTrue(
+                    any(delivery_path in (issue.evidence or "") for issue in issues),
+                    [issue.display() for issue in result.failures],
+                )
+
+    def test_action_change_exact_matrix_passes_and_artifact_drift_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, cycle_id = make_task8_pre_report_workspace(
+                root,
+                "action_class_change",
+            )
+            record_task8_rerun(
+                workspace,
+                cycle_id,
+                kind="bridge",
+                path="financials/RC-0001_TEST_bridge.md",
+                scope="full",
+                dispatch_role="financial_bridge",
+            )
+            for round_number in (1, 2):
+                record_task8_rerun(
+                    workspace,
+                    cycle_id,
+                    kind="redteam-attack",
+                    path=f"redteam/RC-0001_round{round_number}_redteam.md",
+                    round_number=round_number,
+                    dispatch_role="red_team",
+                )
+                record_task8_rerun(
+                    workspace,
+                    cycle_id,
+                    kind="redteam-defense",
+                    path=f"redteam/RC-0001_round{round_number}_defense.md",
+                    round_number=round_number,
+                )
+            record_task8_rerun(
+                workspace,
+                cycle_id,
+                kind="thesis-revision",
+                path="redteam/RC-0001_thesis_revision.md",
+            )
+            checked = run_revisit_cycle_cli(workspace, "check", cycle_id)
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            self._register_candidate(workspace, cycle_id)
+
+            accepted = evaluate_task8_report_candidate(workspace, cycle_id)
+            self.assertTrue(
+                accepted.passed,
+                [item.display() for item in accepted.failures],
+            )
+
+            defense = workspace / "redteam" / "RC-0001_round1_defense.md"
+            defense.write_bytes(defense.read_bytes() + b"drift")
+            drifted = evaluate_task8_report_candidate(workspace, cycle_id)
+            self.assertIn(
+                "REVISIT_RERUN_ARTIFACT_MISSING",
+                {issue.code for issue in drifted.failures},
+            )
+
+    def test_final_validates_every_recorded_rerun_not_only_required_matches(self):
+        extras = (
+            (
+                "non-required",
+                "financials/RC-0001_EXTRA_bridge.md",
+                "affected",
+                "EXTRA",
+            ),
+            (
+                "duplicate-semantic-slot",
+                "financials/RC-0001_SECOND_bridge.md",
+                "full",
+                "SECOND",
+            ),
+        )
+        for label, relative, scope, ticker in extras:
+            with (
+                self.subTest(label=label),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                workspace, cycle_id, _ = self._action_workspace_with_candidate(
+                    Path(directory),
+                    extra_bridges=((relative, scope),),
+                    extra_tickers=(ticker,),
+                )
+                accepted = evaluate_task8_report_candidate(workspace, cycle_id)
+                self.assertTrue(
+                    accepted.passed,
+                    [issue.display() for issue in accepted.failures],
+                )
+
+                artifact = workspace / relative
+                artifact.write_bytes(artifact.read_bytes() + b"registered drift")
+                drifted = evaluate_task8_report_candidate(workspace, cycle_id)
+
+                self.assertTrue(
+                    any(
+                        issue.code == "REVISIT_RERUN_ARTIFACT_MISSING"
+                        and issue.path == relative
+                        for issue in drifted.failures
+                    ),
+                    [issue.display() for issue in drifted.failures],
+                )
+
+    def test_final_rejects_missing_non_required_recorded_rerun_at_exact_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relative = "financials/RC-0001_EXTRA_bridge.md"
+            workspace, cycle_id, _ = self._action_workspace_with_candidate(
+                Path(directory),
+                extra_bridges=((relative, "affected"),),
+                extra_tickers=("EXTRA",),
+            )
+            (workspace / relative).unlink()
+
+            result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+            self.assertTrue(
+                any(
+                    issue.code == "REVISIT_RERUN_ARTIFACT_MISSING"
+                    and issue.path == relative
+                    for issue in result.failures
+                ),
+                [issue.display() for issue in result.failures],
+            )
+
+    def test_final_rechecks_non_required_rerun_generation_after_candidate_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relative = "financials/RC-0001_EXTRA_bridge.md"
+            workspace, cycle_id, report = self._action_workspace_with_candidate(
+                Path(directory),
+                extra_bridges=((relative, "affected"),),
+                extra_tickers=("EXTRA",),
+            )
+            artifact = workspace / relative
+            real_owner = sofa_evaluate._evaluate_specific_ticker_report_document
+
+            def drift_extra_after_candidate_owner(report_path, payload, **kwargs):
+                result = real_owner(report_path, payload, **kwargs)
+                if report_path == report.relative_to(workspace).as_posix():
+                    artifact.write_bytes(artifact.read_bytes() + b"post-owner drift")
+                return result
+
+            with mock.patch.object(
+                sofa_evaluate,
+                "_evaluate_specific_ticker_report_document",
+                side_effect=drift_extra_after_candidate_owner,
+            ):
+                result = evaluate_task8_report_candidate(workspace, cycle_id)
+
+            self.assertTrue(
+                any(
+                    issue.code == "REVISIT_RERUN_ARTIFACT_MISSING"
+                    and issue.path == relative
+                    for issue in result.failures
+                ),
+                [issue.display() for issue in result.failures],
+            )
+
+    def test_blocked_claim_id_must_appear_in_owned_gap_section(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = self._ready_workspace(Path(directory))
+            report = self._register_candidate(workspace, cycle_id)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            cycle["claim_resolutions"][0] = make_blocked_resolution(
+                f"{cycle_id}-CL-01", "F1"
+            )
+            cycle["decision_assessment"].update(
+                {
+                    "supporting_claim_ids": [],
+                    "blocked_claim_ids": [f"{cycle_id}-CL-01"],
+                    "verdict_rationale": (
+                        "The unresolved proof is disclosed without positive support."
+                    ),
+                }
+            )
+            attach_valid_audit(cycle)
+            report.write_bytes(complete_revisit_report_bytes(cycle))
+            cycle["report_candidate"]["report_sha256"] = hashlib.sha256(
+                report.read_bytes()
+            ).hexdigest()
+            attach_valid_audit(cycle)
+            cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            cycle_path.write_bytes(revisit_contract.canonical_document_bytes(cycle))
+            (workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.md").write_text(
+                revisit_contract.render_cycle_markdown(cycle),
+                encoding="utf-8",
+            )
+
+            result = evaluate_task8_report_candidate(workspace, cycle_id)
+            self.assertIn(
+                "REVISIT_REPORT_BLOCKED_DISCLOSURE_MISSING",
+                {issue.code for issue in result.failures},
+            )
+
+
+class TestTask8Publication(unittest.TestCase):
+    @staticmethod
+    def _registered_model_cycle():
+        cycle = TestTask8ReportMetadata._ready_model_cycle()
+        candidate = {
+            "revision_id": "REV-0002",
+            "revision_of": "REV-0001",
+            "report_path": "reports/TEST_SOFA_Report_REV-0002.md",
+            "report_sha256": "f" * 64,
+            "registered_at": "2026-07-15T00:32:00Z",
+        }
+        proposed = revisit_contract.register_report_candidate(cycle, candidate)
+        return revisit_model.with_audit(
+            cycle,
+            proposed,
+            "register-report",
+            ["REV-0002"],
+            "2026-07-15T00:32:00Z",
+        )
+
+    @staticmethod
+    def _registered_workspace(root: Path):
+        workspace, cycle_id = TestTask8FinalEvaluation._ready_workspace(root)
+        report = TestTask8FinalEvaluation._register_candidate(
+            workspace,
+            cycle_id,
+        )
+        return workspace, cycle_id, report
+
+    def test_complete_cycle_is_ready_candidate_only_and_copy_on_write(self):
+        cycle = self._registered_model_cycle()
+        original = copy.deepcopy(cycle)
+
+        proposed = revisit_contract.complete_cycle(
+            cycle,
+            "2026-07-15T00:33:00Z",
+        )
+        completed = revisit_model.with_audit(
+            cycle,
+            proposed,
+            "publish",
+            ["RC-0001", "REV-0002"],
+            "2026-07-15T00:33:00Z",
+        )
+
+        self.assertEqual(original, cycle)
+        self.assertEqual("completed", completed["status"])
+        self.assertEqual("2026-07-15T00:33:00Z", completed["completed_at"])
+        self.assertEqual("publish", completed["audit"][-1]["command"])
+        self.assertIs(completed, revisit_contract.validate_cycle(completed))
+
+        active = TestTask8RerunArtifacts._active_assessed_cycle()
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "ready_for_report",
+        ):
+            revisit_contract.complete_cycle(active, "2026-07-15T00:33:00Z")
+
+        ready_without_candidate = TestTask8ReportMetadata._ready_model_cycle()
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "report candidate",
+        ):
+            revisit_contract.complete_cycle(
+                ready_without_candidate,
+                "2026-07-15T00:33:00Z",
+            )
+
+    def test_validate_cycle_rejects_completed_without_report_candidate(self):
+        previous = self._registered_model_cycle()
+        proposed = revisit_contract.complete_cycle(
+            previous,
+            "2026-07-15T00:33:00Z",
+        )
+        completed = revisit_model.with_audit(
+            previous,
+            proposed,
+            "publish",
+            ["RC-0001", "REV-0002"],
+            "2026-07-15T00:33:00Z",
+        )
+        completed["report_candidate"] = None
+        completed["audit"][-1]["post_state_sha256"] = (
+            revisit_contract.cycle_state_sha256(completed)
+        )
+
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "completed cycle requires report_candidate",
+        ):
+            revisit_contract.validate_cycle(completed)
+
+    def test_validate_cycle_rejects_completed_without_last_publish_audit(self):
+        previous = self._registered_model_cycle()
+        proposed = revisit_contract.complete_cycle(
+            previous,
+            "2026-07-15T00:33:00Z",
+        )
+        completed = revisit_model.with_audit(
+            previous,
+            proposed,
+            "publish",
+            ["RC-0001", "REV-0002"],
+            "2026-07-15T00:33:00Z",
+        )
+        completed["audit"][-1]["command"] = "check"
+
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "completed cycle requires last audit command publish",
+        ):
+            revisit_contract.validate_cycle(completed)
+
+    def test_validate_cycle_rejects_aborted_without_last_abort_audit(self):
+        previous = self._registered_model_cycle()
+        proposed = copy.deepcopy(previous)
+        proposed["status"] = "aborted"
+        proposed["aborted_at"] = "2026-07-15T00:33:00Z"
+        proposed["abort_reason"] = "The main thread stopped this cycle."
+        aborted = revisit_model.with_audit(
+            previous,
+            proposed,
+            "abort",
+            ["RC-0001"],
+            "2026-07-15T00:33:00Z",
+        )
+        aborted["audit"][-1]["command"] = "check"
+
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            "aborted cycle requires last audit command abort",
+        ):
+            revisit_contract.validate_cycle(aborted)
+
+    def test_validate_cycle_accepts_terminal_command_closure_controls(self):
+        registered = self._registered_model_cycle()
+        proposed = revisit_contract.complete_cycle(
+            registered,
+            "2026-07-15T00:33:00Z",
+        )
+        completed = revisit_model.with_audit(
+            registered,
+            proposed,
+            "publish",
+            ["RC-0001", "REV-0002"],
+            "2026-07-15T00:33:00Z",
+        )
+        self.assertIs(completed, revisit_contract.validate_cycle(completed))
+
+        for label, previous in (
+            ("candidate retained", registered),
+            ("candidate omitted", TestTask8ReportMetadata._ready_model_cycle()),
+        ):
+            with self.subTest(label=label):
+                proposed = copy.deepcopy(previous)
+                proposed["status"] = "aborted"
+                proposed["aborted_at"] = "2026-07-15T00:34:00Z"
+                proposed["abort_reason"] = "The main thread stopped this cycle."
+                aborted = revisit_model.with_audit(
+                    previous,
+                    proposed,
+                    "abort",
+                    ["RC-0001"],
+                    "2026-07-15T00:34:00Z",
+                )
+                self.assertIs(aborted, revisit_contract.validate_cycle(aborted))
+
+    def test_publish_cli_grammar_is_exact(self):
+        args = revisit_cycle_cli.build_parser().parse_args(
+            ["workspace", "publish", "RC-0001"]
+        )
+        self.assertEqual("RC-0001", args.cycle)
+        self.assertIs(revisit_cycle_cli.command_publish, args.handler)
+
+    def test_publish_replaces_completed_mirror_then_json_then_pointer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, report = self._registered_workspace(
+                Path(directory)
+            )
+            before_cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            report_bytes = report.read_bytes()
+            cli_store = sys.modules[revisit_cycle_cli.persist_cycle.__module__]
+            real_atomic_replace = cli_store._atomic_replace
+            destinations = []
+
+            def record_replace(path, payload):
+                destinations.append(Path(path).relative_to(workspace).as_posix())
+                return real_atomic_replace(path, payload)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_utc_now_seconds",
+                    return_value="2026-07-15T01:00:00Z",
+                ),
+                mock.patch.object(
+                    cli_store,
+                    "_atomic_replace",
+                    side_effect=record_replace,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(0, result, stderr.getvalue())
+            self.assertEqual(
+                [
+                    f"revisit_cycles/{cycle_id}.md",
+                    f"revisit_cycles/{cycle_id}.json",
+                    revisit_contract.POINTER_FILENAME,
+                ],
+                destinations,
+            )
+            completed = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual("completed", completed["status"])
+            self.assertEqual("2026-07-15T01:00:00Z", completed["completed_at"])
+            self.assertEqual(len(before_cycle["audit"]) + 1, len(completed["audit"]))
+            self.assertEqual("publish", completed["audit"][-1]["command"])
+            current = revisit_contract.load_pointer(workspace)["current_revision"]
+            candidate = completed["report_candidate"]
+            self.assertEqual(
+                {
+                    "revision_id": candidate["revision_id"],
+                    "cycle_id": cycle_id,
+                    "report_path": candidate["report_path"],
+                    "report_sha256": candidate["report_sha256"],
+                    "action_class": completed["decision_assessment"][
+                        "new_action_class"
+                    ],
+                    "validated_at": "2026-07-15T01:00:00Z",
+                    "revision_of": candidate["revision_of"],
+                },
+                current,
+            )
+            self.assertEqual(report_bytes, report.read_bytes())
+
+    def test_pointer_failure_leaves_completed_unpublished_and_retry_is_pointer_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, cycle_id, _ = self._registered_workspace(root)
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            mirror_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.md"
+            )
+            pointer_before = pointer_path.read_bytes()
+            before_cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            cli_store = sys.modules[revisit_cycle_cli.persist_cycle.__module__]
+            real_atomic_replace = cli_store._atomic_replace
+
+            def fail_pointer(path, payload):
+                if Path(path) == pointer_path:
+                    raise OSError("simulated pointer replace failure")
+                return real_atomic_replace(path, payload)
+
+            first_stdout = io.StringIO()
+            first_stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_utc_now_seconds",
+                    return_value="2026-07-15T01:00:00Z",
+                ),
+                mock.patch.object(
+                    cli_store,
+                    "_atomic_replace",
+                    side_effect=fail_pointer,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli.sys,
+                    "stdout",
+                    first_stdout,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli.sys,
+                    "stderr",
+                    first_stderr,
+                ),
+            ):
+                failed = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(2, failed)
+            self.assertIn("simulated pointer replace failure", first_stderr.getvalue())
+            self.assertEqual(pointer_before, pointer_path.read_bytes())
+            completed = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual("completed", completed["status"])
+            self.assertEqual(len(before_cycle["audit"]) + 1, len(completed["audit"]))
+            self.assertEqual("publish", completed["audit"][-1]["command"])
+            completed_json = cycle_path.read_bytes()
+            completed_mirror = mirror_path.read_bytes()
+
+            status = run_revisit_cycle_cli(
+                workspace,
+                "status",
+                cycle_id,
+                "--json",
+            )
+            self.assertEqual(0, status.returncode, status.stderr)
+            self.assertEqual(
+                "completed-unpublished",
+                json.loads(status.stdout)["cycles"][0]["status"],
+            )
+            blocked_start = run_revisit_cycle_cli(
+                workspace,
+                "start",
+                "--intake-file",
+                str(root / "revisit-request.json"),
+            )
+            self.assertEqual(2, blocked_start.returncode)
+            self.assertIn("completed-unpublished", blocked_start.stderr)
+            self.assertFalse(
+                (
+                    workspace
+                    / revisit_contract.CYCLES_DIRNAME
+                    / "RC-0002.json"
+                ).exists()
+            )
+
+            retry_destinations = []
+
+            def record_retry(path, payload):
+                retry_destinations.append(
+                    Path(path).relative_to(workspace).as_posix()
+                )
+                return real_atomic_replace(path, payload)
+
+            retry_stdout = io.StringIO()
+            retry_stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_utc_now_seconds",
+                    return_value="2026-07-15T01:05:00Z",
+                ),
+                mock.patch.object(
+                    cli_store,
+                    "_atomic_replace",
+                    side_effect=record_retry,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli.sys,
+                    "stdout",
+                    retry_stdout,
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli.sys,
+                    "stderr",
+                    retry_stderr,
+                ),
+            ):
+                retried = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(0, retried, retry_stderr.getvalue())
+            self.assertEqual(
+                [revisit_contract.POINTER_FILENAME],
+                retry_destinations,
+            )
+            self.assertEqual(completed_json, cycle_path.read_bytes())
+            self.assertEqual(completed_mirror, mirror_path.read_bytes())
+            self.assertEqual(completed, revisit_contract.load_cycle(workspace, cycle_id))
+            current = revisit_contract.load_pointer(workspace)["current_revision"]
+            self.assertEqual("REV-0002", current["revision_id"])
+            self.assertEqual(cycle_id, current["cycle_id"])
+            self.assertEqual("2026-07-15T01:05:00Z", current["validated_at"])
+
+    def test_readiness_authority_drift_after_final_verdict_blocks_cycle_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, _ = self._registered_workspace(Path(directory))
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            mirror_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.md"
+            )
+            pointer_before = pointer_path.read_bytes()
+            cycle_before = cycle_path.read_bytes()
+            mirror_before = mirror_path.read_bytes()
+            registry = workspace / "frontier_registry.json"
+            real_persist_cycle = revisit_cycle_cli.persist_cycle
+
+            def drift_readiness_authority(*args, **kwargs):
+                registry.write_bytes(registry.read_bytes() + b"\n")
+                return real_persist_cycle(*args, **kwargs)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_utc_now_seconds",
+                    return_value="2026-07-15T01:00:00Z",
+                ),
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "persist_cycle",
+                    side_effect=drift_readiness_authority,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(2, result)
+            self.assertIn("frontier_registry.json", stderr.getvalue())
+            self.assertEqual(pointer_before, pointer_path.read_bytes())
+            self.assertEqual(cycle_before, cycle_path.read_bytes())
+            self.assertEqual(mirror_before, mirror_path.read_bytes())
+
+    def test_candidate_drift_blocks_completed_unpublished_pointer_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, report = self._registered_workspace(Path(directory))
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            mirror_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.md"
+            )
+            pointer_before = pointer_path.read_bytes()
+            with mock.patch.object(
+                revisit_cycle_cli,
+                "persist_pointer",
+                side_effect=OSError("simulated pointer failure"),
+            ):
+                failed = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+            self.assertEqual(2, failed)
+            completed_json = cycle_path.read_bytes()
+            completed_mirror = mirror_path.read_bytes()
+            self.assertEqual(
+                "completed",
+                revisit_contract.load_cycle(workspace, cycle_id)["status"],
+            )
+
+            report.write_bytes(report.read_bytes() + b"candidate drift")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                retried = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(1, retried)
+            self.assertIn("REVISIT_REPORT_HASH_DRIFT", stderr.getvalue())
+            self.assertEqual(pointer_before, pointer_path.read_bytes())
+            self.assertEqual(completed_json, cycle_path.read_bytes())
+            self.assertEqual(completed_mirror, mirror_path.read_bytes())
+
+    def test_base_report_drift_blocks_completed_unpublished_pointer_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, _ = self._registered_workspace(Path(directory))
+            with mock.patch.object(
+                revisit_cycle_cli,
+                "persist_pointer",
+                side_effect=OSError("simulated pointer failure"),
+            ):
+                failed = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+            self.assertEqual(2, failed)
+            completed = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual("completed", completed["status"])
+
+            base_report = workspace / completed["intake"]["base_revision"][
+                "report_path"
+            ]
+            base_report.write_bytes(base_report.read_bytes() + b"base drift")
+            before = snapshot_tree(workspace)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                retried = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertNotEqual(0, retried)
+            self.assertIn("REVISIT_BASE_REPORT_DRIFT", stderr.getvalue())
+            self.assertNotIn("ALREADY PUBLISHED", stdout.getvalue())
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_readiness_drift_after_completed_preparation_blocks_pointer_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, _ = self._registered_workspace(Path(directory))
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            pointer_before = pointer_path.read_bytes()
+            registry = workspace / "frontier_registry.json"
+            real_persist_pointer = revisit_cycle_cli.persist_pointer
+
+            def drift_before_pointer(*args, **kwargs):
+                registry.write_bytes(registry.read_bytes() + b"\n")
+                return real_persist_pointer(*args, **kwargs)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "persist_pointer",
+                    side_effect=drift_before_pointer,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                result = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(2, result)
+            self.assertIn("frontier_registry.json", stderr.getvalue())
+            self.assertEqual(pointer_before, pointer_path.read_bytes())
+            self.assertEqual(
+                "completed",
+                revisit_contract.load_cycle(workspace, cycle_id)["status"],
+            )
+
+    def test_sibling_history_drift_blocks_completed_unpublished_pointer_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, _ = self._registered_workspace(Path(directory))
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            pointer_before = pointer_path.read_bytes()
+            with mock.patch.object(
+                revisit_cycle_cli,
+                "persist_pointer",
+                side_effect=OSError("simulated pointer failure"),
+            ):
+                failed = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+            self.assertEqual(2, failed)
+            completed_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            completed_bytes = completed_path.read_bytes()
+
+            sibling = make_history_cycle(2, 3, "aborted")
+            revisit_contract.persist_cycle(
+                workspace,
+                sibling,
+                expected_sha256=None,
+            )
+            sibling_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / "RC-0002.json"
+            )
+            real_persist_pointer = revisit_cycle_cli.persist_pointer
+
+            def drift_sibling_before_pointer(*args, **kwargs):
+                sibling_path.write_bytes(sibling_path.read_bytes() + b"\n")
+                return real_persist_pointer(*args, **kwargs)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "persist_pointer",
+                    side_effect=drift_sibling_before_pointer,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                retried = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(2, retried)
+            self.assertIn("RC-0002.json", stderr.getvalue())
+            self.assertEqual(pointer_before, pointer_path.read_bytes())
+            self.assertEqual(completed_bytes, completed_path.read_bytes())
+
+    def test_already_current_publish_rejects_required_defense_drift_without_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, report = (
+                TestTask8FinalEvaluation._action_workspace_with_candidate(
+                    Path(directory)
+                )
+            )
+            first = revisit_cycle_cli.main([str(workspace), "publish", cycle_id])
+            self.assertEqual(0, first)
+
+            defense = workspace / "redteam" / "RC-0001_round1_defense.md"
+            defense.write_bytes(defense.read_bytes() + b"drift")
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            mirror_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.md"
+            )
+            before = {
+                "pointer": pointer_path.read_bytes(),
+                "cycle": cycle_path.read_bytes(),
+                "mirror": mirror_path.read_bytes(),
+                "candidate": report.read_bytes(),
+            }
+            persisted = revisit_contract.load_cycle(workspace, cycle_id)
+            candidate = copy.deepcopy(persisted["report_candidate"])
+            audit = copy.deepcopy(persisted["audit"])
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                repeated = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertNotEqual(0, repeated)
+            self.assertIn("REVISIT_RERUN_ARTIFACT_MISSING", stderr.getvalue())
+            self.assertNotIn("ALREADY PUBLISHED", stdout.getvalue())
+            self.assertEqual(before["pointer"], pointer_path.read_bytes())
+            self.assertEqual(before["cycle"], cycle_path.read_bytes())
+            self.assertEqual(before["mirror"], mirror_path.read_bytes())
+            self.assertEqual(before["candidate"], report.read_bytes())
+            unchanged = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(candidate, unchanged["report_candidate"])
+            self.assertEqual(audit, unchanged["audit"])
+
+    def test_already_current_publish_rejects_stable_live_framing_mismatch_without_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, _ = (
+                TestTask8FinalEvaluation._action_workspace_with_candidate(
+                    Path(directory)
+                )
+            )
+            first = revisit_cycle_cli.main([str(workspace), "publish", cycle_id])
+            self.assertEqual(0, first)
+
+            framing_path = workspace / "framing_contract.json"
+            framing = json.loads(framing_path.read_text(encoding="utf-8"))
+            framing["subject_resolution"]["tickers"] = ["OTHER"]
+            framing_path.write_text(
+                json.dumps(framing, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(workspace)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                repeated = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertNotEqual(0, repeated)
+            self.assertIn("REVISIT_CYCLE_MALFORMED", stderr.getvalue())
+            self.assertIn("cycle.intake.framing", stderr.getvalue())
+            self.assertNotIn("ALREADY PUBLISHED", stdout.getvalue())
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_already_current_publish_rejects_stable_base_report_drift_without_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, _ = (
+                TestTask8FinalEvaluation._action_workspace_with_candidate(
+                    Path(directory)
+                )
+            )
+            first = revisit_cycle_cli.main([str(workspace), "publish", cycle_id])
+            self.assertEqual(0, first)
+
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            base_report = workspace / cycle["intake"]["base_revision"][
+                "report_path"
+            ]
+            base_report.write_bytes(base_report.read_bytes() + b"base drift")
+            before = snapshot_tree(workspace)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                repeated = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertNotEqual(0, repeated)
+            self.assertIn("REVISIT_BASE_REPORT_DRIFT", stderr.getvalue())
+            self.assertNotIn("ALREADY PUBLISHED", stdout.getvalue())
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_already_current_publish_rejects_missing_required_rerun_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, report = (
+                TestTask8FinalEvaluation._action_workspace_with_candidate(
+                    Path(directory)
+                )
+            )
+            first = revisit_cycle_cli.main([str(workspace), "publish", cycle_id])
+            self.assertEqual(0, first)
+
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            mirror_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.md"
+            )
+            persisted = revisit_contract.load_cycle(workspace, cycle_id)
+            persisted["rerun_artifacts"] = [
+                artifact
+                for artifact in persisted["rerun_artifacts"]
+                if not (
+                    artifact["kind"] == "redteam_attack"
+                    and artifact["round"] == 2
+                )
+            ]
+            persisted["audit"][-1]["post_state_sha256"] = (
+                revisit_contract.cycle_state_sha256(persisted)
+            )
+            cycle_path.write_bytes(
+                revisit_contract.canonical_document_bytes(persisted)
+            )
+            mirror_path.write_text(
+                revisit_contract.render_cycle_markdown(persisted),
+                encoding="utf-8",
+            )
+            before = {
+                "pointer": pointer_path.read_bytes(),
+                "cycle": cycle_path.read_bytes(),
+                "mirror": mirror_path.read_bytes(),
+                "candidate": report.read_bytes(),
+            }
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                repeated = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertNotEqual(0, repeated)
+            self.assertIn("REVISIT_RERUN_ARTIFACT_MISSING", stderr.getvalue())
+            self.assertNotIn("ALREADY PUBLISHED", stdout.getvalue())
+            self.assertEqual(before["pointer"], pointer_path.read_bytes())
+            self.assertEqual(before["cycle"], cycle_path.read_bytes())
+            self.assertEqual(before["mirror"], mirror_path.read_bytes())
+            self.assertEqual(before["candidate"], report.read_bytes())
+
+    def test_already_current_publish_is_strict_validated_zero_write_idempotence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, report = self._registered_workspace(Path(directory))
+            first = revisit_cycle_cli.main([str(workspace), "publish", cycle_id])
+            self.assertEqual(0, first)
+            published_tree = snapshot_tree(workspace)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                repeated = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(0, repeated, stderr.getvalue())
+            self.assertIn("ALREADY PUBLISHED", stdout.getvalue())
+            self.assertEqual(published_tree, snapshot_tree(workspace))
+
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            pointer_bytes = pointer_path.read_bytes()
+            cycle_bytes = cycle_path.read_bytes()
+            report.write_bytes(report.read_bytes() + b"published candidate drift")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                drifted = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(1, drifted)
+            self.assertIn("CURRENT_REPORT_HASH_DRIFT", stderr.getvalue())
+            self.assertEqual(pointer_bytes, pointer_path.read_bytes())
+            self.assertEqual(cycle_bytes, cycle_path.read_bytes())
+
+    def test_already_current_publish_preserves_success_with_later_active_cycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, cycle_id, _ = (
+                TestTask8FinalEvaluation._action_workspace_with_candidate(root)
+            )
+            first = revisit_cycle_cli.main([str(workspace), "publish", cycle_id])
+            self.assertEqual(0, first)
+            started = run_revisit_cycle_cli(
+                workspace,
+                "start",
+                "--intake-file",
+                str(root / "revisit-request.json"),
+            )
+            self.assertEqual(0, started.returncode, started.stderr)
+            self.assertEqual(
+                "active",
+                revisit_contract.load_cycle(workspace, "RC-0002")["status"],
+            )
+            before = snapshot_tree(workspace)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                repeated = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(0, repeated, stderr.getvalue())
+            self.assertIn("ALREADY PUBLISHED", stdout.getvalue())
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_already_current_rechecks_readiness_closure_before_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, _ = self._registered_workspace(Path(directory))
+            first = revisit_cycle_cli.main([str(workspace), "publish", cycle_id])
+            self.assertEqual(0, first)
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            cycle_path = (
+                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
+            )
+            pointer_bytes = pointer_path.read_bytes()
+            cycle_bytes = cycle_path.read_bytes()
+            registry = workspace / "frontier_registry.json"
+            real_prepare = (
+                revisit_cycle_cli._prepare_published_current_for_publication
+            )
+
+            def drift_after_preparation(*args, **kwargs):
+                prepared = real_prepare(*args, **kwargs)
+                registry.write_bytes(registry.read_bytes() + b"\n")
+                return prepared
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_prepare_published_current_for_publication",
+                    side_effect=drift_after_preparation,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                repeated = revisit_cycle_cli.main(
+                    [str(workspace), "publish", cycle_id]
+                )
+
+            self.assertEqual(2, repeated)
+            self.assertIn("frontier_registry.json", stderr.getvalue())
+            self.assertNotIn("ALREADY PUBLISHED", stdout.getvalue())
+            self.assertEqual(pointer_bytes, pointer_path.read_bytes())
+            self.assertEqual(cycle_bytes, cycle_path.read_bytes())
+
+    def test_published_cycle_metadata_remains_exactly_rerenderable_and_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id, report = self._registered_workspace(Path(directory))
+            expected = revisit_contract.render_report_metadata(
+                revisit_contract.load_cycle(workspace, cycle_id)
+            )
+            self.assertEqual(1, report.read_text(encoding="utf-8").count(expected))
+            published = revisit_cycle_cli.main(
+                [str(workspace), "publish", cycle_id]
+            )
+            self.assertEqual(0, published)
+            before = snapshot_tree(workspace)
+
+            rendered = run_revisit_cycle_cli(
+                workspace,
+                "render-report-metadata",
+                cycle_id,
+            )
+
+            self.assertEqual(0, rendered.returncode, rendered.stderr)
+            self.assertEqual(expected, rendered.stdout)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_next_same_day_cycle_reserves_a_distinct_revision_without_touching_old_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_name = "TEST_SOFA_Report_2026-07-15_REV-0002.md"
+            workspace, cycle_id, report = (
+                TestTask8FinalEvaluation._action_workspace_with_candidate(
+                    root,
+                    first_name,
+                )
+            )
+            first_cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            base_report = (
+                workspace / first_cycle["intake"]["base_revision"]["report_path"]
+            )
+            immutable_paths = [
+                base_report,
+                report,
+                *(
+                    workspace / artifact["path"]
+                    for artifact in first_cycle["rerun_artifacts"]
+                ),
+            ]
+            immutable_bytes = {
+                path.relative_to(workspace).as_posix(): path.read_bytes()
+                for path in immutable_paths
+            }
+            published = revisit_cycle_cli.main(
+                [str(workspace), "publish", cycle_id]
+            )
+            self.assertEqual(0, published)
+
+            started = run_revisit_cycle_cli(
+                workspace,
+                "start",
+                "--intake-file",
+                str(root / "revisit-request.json"),
+            )
+
+            self.assertEqual(0, started.returncode, started.stderr)
+            second = revisit_contract.load_cycle(workspace, "RC-0002")
+            self.assertEqual("REV-0003", second["candidate_revision_id"])
+            second_name = "TEST_SOFA_Report_2026-07-15_REV-0003.md"
+            self.assertNotEqual(first_name, second_name)
+            self.assertNotEqual(
+                first_cycle["candidate_revision_id"],
+                second["candidate_revision_id"],
+            )
+            self.assertEqual(
+                immutable_bytes,
+                {
+                    path.relative_to(workspace).as_posix(): path.read_bytes()
+                    for path in immutable_paths
+                },
+            )

@@ -119,6 +119,7 @@ from .evaluate import (  # noqa: E402
     _check_dispatch_documents,
     _check_state_workflow_facts,
     _check_worker_output_documents,
+    _current_revision_matches_completed_cycle,
     _derive_revisit_dispatch_floor_issues_from_facts,
     _derive_revisit_frontier_progress_issues_from_facts,
     _derive_revisit_registry_issues_from_facts,
@@ -224,6 +225,7 @@ class _ReadinessContext:
     named_cycle_id: str | None
     lexical_workspace: Path
     workspace: Path
+    published_current_cycle_id: str | None = None
     state_payload: bytes | None = None
     state_facts: _RevisitStateFacts | None = None
     state_error: Exception | None = None
@@ -527,6 +529,15 @@ def _derive_current_report_sha256(pointer: dict) -> str | None:
     return current.get("report_sha256")
 
 
+def _registered_base_report_matches(
+    cycle: dict,
+    payload_by_path: dict[str, bytes],
+) -> bool:
+    base = cycle["intake"]["base_revision"]
+    payload = payload_by_path.get(base["report_path"])
+    return payload is not None and sha256_bytes(payload) == base["report_sha256"]
+
+
 def _check_current_report_from_facts(
     pointer: dict,
     cycle: dict,
@@ -546,20 +557,27 @@ def _check_current_report_from_facts(
         if current is not None
         else None
     )
-    base_drift = base != expected_base
-    if current is not None:
-        report_path = current["report_path"]
-        report_payload = payload_by_path.get(report_path)
-        if report_payload is None:
-            base_drift = True
-        else:
-            base_drift = base_drift or (
-                sha256_bytes(report_payload) != current["report_sha256"]
-            )
+    base_drift = base != expected_base or not _registered_base_report_matches(
+        cycle,
+        payload_by_path,
+    )
     if base_drift:
         result.fail(
             code="REVISIT_BASE_REPORT_DRIFT",
             message="cycle base revision or current report bytes differ from the registered pointer",
+            path="cycle.intake.base_revision",
+        )
+
+
+def _check_published_base_report_from_facts(
+    cycle: dict,
+    payload_by_path: dict[str, bytes],
+    result: ContractResult,
+) -> None:
+    if not _registered_base_report_matches(cycle, payload_by_path):
+        result.fail(
+            code="REVISIT_BASE_REPORT_DRIFT",
+            message="cycle base report bytes differ from immutable intake",
             path="cycle.intake.base_revision",
         )
 
@@ -777,14 +795,7 @@ def _discover_eligible_cycle_id(
     result: ContractResult,
 ) -> str | None:
     """Return the sole eligible cycle id, or record a failure and return None."""
-    if history.issues:
-        for issue in history.issues:
-            result.fail(
-                code="REVISIT_CYCLE_MALFORMED",
-                message=issue.message,
-                path=issue.path,
-                evidence=issue.evidence,
-            )
+    if _append_history_issues(history, result):
         return None
     eligible = (
         *history.nonterminal_cycle_ids,
@@ -799,6 +810,17 @@ def _discover_eligible_cycle_id(
         )
         return None
     return eligible[0]
+
+
+def _append_history_issues(history, result: ContractResult) -> bool:
+    for issue in history.issues:
+        result.fail(
+            code="REVISIT_CYCLE_MALFORMED",
+            message=issue.message,
+            path=issue.path,
+            evidence=issue.evidence,
+        )
+    return bool(history.issues)
 
 
 def _map_cycle_load_error(exc: RevisitContractError) -> str:
@@ -970,20 +992,25 @@ def _load_history_facts(context: _ReadinessContext) -> None:
                 *context.history.nonterminal_cycle_ids,
                 *context.history.completed_unpublished_cycle_ids,
             )
-            if len(eligible) == 1:
-                selected_cycle_id = eligible[0]
+            selected_cycle_id = (
+                context.published_current_cycle_id
+                if context.published_current_cycle_id is not None
+                else eligible[0] if len(eligible) == 1 else None
+            )
+            if selected_cycle_id is not None:
                 selected_cycle = cycles_by_id.get(selected_cycle_id)
-                payload = cycle_payloads.get(eligible[0])
-                if selected_cycle is None or payload is None:
+                payload = cycle_payloads.get(selected_cycle_id)
+                if selected_cycle is not None and payload is not None:
+                    context.selected_cycle = _SelectedCycle(
+                        cycle_id=selected_cycle_id,
+                        cycle=selected_cycle,
+                        cycle_sha256=sha256_bytes(payload),
+                        status=selected_cycle["status"],
+                    )
+                elif context.published_current_cycle_id is None:
                     raise ReadinessPlanError(
                         "eligible history cycle lacks its validated document"
                     )
-                context.selected_cycle = _SelectedCycle(
-                    cycle_id=selected_cycle_id,
-                    cycle=selected_cycle,
-                    cycle_sha256=sha256_bytes(payload),
-                    status=selected_cycle["status"],
-                )
 
         current = context.pointer.get("current_revision")
         if current is not None:
@@ -1068,6 +1095,7 @@ def _load_cycle_artifact_facts(context: _ReadinessContext) -> None:
         if payload is not None:
             context.payload_by_path[relative_path] = payload
 
+    observe(cycle["intake"]["base_revision"]["report_path"])
     observe(cycle["intake"]["framing"]["path"])
     for claim in cycle["intake"]["selected_claims"]:
         observe(claim["source_ref"]["path"])
@@ -1258,6 +1286,41 @@ def _evaluate_global_cycle_history(context: _ReadinessContext) -> None:
         )
 
     if context.pointer_error is not None or context.history_load_issues:
+        return
+
+    if context.published_current_cycle_id is not None:
+        if context.history is None or _append_history_issues(
+            context.history,
+            context.result,
+        ):
+            return
+        selected = context.selected_cycle
+        current = context.pointer["current_revision"]
+        if (
+            selected is None
+            or current is None
+            or not _current_revision_matches_completed_cycle(
+                current,
+                selected.cycle,
+            )
+        ):
+            context.result.fail(
+                code="CURRENT_REPORT_LINEAGE_MISMATCH",
+                message=(
+                    "published-current readiness requires the exact completed "
+                    "pointer/candidate lineage"
+                ),
+                path=(
+                    f"revisit_cycles/"
+                    f"{context.published_current_cycle_id}.json"
+                ),
+            )
+            return
+        _check_published_base_report_from_facts(
+            selected.cycle,
+            context.payload_by_path,
+            context.result,
+        )
         return
 
     eligible_cycle_id = None
@@ -1801,20 +1864,10 @@ def _run_readiness_plan(
         )
 
 
-def _prepare_revisit_readiness(
-    session: ObservedReadSession,
-    result: ContractResult,
-    named_cycle_id: str | None,
-    lexical_workspace: Path,
+def _prepare_readiness_context(
+    context: _ReadinessContext,
 ) -> _PreparedRevisitReadiness:
     """Load facts once, execute every fixed requirement row, then freeze."""
-    context = _ReadinessContext(
-        session=session,
-        result=result,
-        named_cycle_id=named_cycle_id,
-        lexical_workspace=lexical_workspace,
-        workspace=session._workspace,
-    )
     _load_readiness_facts(context)
     _run_readiness_plan(context, _READINESS_PLAN)
     if context.closure is None:
@@ -1826,6 +1879,42 @@ def _prepare_revisit_readiness(
         selected_cycle=context.selected_cycle,
         closure=context.closure,
         trace=tuple(context.trace),
+    )
+
+
+def _prepare_revisit_readiness(
+    session: ObservedReadSession,
+    result: ContractResult,
+    named_cycle_id: str | None,
+    lexical_workspace: Path,
+) -> _PreparedRevisitReadiness:
+    return _prepare_readiness_context(
+        _ReadinessContext(
+            session=session,
+            result=result,
+            named_cycle_id=named_cycle_id,
+            lexical_workspace=lexical_workspace,
+            workspace=session._workspace,
+        )
+    )
+
+
+def _prepare_published_current_readiness(
+    session: ObservedReadSession,
+    result: ContractResult,
+    cycle_id: str,
+    lexical_workspace: Path,
+) -> _PreparedRevisitReadiness:
+    """Run the existing plan for one exact completed current cycle lineage."""
+    return _prepare_readiness_context(
+        _ReadinessContext(
+            session=session,
+            result=result,
+            named_cycle_id=None,
+            lexical_workspace=lexical_workspace,
+            workspace=session._workspace,
+            published_current_cycle_id=cycle_id,
+        )
     )
 
 def _delivered_roles_from_records(

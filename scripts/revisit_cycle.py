@@ -22,6 +22,7 @@ from revisit_contract import (
     allocate_cycle_and_revision_ids,
     assess_decision,
     bind_frontier,
+    complete_cycle,
     create_cycle,
     cycle_directory,
     cycle_json_path,
@@ -32,6 +33,9 @@ from revisit_contract import (
     load_pointer,
     persist_cycle,
     persist_pointer,
+    record_rerun,
+    render_report_metadata,
+    register_report_candidate,
     resolve_claim,
     sha256_file,
     validate_evidence_ref,
@@ -44,8 +48,10 @@ from revisit_contract.model import (
 from revisit_contract.store import (
     PreparedAuthoritySnapshot,
     _AuthorityGeneration,
+    _load_observed_cycle_history,
     _read_authority_generation,
     _require_authority_generation,
+    _require_snapshot_generations,
     load_intake_request,
     normalize_workspace_relative_path,
     resolve_workspace_path,
@@ -57,7 +63,11 @@ from frontier_lifecycle import LOOP_HEADER_RE, derive_loop_counts, get_frontier
 from frontier_review import read_registry_snapshot
 from source_cache import evaluate_index
 from sofa_contract import check_revisit_readiness
-from sofa_contract.evaluate import evaluate_specific_ticker_report
+from sofa_contract.evaluate import (
+    _prepare_published_current_for_publication,
+    _prepare_revisit_report_for_publication,
+    evaluate_specific_ticker_report,
+)
 from sofa_contract.workspace import read_specific_markdown_report
 
 
@@ -1145,6 +1155,402 @@ def command_assess_decision(args: argparse.Namespace) -> int:
         return _command_assess_decision_in_transaction(args, workspace)
 
 
+def command_record_rerun(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        previous, expected_cycle_sha256, base_authorities = (
+            _load_active_cycle_mutation_context(
+                workspace,
+                args.cycle,
+                "record-rerun",
+            )
+        )
+        relative = normalize_workspace_relative_path(args.path)
+        generation = _read_authority_generation(workspace, workspace / relative)
+        if not generation.snapshot.resolved_target.is_file():
+            raise RevisitContractError(
+                f"rerun artifact is not a file: {relative}"
+            )
+        timestamp = _utc_now_seconds()
+        artifact = {
+            "kind": args.kind.replace("-", "_"),
+            "scope": args.scope,
+            "round": args.round,
+            "path": relative,
+            "sha256": generation.snapshot.expected_sha256,
+            "recorded_at": timestamp,
+        }
+        proposed = record_rerun(previous, artifact)
+        updated = with_audit(
+            previous,
+            proposed,
+            "record-rerun",
+            [relative],
+            timestamp,
+        )
+        persist_cycle(
+            workspace,
+            updated,
+            expected_sha256=expected_cycle_sha256,
+            authority_snapshots=(*base_authorities, generation.snapshot),
+        )
+        print(f"RERUN ARTIFACT RECORDED: {relative}")
+        return 0
+
+
+def command_render_report_metadata(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        _load_ticker_state(workspace, "render-report-metadata")
+        pointer = load_pointer(workspace)
+        current, _, _, _ = _require_current_report(workspace, pointer)
+        cycle = load_cycle(workspace, args.cycle)
+        base_is_current = (
+            cycle["intake"]["base_revision"]
+            == _pointer_base_projection(current)
+        )
+        candidate_is_current = (
+            cycle["status"] == "completed"
+            and _current_matches_published_cycle(current, cycle)
+        )
+        if not base_is_current and not candidate_is_current:
+            raise RevisitContractError(
+                f"cycle {args.cycle} lineage does not match current pointer"
+            )
+        rendered = render_report_metadata(cycle)
+    sys.stdout.write(rendered)
+    return 0
+
+
+def command_register_report(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        _load_ticker_state(workspace, "register-report")
+        pointer_generation = _read_authority_generation(
+            workspace, workspace / POINTER_FILENAME
+        )
+        pointer = load_pointer(workspace)
+        _require_authority_generation(
+            pointer_generation,
+            "after pointer validation",
+        )
+        current, _, _, base_report_authority = _require_current_report(
+            workspace, pointer
+        )
+        cycle_path = cycle_json_path(workspace, args.cycle)
+        expected_cycle_sha256 = sha256_file(cycle_path)
+        previous = load_cycle(workspace, args.cycle)
+        if previous["report_candidate"] is not None:
+            raise RevisitContractError("report candidate is already registered")
+        if previous["status"] != "ready_for_report":
+            raise RevisitContractError(
+                "register-report requires ready_for_report status"
+            )
+        expected_base = {
+            "revision_id": current["revision_id"],
+            "report_path": current["report_path"],
+            "report_sha256": current["report_sha256"],
+            "action_class": current["action_class"],
+        }
+        if previous["intake"]["base_revision"] != expected_base:
+            raise RevisitContractError(
+                f"cycle {args.cycle} base revision does not match current pointer"
+            )
+
+        relative = normalize_workspace_relative_path(args.report)
+        report_path = resolve_workspace_path(
+            workspace,
+            relative,
+            parent="reports",
+            suffix=".md",
+        )
+        if relative == current["report_path"]:
+            raise RevisitContractError(
+                "report path is already registered as the current revision"
+            )
+        history_cycles, history_closure = _load_observed_cycle_history(workspace)
+        for history_cycle in history_cycles:
+            candidate = history_cycle["report_candidate"]
+            registered_report_paths = {
+                history_cycle["intake"]["base_revision"]["report_path"]
+            }
+            if candidate is not None:
+                registered_report_paths.add(candidate["report_path"])
+            if relative in registered_report_paths:
+                raise RevisitContractError(
+                    "report path is already registered by "
+                    f"{history_cycle['cycle_id']}"
+                )
+        report_generation = _read_authority_generation(
+            workspace, report_path
+        )
+        if not report_generation.snapshot.resolved_target.is_file():
+            raise RevisitContractError(
+                f"report candidate is not a file: {relative}"
+            )
+        metadata = render_report_metadata(previous)
+        report_result = evaluate_specific_ticker_report(
+            workspace,
+            relative,
+            expected_sha256=report_generation.snapshot.expected_sha256,
+            expected_metadata=metadata,
+        )
+        if not report_result.passed:
+            for issue in report_result.failures:
+                print(issue.display(), file=sys.stderr)
+            return 1
+        _require_authority_generation(
+            report_generation,
+            "after report candidate evaluation",
+        )
+        timestamp = _utc_now_seconds()
+        candidate = {
+            "revision_id": previous["candidate_revision_id"],
+            "revision_of": current["revision_id"],
+            "report_path": relative,
+            "report_sha256": report_generation.snapshot.expected_sha256,
+            "registered_at": timestamp,
+        }
+        proposed = register_report_candidate(previous, candidate)
+        updated = with_audit(
+            previous,
+            proposed,
+            "register-report",
+            [candidate["revision_id"]],
+            timestamp,
+        )
+        persist_cycle(
+            workspace,
+            updated,
+            expected_sha256=expected_cycle_sha256,
+            authority_snapshots=(
+                pointer_generation.snapshot,
+                base_report_authority,
+                report_generation.snapshot,
+            ),
+            generation_closure=history_closure,
+        )
+        print(f"REPORT CANDIDATE REGISTERED: {relative}")
+        return 0
+
+
+def _pointer_base_projection(current: dict | None) -> dict | None:
+    if current is None:
+        return None
+    return {
+        "revision_id": current["revision_id"],
+        "report_path": current["report_path"],
+        "report_sha256": current["report_sha256"],
+        "action_class": current["action_class"],
+    }
+
+
+def _published_revision(cycle: dict, validated_at: str) -> dict:
+    candidate = cycle["report_candidate"]
+    if candidate is None:
+        raise RevisitContractError(
+            "REVISIT_PUBLICATION_FAILED: report candidate is missing"
+        )
+    return {
+        "revision_id": candidate["revision_id"],
+        "cycle_id": cycle["cycle_id"],
+        "report_path": candidate["report_path"],
+        "report_sha256": candidate["report_sha256"],
+        "action_class": cycle["decision_assessment"]["new_action_class"],
+        "validated_at": validated_at,
+        "revision_of": candidate["revision_of"],
+    }
+
+
+def _current_matches_published_cycle(current: dict | None, cycle: dict) -> bool:
+    if current is None:
+        return False
+    expected = _published_revision(cycle, current["validated_at"])
+    return current == expected
+
+
+def _publication_state(
+    pointer: dict,
+    cycle: dict,
+    history,
+) -> str:
+    current = pointer["current_revision"]
+    candidate = cycle["report_candidate"]
+    if candidate is None:
+        raise RevisitContractError(
+            "REVISIT_PUBLICATION_FAILED: report candidate is missing"
+        )
+    if cycle["status"] == "ready_for_report":
+        if _pointer_base_projection(current) != cycle["intake"]["base_revision"]:
+            raise RevisitContractError(
+                "REVISIT_PUBLICATION_FAILED: current revision differs from cycle base"
+            )
+        return "ready"
+    if cycle["status"] != "completed":
+        raise RevisitContractError(
+            "REVISIT_PUBLICATION_FAILED: publish requires a ready or completed cycle"
+        )
+    if _current_matches_published_cycle(current, cycle):
+        return "already_current"
+    if _pointer_base_projection(current) != cycle["intake"]["base_revision"]:
+        raise RevisitContractError(
+            "REVISIT_PUBLICATION_FAILED: current revision conflicts with completed candidate"
+        )
+    if history.completed_unpublished_cycle_ids != (cycle["cycle_id"],):
+        raise RevisitContractError(
+            "REVISIT_PUBLICATION_FAILED: completed cycle is not the sole unpublished candidate"
+        )
+    return "completed_unpublished"
+
+
+def _print_revisit_result(result) -> None:
+    for warning in result.warnings:
+        print(warning.display(), file=sys.stderr)
+    for failure in result.failures:
+        print(failure.display(), file=sys.stderr)
+
+
+def _persist_published_pointer(
+    workspace: Path,
+    pointer: dict,
+    cycle: dict,
+    validated_at: str,
+    expected_pointer_sha256: str,
+    authority_snapshots: tuple[PreparedAuthoritySnapshot, ...],
+    generation_closure,
+) -> None:
+    updated_pointer = copy.deepcopy(pointer)
+    updated_pointer["current_revision"] = _published_revision(
+        cycle,
+        validated_at,
+    )
+    persist_pointer(
+        workspace,
+        updated_pointer,
+        expected_sha256=expected_pointer_sha256,
+        authority_snapshots=authority_snapshots,
+        generation_closure=generation_closure,
+    )
+
+
+def command_publish(args: argparse.Namespace) -> int:
+    with workspace_transaction(Path(args.workspace)) as workspace:
+        _load_ticker_state(workspace, "publish")
+        pointer_generation = _read_authority_generation(
+            workspace,
+            workspace / POINTER_FILENAME,
+        )
+        pointer = load_pointer(workspace)
+        cycle_generation = _read_authority_generation(
+            workspace,
+            cycle_json_path(workspace, args.cycle),
+        )
+        cycle = load_cycle(workspace, args.cycle)
+        all_cycles = [
+            load_cycle(workspace, cycle_id)
+            for cycle_id in list_cycle_ids(workspace)
+        ]
+        history = evaluate_history(pointer, all_cycles)
+        state = _publication_state(pointer, cycle, history)
+        history.require_valid()
+
+        if state == "already_current":
+            prepared_current = _prepare_published_current_for_publication(
+                workspace,
+                cycle,
+            )
+            if not prepared_current.result.passed:
+                _print_revisit_result(prepared_current.result)
+                return 1
+            if prepared_current.generation_closure is None:
+                raise RevisitContractError(
+                    "REVISIT_PUBLICATION_FAILED: current validation lacks authority closure"
+                )
+            _require_authority_generation(
+                pointer_generation,
+                "after current publication validation",
+            )
+            _require_authority_generation(
+                cycle_generation,
+                "after current publication validation",
+            )
+            _require_snapshot_generations(
+                {
+                    snapshot.lexical_path: snapshot
+                    for snapshot in prepared_current.authority_snapshots
+                },
+                "after current publication validation",
+            )
+            prepared_current.generation_closure.require_unchanged()
+            print(
+                "REVISIT REPORT ALREADY PUBLISHED: "
+                f"{cycle['candidate_revision_id']}"
+            )
+            return 0
+
+        prepared = _prepare_revisit_report_for_publication(
+            workspace,
+            args.cycle,
+        )
+        if not prepared.result.passed:
+            _print_revisit_result(prepared.result)
+            return 1
+        if prepared.generation_closure is None or prepared.cycle is None:
+            raise RevisitContractError(
+                "REVISIT_PUBLICATION_FAILED: final preparation lacks authority closure"
+            )
+        publication_authorities = prepared.authority_snapshots
+        _require_authority_generation(
+            pointer_generation,
+            "after final publication validation",
+        )
+        _require_authority_generation(
+            cycle_generation,
+            "after final publication validation",
+        )
+
+        timestamp = _utc_now_seconds()
+        if state == "ready":
+            proposed = complete_cycle(cycle, timestamp)
+            completed = with_audit(
+                cycle,
+                proposed,
+                "publish",
+                [args.cycle, cycle["candidate_revision_id"]],
+                timestamp,
+            )
+            persist_cycle(
+                workspace,
+                completed,
+                expected_sha256=cycle_generation.snapshot.expected_sha256,
+                authority_snapshots=publication_authorities,
+                generation_closure=prepared.generation_closure,
+            )
+            cycle = completed
+            prepared = _prepare_revisit_report_for_publication(
+                workspace,
+                args.cycle,
+            )
+            if not prepared.result.passed:
+                _print_revisit_result(prepared.result)
+                return 1
+            if prepared.generation_closure is None or prepared.cycle is None:
+                raise RevisitContractError(
+                    "REVISIT_PUBLICATION_FAILED: completed preparation lacks authority closure"
+                )
+            cycle = prepared.cycle
+            publication_authorities = prepared.authority_snapshots
+
+        _persist_published_pointer(
+            workspace,
+            pointer,
+            cycle,
+            timestamp,
+            pointer_generation.snapshot.expected_sha256,
+            publication_authorities,
+            prepared.generation_closure,
+        )
+        print(f"REVISIT REPORT PUBLISHED: {cycle['candidate_revision_id']}")
+        return 0
+
+
 def _command_bind_frontier_in_transaction(
     args: argparse.Namespace, workspace: Path
 ) -> int:
@@ -1233,6 +1639,49 @@ def command_bind_frontier(args: argparse.Namespace) -> int:
 
 
 def command_check(args: argparse.Namespace) -> int:
+    if args.final:
+        result = _prepare_revisit_report_for_publication(
+            Path(args.workspace),
+            args.cycle,
+        ).result
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "passed": result.passed,
+                        "failures": [
+                            {
+                                "code": issue.code,
+                                "path": issue.path,
+                                "message": issue.message,
+                                "evidence": issue.evidence,
+                            }
+                            for issue in result.failures
+                        ],
+                        "warnings": [
+                            {
+                                "code": issue.code,
+                                "path": issue.path,
+                                "message": issue.message,
+                                "evidence": issue.evidence,
+                            }
+                            for issue in result.warnings
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            for warning in result.warnings:
+                print(warning.display(), file=sys.stderr)
+            if not result.passed:
+                for failure in result.failures:
+                    print(failure.display(), file=sys.stderr)
+            else:
+                print(f"REVISIT FINAL CHECK PASSED: {args.cycle}")
+        return 0 if result.passed else 1
     outcome = check_revisit_readiness(
         Path(args.workspace),
         args.cycle,
@@ -1418,6 +1867,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON main-thread decision assessment",
     )
     assess.set_defaults(handler=command_assess_decision)
+    rerun = subparsers.add_parser(
+        "record-rerun",
+        help="register one exact cycle-specific downstream rerun artifact",
+    )
+    rerun.add_argument("cycle", help="active revisit cycle ID")
+    rerun.add_argument(
+        "--kind",
+        required=True,
+        choices=(
+            "bridge",
+            "redteam-attack",
+            "redteam-defense",
+            "thesis-revision",
+        ),
+    )
+    rerun.add_argument("--path", required=True, help="workspace-relative artifact path")
+    rerun.add_argument("--scope", choices=("affected", "full"))
+    rerun.add_argument("--round", type=int)
+    rerun.set_defaults(handler=command_record_rerun)
+    metadata = subparsers.add_parser(
+        "render-report-metadata",
+        help="render the exact managed report revision metadata block",
+    )
+    metadata.add_argument("cycle", help="ready or completed revisit cycle ID")
+    metadata.set_defaults(handler=command_render_report_metadata)
+    candidate = subparsers.add_parser(
+        "register-report",
+        help="register one immutable complete report revision candidate",
+    )
+    candidate.add_argument("cycle", help="ready revisit cycle ID")
+    candidate.add_argument(
+        "--report",
+        required=True,
+        help="new complete Markdown report under reports/",
+    )
+    candidate.set_defaults(handler=command_register_report)
+    publish = subparsers.add_parser(
+        "publish",
+        help="atomically publish one validated immutable report revision",
+    )
+    publish.add_argument("cycle", help="ready or completed revisit cycle ID")
+    publish.set_defaults(handler=command_publish)
     bind = subparsers.add_parser(
         "bind-frontier",
         help="bind one legal cycle-relative frontier before new loop work",
@@ -1443,6 +1934,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="evaluate one cycle and mark it ready for report when complete",
     )
     check.add_argument("cycle", help="active or ready revisit cycle ID")
+    check.add_argument(
+        "--final",
+        action="store_true",
+        help="read-only validation of the exact registered report candidate",
+    )
+    check.add_argument(
+        "--json",
+        action="store_true",
+        help="emit deterministic JSON for final checks",
+    )
     check.set_defaults(handler=command_check)
     return parser
 

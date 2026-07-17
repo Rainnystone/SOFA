@@ -64,6 +64,7 @@ try:
         list_cycle_ids,
         load_cycle,
         load_pointer,
+        render_report_metadata,
         sha256_bytes,
     )
 except ImportError:
@@ -77,6 +78,7 @@ except ImportError:
         list_cycle_ids,
         load_cycle,
         load_pointer,
+        render_report_metadata,
         sha256_bytes,
     )
 
@@ -88,9 +90,17 @@ except ImportError:
     )
 
 try:
-    from revisit_contract.store import verify_workspace_artifact
+    from revisit_contract.store import (
+        _read_authority_generation,
+        _require_authority_generation,
+        verify_workspace_artifact,
+    )
 except ImportError:
-    from scripts.revisit_contract.store import verify_workspace_artifact
+    from scripts.revisit_contract.store import (
+        _read_authority_generation,
+        _require_authority_generation,
+        verify_workspace_artifact,
+    )
 
 try:
     from frontier_lifecycle import (
@@ -135,6 +145,18 @@ TICKER_REPORT_REQUIREMENTS = {
     "RED_TEAM": ("red-team", "red team", "红队"),
     "INVALIDATION": ("invalidation", "invalidated", "失效"),
     "WATCH_PROTOCOL": ("watch protocol", "观察协议"),
+}
+REVISIT_REPORT_REQUIREMENTS = {
+    "REVISIT_METADATA": ("revisit revision metadata",),
+    "TRIGGER_DELTA": ("trigger delta",),
+    "CLAIM_DELTA": ("claim delta",),
+    "EVIDENCE_FRESHNESS_DELTA": ("evidence freshness delta",),
+    "FRONTIER_DELTA": ("frontier delta",),
+    "FINANCIAL_REDTEAM_DELTA": (
+        "financial/red-team delta",
+        "financial and red-team delta",
+    ),
+    "UNRESOLVED_BLOCKED_GAPS": ("unresolved or blocked gaps",),
 }
 # Sector Hunt final reports follow a different template (see
 # skills/sofa-analyze/references/sector-hunt-guide.md): architecture shift,
@@ -246,13 +268,27 @@ def _evaluate_specific_ticker_report_document(
             path=report_path,
         )
     profile = ContractProfile(mode="ticker", target="final_report")
-    for label in _missing_final_report_requirements(text.lower(), profile):
+    lower_text = text.lower()
+    for label in _missing_final_report_requirements(lower_text, profile):
         result.fail(
             code=f"FINAL_REPORT_MISSING_{label}",
             message=f"final report is missing required area: {label.lower().replace('_', ' ')}",
             path=report_path,
             evidence=", ".join(TICKER_REPORT_REQUIREMENTS[label]),
         )
+    if expected_metadata is not None:
+        for label, markers in REVISIT_REPORT_REQUIREMENTS.items():
+            if any(marker.lower() in lower_text for marker in markers):
+                continue
+            result.fail(
+                code=f"FINAL_REPORT_MISSING_{label}",
+                message=(
+                    "revisit report is missing required area: "
+                    f"{label.lower().replace('_', ' ')}"
+                ),
+                path=report_path,
+                evidence=", ".join(markers),
+            )
     return result
 
 
@@ -290,14 +326,489 @@ def evaluate_revisit_report(
     workspace: Path | str,
     cycle_id: str,
 ) -> ContractResult:
-    """Compatibility adapter for the read-only readiness seam.
-
-    Task 6.4 unifies all revisit readiness evaluation under
-    ``evaluate_revisit_readiness``; this named-selection wrapper delegates there.
-    """
+    """Evaluate one named cycle through the public readiness seam."""
     from .revisit_readiness import evaluate_revisit_readiness
 
     return evaluate_revisit_readiness(workspace, cycle_id)
+
+
+def _evaluate_revisit_report_impl(
+    workspace: Path | str,
+    cycle_id: str,
+    *,
+    readiness_result: ContractResult,
+    selected_cycle: dict | None = None,
+) -> tuple[ContractResult, tuple[Any, ...]]:
+    result = readiness_result
+
+    root = Path(workspace)
+    if selected_cycle is None:
+        try:
+            cycle = load_cycle(root, cycle_id)
+        except RevisitContractError as exc:
+            result.fail(
+                code="REVISIT_REPORT_CANDIDATE_MISSING",
+                message=str(exc),
+                path=f"revisit_cycles/{cycle_id}.json",
+            )
+            return result, ()
+    else:
+        cycle = selected_cycle
+    candidate = cycle["report_candidate"]
+    if candidate is None:
+        result.fail(
+            code="REVISIT_REPORT_CANDIDATE_MISSING",
+            message="final revisit validation requires a registered report candidate",
+            path=f"revisit_cycles/{cycle_id}.json",
+        )
+        return result, ()
+    if cycle["status"] not in {"ready_for_report", "completed"}:
+        result.fail(
+            code="REVISIT_REPORT_CANDIDATE_MISSING",
+            message="report candidate must belong to a ready or completed cycle",
+            path=f"revisit_cycles/{cycle_id}.json",
+        )
+        return result, ()
+
+    rerun_generations = _evaluate_revisit_rerun_matrix(root, cycle, result)
+    authority_snapshots = [
+        generation.snapshot
+        for generation, _failure_code, _failure_path in rerun_generations
+    ]
+
+    candidate_path = candidate["report_path"]
+    try:
+        candidate_generation = _read_authority_generation(
+            root, root / candidate_path
+        )
+    except RevisitContractError as exc:
+        result.fail(
+            code="REVISIT_REPORT_HASH_DRIFT",
+            message=str(exc),
+            path=candidate_path,
+        )
+        return result, tuple(authority_snapshots)
+    authority_snapshots.append(candidate_generation.snapshot)
+    if (
+        candidate_generation.snapshot.expected_sha256
+        != candidate["report_sha256"]
+    ):
+        result.fail(
+            code="REVISIT_REPORT_HASH_DRIFT",
+            message="registered report candidate bytes do not match report_sha256",
+            path=candidate_path,
+        )
+        return result, tuple(authority_snapshots)
+    expected_metadata = render_report_metadata(cycle)
+    report_result = _evaluate_specific_ticker_report_document(
+        candidate_path,
+        candidate_generation.payload,
+        expected_sha256=candidate["report_sha256"],
+        expected_metadata=expected_metadata,
+    )
+    for issue in report_result.failures:
+        if issue.code == "CURRENT_REPORT_HASH_DRIFT":
+            result.fail(
+                code="REVISIT_REPORT_HASH_DRIFT",
+                message=issue.message,
+                path=issue.path,
+                evidence=issue.evidence,
+            )
+        else:
+            result.fail(
+                code=issue.code,
+                message=issue.message,
+                path=issue.path,
+                evidence=issue.evidence,
+            )
+    result.warnings.extend(report_result.warnings)
+    _evaluate_revisit_blocked_disclosure(
+        cycle,
+        candidate_generation.payload,
+        candidate_path,
+        result,
+    )
+    try:
+        _require_authority_generation(
+            candidate_generation,
+            "after report candidate evaluation",
+        )
+    except RevisitContractError as exc:
+        result.fail(
+            code="REVISIT_REPORT_HASH_DRIFT",
+            message=str(exc),
+            path=candidate_path,
+        )
+    for generation, failure_code, failure_path in rerun_generations:
+        try:
+            _require_authority_generation(
+                generation,
+                "after final revisit evaluation",
+            )
+        except RevisitContractError as exc:
+            result.fail(
+                code=failure_code,
+                message=str(exc),
+                path=failure_path,
+            )
+    return result, tuple(authority_snapshots)
+
+
+@dataclass(frozen=True)
+class _PreparedRevisitReport:
+    result: ContractResult
+    cycle: dict | None
+    generation_closure: Any | None
+    authority_snapshots: tuple[Any, ...]
+
+
+def _prepare_revisit_report_for_publication(
+    workspace: Path | str,
+    cycle_id: str,
+) -> _PreparedRevisitReport:
+    """Prepare one final verdict whose readiness closure can cross persistence."""
+    from .revisit_readiness import _prepare_revisit_readiness
+
+    try:
+        from revisit_contract.generation import (
+            AuthorityDriftError,
+            ObservedReadSession,
+        )
+    except ImportError:
+        from scripts.revisit_contract.generation import (
+            AuthorityDriftError,
+            ObservedReadSession,
+        )
+
+    lexical_workspace = Path(workspace)
+    result = ContractResult()
+    session = ObservedReadSession(lexical_workspace)
+    try:
+        prepared = _prepare_revisit_readiness(
+            session,
+            result,
+            cycle_id,
+            lexical_workspace,
+        )
+    except AuthorityDriftError as exc:
+        result.fail(
+            code="REVISIT_AUTHORITY_DRIFT",
+            message=str(exc),
+            path=exc.drift.relative_path,
+        )
+        return _PreparedRevisitReport(result, None, None, ())
+
+    cycle = (
+        prepared.selected_cycle.cycle
+        if prepared.selected_cycle is not None
+        else None
+    )
+    if cycle is None:
+        result.fail(
+            code="REVISIT_REPORT_CANDIDATE_MISSING",
+            message="final revisit validation requires one globally eligible cycle",
+            path=f"revisit_cycles/{cycle_id}.json",
+        )
+        authority_snapshots: tuple[Any, ...] = ()
+    else:
+        result, authority_snapshots = _evaluate_revisit_report_impl(
+            lexical_workspace,
+            cycle_id,
+            readiness_result=result,
+            selected_cycle=cycle,
+        )
+    try:
+        prepared.closure.require_unchanged()
+    except AuthorityDriftError as exc:
+        result.fail(
+            code="REVISIT_AUTHORITY_DRIFT",
+            message=str(exc),
+            path=exc.drift.relative_path,
+        )
+    return _PreparedRevisitReport(
+        result,
+        cycle,
+        prepared.closure,
+        authority_snapshots,
+    )
+
+
+def _prepare_published_current_for_publication(
+    workspace: Path | str,
+    cycle: dict,
+) -> _PreparedRevisitReport:
+    """Strictly validate an already-current revisit report with a read closure."""
+    from .revisit_readiness import _prepare_published_current_readiness
+
+    try:
+        from revisit_contract.generation import (
+            AuthorityDriftError,
+            ObservedReadSession,
+        )
+    except ImportError:
+        from scripts.revisit_contract.generation import (
+            AuthorityDriftError,
+            ObservedReadSession,
+        )
+
+    lexical_workspace = Path(workspace)
+    closure_result = ContractResult()
+    session = ObservedReadSession(lexical_workspace)
+    try:
+        readiness = _prepare_published_current_readiness(
+            session,
+            closure_result,
+            cycle["cycle_id"],
+            lexical_workspace,
+        )
+    except AuthorityDriftError as exc:
+        result = ContractResult()
+        result.fail(
+            code="REVISIT_AUTHORITY_DRIFT",
+            message=str(exc),
+            path=exc.drift.relative_path,
+        )
+        return _PreparedRevisitReport(result, None, None, ())
+
+    result = evaluate_workspace(
+        lexical_workspace,
+        ContractProfile(mode="ticker", target="final_report"),
+    )
+    result.extend(closure_result)
+    selected_cycle = (
+        readiness.selected_cycle.cycle
+        if readiness.selected_cycle is not None
+        else cycle
+    )
+    result, authority_snapshots = _evaluate_revisit_report_impl(
+        lexical_workspace,
+        cycle["cycle_id"],
+        readiness_result=result,
+        selected_cycle=selected_cycle,
+    )
+    try:
+        readiness.closure.require_unchanged()
+    except AuthorityDriftError as exc:
+        result.fail(
+            code="REVISIT_AUTHORITY_DRIFT",
+            message=str(exc),
+            path=exc.drift.relative_path,
+        )
+    return _PreparedRevisitReport(
+        result,
+        cycle,
+        readiness.closure,
+        authority_snapshots,
+    )
+
+
+def _evaluate_revisit_blocked_disclosure(
+    cycle: dict,
+    report_payload: bytes,
+    report_path: str,
+    result: ContractResult,
+) -> None:
+    blocked_claim_ids = cycle["decision_assessment"]["blocked_claim_ids"]
+    if not blocked_claim_ids:
+        return
+    try:
+        report_text = report_payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    gap_section = _markdown_section(report_text, "Unresolved or Blocked Gaps")
+    for claim_id in blocked_claim_ids:
+        pattern = rf"(?<![A-Za-z0-9_-]){re.escape(claim_id)}(?![A-Za-z0-9_-])"
+        if gap_section is not None and re.search(pattern, gap_section):
+            continue
+        result.fail(
+            code="REVISIT_REPORT_BLOCKED_DISCLOSURE_MISSING",
+            message=(
+                "blocked claim must be disclosed in the report's "
+                "Unresolved or Blocked Gaps section"
+            ),
+            path=report_path,
+            evidence=claim_id,
+        )
+
+
+def _required_revisit_rerun_rows(cycle: dict) -> tuple[tuple[str, str | None, int | None, str | None, str], ...]:
+    required = set(cycle["decision_assessment"]["required_reruns"])
+    rows: list[tuple[str, str | None, int | None, str | None, str]] = []
+    if "affected-financial-bridge" in required:
+        rows.append(("bridge", "affected", None, "financial_bridge", "affected-financial-bridge"))
+    if "full-financial-bridge" in required:
+        rows.append(("bridge", "full", None, "financial_bridge", "full-financial-bridge"))
+    for round_number in (1, 2):
+        if f"redteam-round-{round_number}" in required:
+            rows.append(("redteam_attack", None, round_number, "red_team", f"redteam-round-{round_number}"))
+        if f"redteam-defense-{round_number}" in required:
+            rows.append(("redteam_defense", None, round_number, None, f"redteam-defense-{round_number}"))
+    if "thesis-revision" in required:
+        rows.append(("thesis_revision", None, None, None, "thesis-revision"))
+    return tuple(rows)
+
+
+def _dispatch_records_from_payload(payload: bytes) -> tuple[dict, ...]:
+    try:
+        text = payload.decode("utf-8")
+        records = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError("dispatch row must be an object")
+            records.append(value)
+        return tuple(records)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise RevisitContractError(
+            "dispatch_log.jsonl must be valid UTF-8 JSONL"
+        ) from exc
+
+
+def _has_exact_rerun_dispatch(
+    records: tuple[dict, ...], artifact_path: str, expected_role: str
+) -> bool:
+    for record in records:
+        if not _dispatch_record_counts_as_delivery(record):
+            continue
+        if _normalize_delivery_path_from_facts(record.get("delivery_path", "")) != artifact_path:
+            continue
+        try:
+            role_slug = normalize_role_slug(
+                record.get("role"), delivery_path=artifact_path
+            )
+        except ValueError:
+            continue
+        if role_slug == expected_role:
+            return True
+    return False
+
+
+def _evaluate_revisit_rerun_matrix(
+    workspace: Path,
+    cycle: dict,
+    result: ContractResult,
+) -> tuple[Any, ...]:
+    artifacts = cycle["rerun_artifacts"]
+    subject_tickers = cycle["intake"]["framing"]["snapshot"][
+        "subject_resolution"
+    ].get("tickers")
+    allowed_bridge_paths = (
+        {
+            f"financials/{cycle['cycle_id']}_{ticker}_bridge.md"
+            for ticker in subject_tickers
+        }
+        if isinstance(subject_tickers, list)
+        else set()
+    )
+    generations = []
+    artifact_facts: list[tuple[dict, bool]] = []
+    for artifact in artifacts:
+        artifact_path = artifact["path"]
+        try:
+            generation = _read_authority_generation(
+                workspace, workspace / artifact_path
+            )
+        except RevisitContractError as exc:
+            result.fail(
+                code="REVISIT_RERUN_ARTIFACT_MISSING",
+                message=str(exc),
+                path=artifact_path,
+            )
+            artifact_facts.append((artifact, False))
+            continue
+        generations.append(
+            (
+                generation,
+                "REVISIT_RERUN_ARTIFACT_MISSING",
+                artifact_path,
+            )
+        )
+        hash_matches = generation.snapshot.expected_sha256 == artifact["sha256"]
+        if not hash_matches:
+            result.fail(
+                code="REVISIT_RERUN_ARTIFACT_MISSING",
+                message="registered rerun artifact bytes do not match sha256",
+                path=artifact_path,
+            )
+        ticker_matches = (
+            artifact["kind"] != "bridge"
+            or artifact_path in allowed_bridge_paths
+        )
+        if not ticker_matches:
+            result.fail(
+                code="REVISIT_RERUN_ARTIFACT_MISSING",
+                message=(
+                    "registered bridge rerun path must match one frozen "
+                    "resolved ticker"
+                ),
+                path=artifact_path,
+            )
+        artifact_facts.append((artifact, hash_matches and ticker_matches))
+
+    rows = _required_revisit_rerun_rows(cycle)
+    dispatch_required: list[tuple[list[dict], str, str]] = []
+    for kind, scope, round_number, role, requirement in rows:
+        matches = [
+            (artifact, valid)
+            for artifact, valid in artifact_facts
+            if artifact["kind"] == kind
+            and artifact["scope"] == scope
+            and artifact["round"] == round_number
+        ]
+        if not matches:
+            result.fail(
+                code="REVISIT_RERUN_ARTIFACT_MISSING",
+                message=f"required cycle-specific rerun artifact is missing: {requirement}",
+                path=f"revisit_cycles/{cycle['cycle_id']}.json",
+                evidence=requirement,
+            )
+            continue
+        valid_matches = [artifact for artifact, valid in matches if valid]
+        if role is not None and valid_matches:
+            dispatch_required.append((valid_matches, role, requirement))
+
+    if dispatch_required:
+        try:
+            dispatch_generation = _read_authority_generation(
+                workspace, workspace / "dispatch_log.jsonl"
+            )
+            dispatch_records = _dispatch_records_from_payload(
+                dispatch_generation.payload
+            )
+            generations.append(
+                (
+                    dispatch_generation,
+                    "REVISIT_RERUN_DISPATCH_MISSING",
+                    "dispatch_log.jsonl",
+                )
+            )
+        except RevisitContractError as exc:
+            dispatch_records = ()
+            dispatch_error = str(exc)
+        else:
+            dispatch_error = ""
+        for matching_artifacts, role, requirement in dispatch_required:
+            if not any(
+                _has_exact_rerun_dispatch(
+                    dispatch_records,
+                    artifact["path"],
+                    role,
+                )
+                for artifact in matching_artifacts
+            ):
+                artifact_path = matching_artifacts[0]["path"]
+                result.fail(
+                    code="REVISIT_RERUN_DISPATCH_MISSING",
+                    message="required rerun artifact lacks an exact delivered role/path record",
+                    path="dispatch_log.jsonl",
+                    evidence=(
+                        dispatch_error
+                        or f"{role}: {artifact_path} ({requirement})"
+                    ),
+                )
+    return tuple(generations)
 
 
 def _check_revisit_intake_authorities(
@@ -407,7 +918,13 @@ def _revisit_evidence_ref_valid(
 
 
 def _has_exact_single_metadata_block(report_text: str, expected_metadata: str) -> bool:
-    return report_text.count(expected_metadata) == 1
+    start_marker = "<!-- sofa:revisit-revision:start -->"
+    end_marker = "<!-- sofa:revisit-revision:end -->"
+    return (
+        report_text.count(start_marker) == 1
+        and report_text.count(end_marker) == 1
+        and report_text.count(expected_metadata) == 1
+    )
 
 
 def evaluate_workspace(workspace_path: Path | str, profile: ContractProfile) -> ContractResult:
@@ -1613,6 +2130,8 @@ def _check_dispatch_documents(
         if normalized_path is not None
     }
     for rel in worker_output_paths:
+        if _is_revisit_main_thread_rerun(rel):
+            continue
         if rel not in delivered_paths:
             result.fail(
                 code="WORKER_OUTPUT_WITHOUT_DISPATCH",
@@ -1879,6 +2398,8 @@ def _check_worker_output_documents(
     """Pure document owner: worker-output semantics over preloaded facts."""
     delivered_roles_map = dict(delivered_roles or ())
     for rel, text in outputs:
+        if _is_revisit_main_thread_rerun(rel):
+            continue
         candidate_roles = _candidate_worker_roles_for_output(rel)
         role = _worker_role_for_output(rel, delivered_roles_map, candidate_roles)
 
@@ -1938,6 +2459,15 @@ def _candidate_worker_roles_for_output(rel: str):
     return tuple(role for role in all_worker_roles() if role.matches_delivery_path(rel))
 
 
+def _is_revisit_main_thread_rerun(relative_path: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"redteam/RC-[0-9]{4}_(?:round[1-9][0-9]*_defense|thesis_revision)\.md",
+            relative_path,
+        )
+    )
+
+
 def _required_output_markers_for_output(role, candidate_roles) -> tuple[str, ...]:
     if role is not None:
         return role.required_output_markers
@@ -1991,17 +2521,18 @@ def _check_final_report(workspace: Path, profile: ContractProfile, result: Contr
             )
             return
         revision = pointer["current_revision"]
-        if revision["cycle_id"] is not None and not _check_current_revision_cycle(
-            workspace,
-            revision,
-            result,
-        ):
-            return
+        expected_metadata = None
+        if revision["cycle_id"] is not None:
+            cycle = _check_current_revision_cycle(workspace, revision, result)
+            if cycle is None:
+                return
+            expected_metadata = render_report_metadata(cycle)
         result.extend(
             evaluate_specific_ticker_report(
                 workspace,
                 revision["report_path"],
                 expected_sha256=revision["report_sha256"],
+                expected_metadata=expected_metadata,
             )
         )
         return
@@ -2049,7 +2580,7 @@ def _check_current_revision_cycle(
     workspace: Path,
     revision: dict,
     result: ContractResult,
-) -> bool:
+) -> dict | None:
     cycle_id = revision["cycle_id"]
     try:
         cycle = load_cycle(workspace, cycle_id)
@@ -2059,20 +2590,37 @@ def _check_current_revision_cycle(
             message=str(exc),
             path=f"revisit_cycles/{cycle_id}.json",
         )
-        return False
+        return None
     if cycle["status"] != "completed":
         result.fail(
             code="CURRENT_REPORT_CYCLE_INVALID",
             message="current report must originate from an immutable completed cycle",
             path=f"revisit_cycles/{cycle_id}.json",
         )
-        return False
+        return None
 
+    if not _current_revision_matches_completed_cycle(revision, cycle):
+        result.fail(
+            code="CURRENT_REPORT_LINEAGE_MISMATCH",
+            message="current revision does not exactly match its completed cycle candidate lineage",
+            path=f"revisit_cycles/{cycle_id}.json",
+        )
+        return None
+    return cycle
+
+
+def _current_revision_matches_completed_cycle(
+    revision: dict,
+    cycle: dict,
+) -> bool:
+    """Return whether one current revision exactly projects its completed cycle."""
     candidate = cycle["report_candidate"]
     assessment = cycle["decision_assessment"]
     base_revision = cycle["intake"]["base_revision"]
-    candidate_matches = (
-        cycle["candidate_revision_id"] == revision["revision_id"]
+    return bool(
+        cycle["status"] == "completed"
+        and cycle["cycle_id"] == revision["cycle_id"]
+        and cycle["candidate_revision_id"] == revision["revision_id"]
         and isinstance(candidate, dict)
         and candidate["revision_id"] == revision["revision_id"]
         and candidate["revision_of"] == revision["revision_of"]
@@ -2082,14 +2630,6 @@ def _check_current_revision_cycle(
         and isinstance(assessment, dict)
         and assessment["new_action_class"] == revision["action_class"]
     )
-    if not candidate_matches:
-        result.fail(
-            code="CURRENT_REPORT_LINEAGE_MISMATCH",
-            message="current revision does not exactly match its completed cycle candidate lineage",
-            path=f"revisit_cycles/{cycle_id}.json",
-        )
-        return False
-    return True
 
 
 def _report_requirements_for(profile: ContractProfile) -> dict:

@@ -49,6 +49,12 @@ _REQUIRED_RERUNS = (
     "thesis-revision",
 )
 _RERUN_SCOPES = ("affected", "full")
+RERUN_KINDS = (
+    "bridge",
+    "redteam_attack",
+    "redteam_defense",
+    "thesis_revision",
+)
 CYCLE_ID_RE = re.compile(r"^RC-(?P<number>[0-9]{4})$")
 REVISION_ID_RE = re.compile(r"^REV-(?P<number>[0-9]{4})$")
 TRIGGER_ID_RE = re.compile(
@@ -842,6 +848,57 @@ def mark_ready_for_report(cycle: dict[str, Any]) -> dict[str, Any]:
         )
     updated = copy.deepcopy(cycle)
     updated["status"] = "ready_for_report"
+    return updated
+
+
+def record_rerun(
+    cycle: dict[str, Any], artifact: dict[str, Any]
+) -> dict[str, Any]:
+    validate_cycle(cycle)
+    if cycle["status"] != "active":
+        raise RevisitContractError("reruns may be recorded only on an active cycle")
+    if cycle["decision_assessment"] is None:
+        raise RevisitContractError(
+            "reruns may be recorded only after decision assessment"
+        )
+    updated = copy.deepcopy(cycle)
+    updated["rerun_artifacts"].append(copy.deepcopy(artifact))
+    _validate_rerun_artifacts(updated)
+    return updated
+
+
+def register_report_candidate(
+    cycle: dict[str, Any], candidate: dict[str, Any]
+) -> dict[str, Any]:
+    validate_cycle(cycle)
+    if cycle["status"] != "ready_for_report":
+        raise RevisitContractError(
+            "report candidate registration requires ready_for_report status"
+        )
+    if cycle["report_candidate"] is not None:
+        raise RevisitContractError("report candidate is already registered")
+    updated = copy.deepcopy(cycle)
+    updated["report_candidate"] = copy.deepcopy(candidate)
+    _validate_report_candidate(updated)
+    return updated
+
+
+def complete_cycle(
+    cycle: dict[str, Any], completed_at: str
+) -> dict[str, Any]:
+    validate_cycle(cycle)
+    if cycle["status"] != "ready_for_report":
+        raise RevisitContractError(
+            "complete_cycle requires ready_for_report status"
+        )
+    if cycle["report_candidate"] is None:
+        raise RevisitContractError(
+            "complete_cycle requires a registered report candidate"
+        )
+    _require_utc_timestamp(completed_at, "completed_at")
+    updated = copy.deepcopy(cycle)
+    updated["status"] = "completed"
+    updated["completed_at"] = completed_at
     return updated
 
 
@@ -1991,6 +2048,77 @@ def _validate_claims(raw: dict[str, Any]) -> None:
         )
 
 
+def _validate_rerun_artifact(
+    raw: dict[str, Any], artifact_value: Any, path: str
+) -> dict[str, Any]:
+    artifact = _require_object(artifact_value, path)
+    _require_exact_keys(
+        artifact,
+        {"kind", "scope", "round", "path", "sha256", "recorded_at"},
+        path,
+    )
+    kind = _require_non_empty_text(artifact["kind"], f"{path}.kind")
+    if kind not in RERUN_KINDS:
+        raise RevisitContractError("rerun artifact kind is unsupported")
+    artifact_path = _require_non_empty_text(artifact["path"], f"{path}.path")
+    cycle_id = raw["cycle_id"]
+
+    if kind == "bridge":
+        if artifact["scope"] not in _RERUN_SCOPES:
+            raise RevisitContractError(
+                "bridge rerun requires affected or full scope"
+            )
+        if artifact["round"] is not None:
+            raise RevisitContractError("bridge rerun round must be null")
+        bridge_pattern = re.compile(
+            rf"^financials/{re.escape(cycle_id)}_[A-Za-z0-9]"
+            rf"[A-Za-z0-9._-]*_bridge\.md$"
+        )
+        if bridge_pattern.fullmatch(artifact_path) is None:
+            raise RevisitContractError(
+                "bridge rerun requires a cycle-specific bridge path"
+            )
+    elif kind in {"redteam_attack", "redteam_defense"}:
+        if artifact["scope"] is not None:
+            raise RevisitContractError("red-team rerun scope must be null")
+        round_number = _require_strict_int(
+            artifact["round"], f"{path}.round", 1
+        )
+        suffix = "redteam" if kind == "redteam_attack" else "defense"
+        expected = f"redteam/{cycle_id}_round{round_number}_{suffix}.md"
+        if artifact_path != expected:
+            raise RevisitContractError(
+                "red-team rerun path must match its round"
+            )
+    else:
+        if artifact["scope"] is not None:
+            raise RevisitContractError("thesis revision scope must be null")
+        if artifact["round"] is not None:
+            raise RevisitContractError("thesis revision round must be null")
+        expected = f"redteam/{cycle_id}_thesis_revision.md"
+        if artifact_path != expected:
+            raise RevisitContractError(
+                "thesis revision requires a cycle-specific thesis revision path"
+            )
+
+    _require_sha256(artifact["sha256"], f"{path}.sha256")
+    _require_utc_timestamp(artifact["recorded_at"], f"{path}.recorded_at")
+    return artifact
+
+
+def _validate_rerun_artifacts(raw: dict[str, Any]) -> None:
+    reruns_path = "cycle.rerun_artifacts"
+    artifacts = _require_list(raw["rerun_artifacts"], reruns_path)
+    for index, artifact in enumerate(artifacts):
+        _validate_rerun_artifact(raw, artifact, f"{reruns_path}[{index}]")
+    paths = [artifact["path"] for artifact in artifacts]
+    if len(paths) != len(set(paths)):
+        raise RevisitContractError("rerun artifact path is already registered")
+    hashes = [artifact["sha256"] for artifact in artifacts]
+    if len(hashes) != len(set(hashes)):
+        raise RevisitContractError("rerun artifact hash is already registered")
+
+
 def _validate_decision_and_reruns(raw: dict[str, Any]) -> None:
     assessment = raw["decision_assessment"]
     if assessment is not None:
@@ -2102,25 +2230,7 @@ def _validate_decision_and_reruns(raw: dict[str, Any]) -> None:
                 f"{path}.required_reruns must equal the derived required_reruns"
             )
 
-    reruns_path = "cycle.rerun_artifacts"
-    for index, artifact_value in enumerate(
-        _require_list(raw["rerun_artifacts"], reruns_path)
-    ):
-        path = f"{reruns_path}[{index}]"
-        artifact = _require_object(artifact_value, path)
-        _require_exact_keys(
-            artifact,
-            {"kind", "scope", "round", "path", "sha256", "recorded_at"},
-            path,
-        )
-        _require_non_empty_text(artifact["kind"], f"{path}.kind")
-        if artifact["scope"] is not None and artifact["scope"] not in _RERUN_SCOPES:
-            raise RevisitContractError(f"{path}.scope is unsupported")
-        if artifact["round"] is not None:
-            _require_strict_int(artifact["round"], f"{path}.round", 1)
-        _require_non_empty_text(artifact["path"], f"{path}.path")
-        _require_sha256(artifact["sha256"], f"{path}.sha256")
-        _require_utc_timestamp(artifact["recorded_at"], f"{path}.recorded_at")
+    _validate_rerun_artifacts(raw)
 
 
 def _validate_report_candidate(raw: dict[str, Any]) -> None:
@@ -2137,9 +2247,37 @@ def _validate_report_candidate(raw: dict[str, Any]) -> None:
     )
     _require_revision_id(candidate["revision_id"], f"{path}.revision_id")
     _require_revision_id(candidate["revision_of"], f"{path}.revision_of")
-    _require_non_empty_text(candidate["report_path"], f"{path}.report_path")
+    if candidate["revision_id"] != raw["candidate_revision_id"]:
+        raise RevisitContractError(
+            "report candidate revision_id must equal candidate_revision_id"
+        )
+    if candidate["revision_of"] != raw["intake"]["base_revision"]["revision_id"]:
+        raise RevisitContractError(
+            "report candidate revision_of must equal the base revision ID"
+        )
+    report_path = _require_non_empty_text(
+        candidate["report_path"], f"{path}.report_path"
+    )
+    basename_pattern = re.compile(
+        rf"^reports/[^/]*(?<![A-Za-z0-9])"
+        rf"{re.escape(candidate['revision_id'])}"
+        rf"(?![A-Za-z0-9])[^/]*\.md$"
+    )
+    if (
+        "\\" in report_path
+        or ".." in report_path.split("/")
+        or basename_pattern.fullmatch(report_path) is None
+    ):
+        raise RevisitContractError(
+            "report candidate path must be a reports/ Markdown basename "
+            "containing the reserved revision ID"
+        )
     _require_sha256(candidate["report_sha256"], f"{path}.report_sha256")
     _require_utc_timestamp(candidate["registered_at"], f"{path}.registered_at")
+    if raw["status"] not in {"ready_for_report", "completed", "aborted"}:
+        raise RevisitContractError(
+            "report candidate requires ready_for_report, completed, or aborted status"
+        )
 
 
 def _validate_audit(raw: dict[str, Any]) -> None:
@@ -2274,4 +2412,20 @@ def validate_cycle(raw: Any) -> dict[str, Any]:
     _validate_decision_and_reruns(raw)
     _validate_report_candidate(raw)
     _validate_audit(raw)
+    if raw["status"] == "completed":
+        if raw["report_candidate"] is None:
+            raise RevisitContractError(
+                "completed cycle requires report_candidate"
+            )
+        if raw["audit"][-1]["command"] != "publish":
+            raise RevisitContractError(
+                "completed cycle requires last audit command publish"
+            )
+    if (
+        raw["status"] == "aborted"
+        and raw["audit"][-1]["command"] != "abort"
+    ):
+        raise RevisitContractError(
+            "aborted cycle requires last audit command abort"
+        )
     return raw

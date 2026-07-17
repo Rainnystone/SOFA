@@ -30,6 +30,7 @@ from .model import (
     bind_frontier,
     canonical_semantic_bytes,
     create_cycle,
+    complete_cycle,
     cycle_state_sha256,
     derive_change_class,
     derive_claim_issues,
@@ -40,6 +41,8 @@ from .model import (
     evaluate_history,
     intake_sha256,
     mark_ready_for_report,
+    record_rerun,
+    register_report_candidate,
     resolve_claim,
     semantic_sha256,
     state_without_audit,
@@ -67,7 +70,7 @@ from .store import (
     sha256_file,
     workspace_transaction,
 )
-from .render import render_cycle_markdown
+from .render import render_cycle_markdown, render_report_metadata
 from .context import RevisitContext, build_revisit_context
 
 __all__ = (
@@ -107,6 +110,7 @@ __all__ = (
     "sha256_file",
     "workspace_transaction",
     "create_cycle",
+    "complete_cycle",
     "derive_change_class",
     "derive_claim_issues",
     "derive_freshness_issues",
@@ -123,6 +127,7 @@ __all__ = (
     "persist_pointer",
     "persist_cycle",
     "render_cycle_markdown",
+    "render_report_metadata",
     "RevisitContext",
     "build_revisit_context",
     "cycle_state_sha256",
@@ -130,6 +135,8 @@ __all__ = (
     "evaluate_history",
     "intake_sha256",
     "mark_ready_for_report",
+    "record_rerun",
+    "register_report_candidate",
     "resolve_claim",
     "semantic_sha256",
     "state_without_audit",

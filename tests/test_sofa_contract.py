@@ -1604,6 +1604,7 @@ def write_matching_completed_cycle(
     *,
     action_class: str = "Watch with Trigger",
     status: str = "completed",
+    wrong_metadata: bool = False,
 ) -> None:
     import copy
 
@@ -1743,28 +1744,76 @@ def write_matching_completed_cycle(
         "2026-07-15T00:50:00Z",
     )
 
-    proposed = copy.deepcopy(cycle)
-    if status == "completed":
-        proposed["status"] = "completed"
-        proposed["completed_at"] = "2026-07-15T00:59:00Z"
-    proposed["report_candidate"] = {
+    proposed = revisit_contract.mark_ready_for_report(cycle)
+    cycle = with_audit(
+        cycle,
+        proposed,
+        "check",
+        ["RC-0001"],
+        "2026-07-15T00:55:00Z",
+    )
+
+    report = workspace / revision["report_path"]
+    metadata = revisit_contract.render_report_metadata(cycle)
+    if wrong_metadata:
+        metadata = metadata.replace(
+            "| Change class | evidence_or_claim_only |",
+            "| Change class | action_class_change |",
+            1,
+        )
+    report.write_bytes(
+        report.read_bytes()
+        + metadata.encode("utf-8")
+        + (
+            "\n## Trigger Delta\nObserved trigger validated.\n"
+            "## Claim Delta\nSelected claim confirmed.\n"
+            "## Evidence Freshness Delta\nCurrent evidence checked.\n"
+            "## Frontier Delta\nThree new loops reviewed.\n"
+            "## Financial/Red-Team Delta\nNo mechanical rerun required.\n"
+            "## Unresolved or Blocked Gaps\nNone.\n"
+        ).encode("utf-8")
+    )
+    revision["report_sha256"] = hashlib.sha256(report.read_bytes()).hexdigest()
+    (workspace / "revisit_contract.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mode": "ticker",
+                "current_revision": revision,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    candidate = {
         "revision_id": revision["revision_id"],
         "revision_of": revision["revision_of"],
         "report_path": revision["report_path"],
         "report_sha256": revision["report_sha256"],
         "registered_at": "2026-07-15T00:58:00Z",
     }
+    proposed = revisit_contract.register_report_candidate(cycle, candidate)
     cycle = with_audit(
         cycle,
         proposed,
-        "complete" if status == "completed" else "record-report-candidate",
-        ["RC-0001", revision["revision_id"]],
-        (
-            proposed["completed_at"]
-            if status == "completed"
-            else "2026-07-15T00:58:00Z"
-        ),
+        "register-report",
+        [revision["revision_id"]],
+        "2026-07-15T00:58:00Z",
     )
+    if status == "completed":
+        proposed = copy.deepcopy(cycle)
+        proposed["status"] = "completed"
+        proposed["completed_at"] = "2026-07-15T00:59:00Z"
+        cycle = with_audit(
+            cycle,
+            proposed,
+            "publish",
+            ["RC-0001", revision["revision_id"]],
+            "2026-07-15T00:59:00Z",
+        )
+    elif status != "ready_for_report":
+        raise AssertionError(f"unsupported test cycle status: {status}")
     revisit_contract.persist_cycle(workspace, cycle, expected_sha256=None)
 
 
@@ -1927,7 +1976,7 @@ class TestTickerCurrentReportPointer(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
             write_dossier_ready_workspace(workspace)
-            report = workspace / "reports" / "revision-0002.md"
+            report = workspace / "reports" / "revision_REV-0002.md"
             write_complete_ticker_report(report)
             write_revisit_report_pointer(workspace, report)
 
@@ -1945,7 +1994,7 @@ class TestTickerCurrentReportPointer(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
             write_dossier_ready_workspace(workspace)
-            report = workspace / "reports" / "revision-0002.md"
+            report = workspace / "reports" / "revision_REV-0002.md"
             write_complete_ticker_report(report)
             revision = write_revisit_report_pointer(
                 workspace,
@@ -1969,10 +2018,14 @@ class TestTickerCurrentReportPointer(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
             write_dossier_ready_workspace(workspace)
-            report = workspace / "reports" / "revision-0002.md"
+            report = workspace / "reports" / "revision_REV-0002.md"
             write_complete_ticker_report(report)
             revision = write_revisit_report_pointer(workspace, report)
-            write_matching_completed_cycle(workspace, revision, status="active")
+            write_matching_completed_cycle(
+                workspace,
+                revision,
+                status="ready_for_report",
+            )
 
             result = evaluate_workspace(
                 workspace,
@@ -1988,7 +2041,7 @@ class TestTickerCurrentReportPointer(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
             write_dossier_ready_workspace(workspace)
-            report = workspace / "reports" / "revision-0002.md"
+            report = workspace / "reports" / "revision_REV-0002.md"
             write_complete_ticker_report(report)
             revision = write_revisit_report_pointer(workspace, report)
             write_matching_completed_cycle(workspace, revision)
@@ -2000,35 +2053,100 @@ class TestTickerCurrentReportPointer(unittest.TestCase):
 
             self.assertTrue(result.passed, [issue.display() for issue in result.failures])
 
-    def test_specific_evaluator_requires_exactly_one_expected_metadata_block(self):
-        metadata = "<!-- SOFA:revisit-report\nrevision: REV-0002\n-->"
+    def test_future_revision_requires_its_completed_cycle_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
-            report = workspace / "reports" / "revision-0002.md"
+            write_dossier_ready_workspace(workspace)
+            report = workspace / "reports" / "revision_REV-0002.md"
+            write_complete_ticker_report(report)
+            revision = write_revisit_report_pointer(workspace, report)
+            write_matching_completed_cycle(
+                workspace,
+                revision,
+                wrong_metadata=True,
+            )
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "REVISIT_REPORT_METADATA_MISMATCH",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_specific_evaluator_requires_exactly_one_expected_metadata_block(self):
+        metadata = (
+            "<!-- sofa:revisit-revision:start -->\n"
+            "## Revisit Revision Metadata\n"
+            "revision: REV-0002\n"
+            "<!-- sofa:revisit-revision:end -->"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            report = workspace / "reports" / "revision_REV-0002.md"
             write_complete_ticker_report(report)
             report.write_bytes(
-                report.read_bytes() + (metadata + "\n").encode("utf-8")
+                report.read_bytes()
+                + (metadata + "\n").encode("utf-8")
+                + (
+                    "## Trigger Delta\n"
+                    "## Claim Delta\n"
+                    "## Evidence Freshness Delta\n"
+                    "## Frontier Delta\n"
+                    "## Financial/Red-Team Delta\n"
+                    "## Unresolved or Blocked Gaps\nNone.\n"
+                ).encode("utf-8")
             )
 
             exact = evaluate_module.evaluate_specific_ticker_report(
                 workspace,
-                "reports/revision-0002.md",
+                "reports/revision_REV-0002.md",
                 expected_metadata=metadata,
             )
             self.assertTrue(exact.passed, [issue.display() for issue in exact.failures])
 
-            report.write_bytes(
-                report.read_bytes() + (metadata + "\n").encode("utf-8")
+            exact_payload = report.read_bytes()
+            marker_start = "<!-- sofa:revisit-revision:start -->"
+            marker_end = "<!-- sofa:revisit-revision:end -->"
+            rogue_metadata = (
+                f"{marker_start}\n"
+                "## Revisit Revision Metadata\n"
+                "revision: REV-9999\n"
+                f"{marker_end}\n"
+            ).encode("utf-8")
+            malformed_cases = (
+                ("duplicate-exact", exact_payload + (metadata + "\n").encode("utf-8")),
+                ("additional-managed-block", exact_payload + rogue_metadata),
+                ("orphan-start", exact_payload + (marker_start + "\n").encode("utf-8")),
+                ("orphan-end", exact_payload + (marker_end + "\n").encode("utf-8")),
+                (
+                    "out-of-order",
+                    exact_payload.replace(
+                        (metadata + "\n").encode("utf-8"),
+                        (
+                            f"{marker_end}\n"
+                            "## Revisit Revision Metadata\n"
+                            "revision: REV-0002\n"
+                            f"{marker_start}\n"
+                        ).encode("utf-8"),
+                        1,
+                    ),
+                ),
             )
-            duplicated = evaluate_module.evaluate_specific_ticker_report(
-                workspace,
-                "reports/revision-0002.md",
-                expected_metadata=metadata,
-            )
-            self.assertIn(
-                "REVISIT_REPORT_METADATA_MISMATCH",
-                [issue.code for issue in duplicated.failures],
-            )
+            for label, payload in malformed_cases:
+                with self.subTest(label=label):
+                    report.write_bytes(payload)
+                    duplicated = evaluate_module.evaluate_specific_ticker_report(
+                        workspace,
+                        "reports/revision_REV-0002.md",
+                        expected_metadata=metadata,
+                    )
+                    self.assertIn(
+                        "REVISIT_REPORT_METADATA_MISMATCH",
+                        [issue.code for issue in duplicated.failures],
+                    )
 
     def test_empty_ticker_pointer_fails_final_report_readiness(self):
         with tempfile.TemporaryDirectory() as temp_dir:

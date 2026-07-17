@@ -54,10 +54,12 @@ from tests.test_revisit_contract import (  # noqa: E402
     append_task6_loops,
     attach_valid_audit,
     bind_task6_reactivated_frontier,
+    complete_revisit_report_bytes,
     derive_task6_floor_issues,
     make_registration_workspace,
     make_task6_binding_workspace,
     make_task6_ready_workspace,
+    make_terminal_cycle_fixture,
     run_revisit_cycle_cli,
     snapshot_tree,
     test_semantic_sha256,
@@ -369,13 +371,33 @@ class TestRevisitCheckEffects(unittest.TestCase):
             workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
             cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
             cycle = revisit_contract.load_cycle(workspace, cycle_id)
-            cycle["status"] = "completed"
-            cycle["completed_at"] = "2026-07-16T11:00:00Z"
+            cycle["status"] = "ready_for_report"
             attach_valid_audit(cycle)
+            candidate_relative = (
+                "reports/TEST_SOFA_Report_2026-07-16_REV-0002.md"
+            )
+            candidate_payload = complete_revisit_report_bytes(cycle)
+            (workspace / candidate_relative).write_bytes(candidate_payload)
+            cycle = make_terminal_cycle_fixture(
+                cycle,
+                "completed",
+                timestamp="2026-07-16T11:00:00Z",
+                report_path=candidate_relative,
+                report_sha256=hashlib.sha256(candidate_payload).hexdigest(),
+            )
             revisit_contract.persist_cycle(
                 workspace,
                 cycle,
                 expected_sha256=revisit_contract.sha256_file(cycle_path),
+            )
+            current = revisit_contract.load_pointer(workspace)[
+                "current_revision"
+            ]
+            completed = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual("REV-0001", current["revision_id"])
+            self.assertEqual(
+                "REV-0002",
+                completed["report_candidate"]["revision_id"],
             )
             prior_tree = snapshot_tree(workspace)
             prior_audit = tuple(

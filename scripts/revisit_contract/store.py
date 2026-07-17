@@ -24,7 +24,11 @@ from .model import (
     validate_intake_request,
     validate_pointer,
 )
-from .generation import GenerationClosure, _require_unchanged_except
+from .generation import (
+    GenerationClosure,
+    ObservedReadSession,
+    _require_unchanged_except,
+)
 from .render import render_cycle_markdown
 
 
@@ -364,6 +368,46 @@ def list_cycle_ids(workspace: str | Path) -> tuple[str, ...]:
     return tuple(cycle_ids)
 
 
+def _load_observed_cycle_history(workspace: Path):
+    session = ObservedReadSession(workspace)
+    entries = session.list_directory(
+        "revisit_cycles",
+        recursive=False,
+        optional=False,
+    )
+    discovered = []
+    for entry in entries:
+        member = Path(entry.relative_path)
+        cycle_id = member.stem
+        if (
+            entry.kind != "file"
+            or member.suffix not in {".json", ".md"}
+            or CYCLE_ID_RE.fullmatch(cycle_id) is None
+        ):
+            raise RevisitContractError(
+                f"malformed cycle filename: {member.name}"
+            )
+        if member.suffix == ".md":
+            continue
+        payload = session.read_required(entry.relative_path)
+        try:
+            raw = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RevisitContractError(
+                f"malformed JSON authority: {member.name}"
+            ) from exc
+        cycle = validate_cycle(raw)
+        if cycle["cycle_id"] != cycle_id:
+            raise RevisitContractError(
+                f"filename {cycle_id} does not match internal cycle_id "
+                f"{cycle['cycle_id']}"
+            )
+        number = int(CYCLE_ID_RE.fullmatch(cycle_id).group("number"))
+        discovered.append((number, cycle))
+    closure = session.freeze()
+    return tuple(cycle for _, cycle in sorted(discovered)), closure
+
+
 def _atomic_replace(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -675,6 +719,7 @@ def persist_pointer(
     expected_sha256: str | None,
     *,
     authority_snapshots: _AuthoritySnapshots = None,
+    generation_closure: GenerationClosure | None = None,
 ) -> Path:
     lexical_workspace = Path(workspace)
     with workspace_transaction(workspace) as locked_workspace:
@@ -685,11 +730,30 @@ def persist_pointer(
             authority_snapshots,
             lexical_workspace=lexical_workspace,
         )
+        if generation_closure is not None:
+            if not isinstance(generation_closure, GenerationClosure):
+                raise RevisitContractError(
+                    "generation_closure must be a GenerationClosure"
+                )
+            if generation_closure.workspace != locked_workspace:
+                raise RevisitContractError(
+                    "generation_closure workspace must equal the locked workspace"
+                )
         prior_payload = _require_expected_bytes(path, expected_sha256)
         payload = canonical_document_bytes(pointer)
+        if generation_closure is not None:
+            _require_unchanged_except(
+                generation_closure,
+                (POINTER_FILENAME,),
+            )
         _require_snapshot_generations(snapshots, "before pointer persistence")
         _atomic_replace(path, payload)
         try:
+            if generation_closure is not None:
+                _require_unchanged_except(
+                    generation_closure,
+                    (POINTER_FILENAME,),
+                )
             _require_snapshot_generations(snapshots, "after pointer persistence")
         except Exception as original_error:
             try:
@@ -710,10 +774,6 @@ def persist_cycle(
     authority_snapshots: _AuthoritySnapshots = None,
     generation_closure: GenerationClosure | None = None,
 ) -> tuple[Path, Path]:
-    if authority_snapshots is not None and generation_closure is not None:
-        raise RevisitContractError(
-            "authority_snapshots and generation_closure are mutually exclusive"
-        )
     lexical_workspace = Path(workspace)
     with workspace_transaction(workspace) as locked_workspace:
         validate_cycle(cycle)
@@ -723,6 +783,11 @@ def persist_cycle(
             raise RevisitContractError(
                 "cycle JSON and Markdown authority targets must be distinct"
             )
+        snapshots = _normalize_authority_snapshots(
+            locked_workspace,
+            authority_snapshots,
+            lexical_workspace=lexical_workspace,
+        )
         if generation_closure is not None:
             return _persist_cycle_with_closure(
                 locked_workspace,
@@ -731,12 +796,8 @@ def persist_cycle(
                 generation_closure,
                 json_path,
                 markdown_path,
+                snapshots,
             )
-        snapshots = _normalize_authority_snapshots(
-            locked_workspace,
-            authority_snapshots,
-            lexical_workspace=lexical_workspace,
-        )
         prior_json = _require_expected_bytes(json_path, expected_sha256)
         prior_markdown = markdown_path.read_bytes() if markdown_path.exists() else None
         markdown_payload = render_cycle_markdown(cycle).encode("utf-8")
@@ -784,6 +845,7 @@ def _persist_cycle_with_closure(
     closure: GenerationClosure,
     json_path: Path,
     markdown_path: Path,
+    snapshots: dict[Path, PreparedAuthoritySnapshot],
 ) -> tuple[Path, Path]:
     """Persist a cycle pair observed by a frozen ``GenerationClosure``.
 
@@ -816,6 +878,7 @@ def _persist_cycle_with_closure(
 
     # Pre-write: the complete unexcluded closure must be unchanged.
     _require_unchanged_except(closure, excluded)
+    _require_snapshot_generations(snapshots, "before cycle persistence")
     # Markdown-first, JSON-second (mirrors the snapshot path ordering).
     _atomic_replace(markdown_path, markdown_payload)
     try:
@@ -834,6 +897,7 @@ def _persist_cycle_with_closure(
         raise
     try:
         _require_unchanged_except(closure, excluded)
+        _require_snapshot_generations(snapshots, "after cycle persistence")
     except Exception as original_error:
         try:
             _restore_committed_cycle_pair(
