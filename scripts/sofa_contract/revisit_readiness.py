@@ -307,6 +307,7 @@ def _check_intake_authorities_from_facts(
 def _evidence_ref_valid_from_facts(
     reference: dict,
     workspace: Path,
+    lexical_workspace: Path,
     *,
     source_ids: frozenset[str],
     source_context_valid: bool,
@@ -317,7 +318,11 @@ def _evidence_ref_valid_from_facts(
             source_context_valid
             and str(reference.get("source_id", "")) in source_ids
         )
-    normalized = _normalize_delivery_path(workspace, reference.get("path", ""))
+    normalized = _normalize_delivery_path(
+        lexical_workspace,
+        reference.get("path", ""),
+        resolved_workspace=workspace,
+    )
     if normalized is None:
         return False
     payload = payload_by_path.get(normalized)
@@ -426,6 +431,7 @@ def _load_worker_output_facts(
 def _load_dispatch_facts(
     session: ObservedReadSession,
     workspace: Path,
+    lexical_workspace: Path,
     result: ContractResult,
 ) -> tuple[tuple[dict, ...] | None, tuple[tuple[str, bytes | None], ...]]:
     """Parse dispatch_log.jsonl and preload delivered payloads.
@@ -455,7 +461,11 @@ def _load_dispatch_facts(
         raw_path = record.get("delivery_path", "")
         if not raw_path:
             continue
-        normalized = _normalize_delivery_path(workspace, raw_path)
+        normalized = _normalize_delivery_path(
+            lexical_workspace,
+            raw_path,
+            resolved_workspace=workspace,
+        )
         if normalized is None or normalized in seen:
             continue
         seen.add(normalized)
@@ -518,6 +528,7 @@ def _prepare_revisit_readiness(
     session: ObservedReadSession,
     result: ContractResult,
     named_cycle_id: str | None,
+    lexical_workspace: Path,
 ) -> _PreparedRevisitReadiness:
     """Run the thirteen-row readiness plan and freeze the observed closure."""
     workspace = session._workspace
@@ -726,7 +737,11 @@ def _prepare_revisit_readiness(
             path = reference.get("path", "")
             if not path:
                 continue
-            normalized = _normalize_delivery_path(workspace, path)
+            normalized = _normalize_delivery_path(
+                lexical_workspace,
+                path,
+                resolved_workspace=workspace,
+            )
             if normalized is None:
                 continue
             payload = session.read_optional(normalized)
@@ -740,7 +755,11 @@ def _prepare_revisit_readiness(
                 path = reference.get("path", "")
                 if not path:
                     continue
-                normalized = _normalize_delivery_path(workspace, path)
+                normalized = _normalize_delivery_path(
+                    lexical_workspace,
+                    path,
+                    resolved_workspace=workspace,
+                )
                 if normalized is None:
                     continue
                 payload = session.read_optional(normalized)
@@ -759,6 +778,7 @@ def _prepare_revisit_readiness(
             if _evidence_ref_valid_from_facts(
                 reference,
                 workspace,
+                lexical_workspace,
                 source_ids=source_ids,
                 source_context_valid=source_context_valid,
                 payload_by_path=payload_by_path,
@@ -806,6 +826,7 @@ def _prepare_revisit_readiness(
                 if _evidence_ref_valid_from_facts(
                     reference,
                     workspace,
+                    lexical_workspace,
                     source_ids=source_ids,
                     source_context_valid=source_context_valid,
                     payload_by_path=payload_by_path,
@@ -830,6 +851,7 @@ def _prepare_revisit_readiness(
                 if _evidence_ref_valid_from_facts(
                     reference,
                     workspace,
+                    lexical_workspace,
                     source_ids=source_ids,
                     source_context_valid=source_context_valid,
                     payload_by_path=payload_by_path,
@@ -886,7 +908,12 @@ def _prepare_revisit_readiness(
         else ""
     )
     search_records = _load_search_facts(session)
-    dispatch_records, delivered_payloads = _load_dispatch_facts(session, workspace, result)
+    dispatch_records, delivered_payloads = _load_dispatch_facts(
+        session,
+        workspace,
+        lexical_workspace,
+        result,
+    )
     worker_outputs = _load_worker_output_facts(session)
 
     # Row 7: frontier_research_floor
@@ -945,6 +972,7 @@ def _prepare_revisit_readiness(
             delivered_payloads=delivered_payloads,
             result=result,
             workspace=workspace,
+            lexical_workspace=lexical_workspace,
         )
 
     # Row 10: worker_outputs
@@ -1032,7 +1060,7 @@ def evaluate_revisit_readiness(
     result = ContractResult()
     session = ObservedReadSession(root)
     try:
-        prepared = _prepare_revisit_readiness(session, result, cycle_id)
+        prepared = _prepare_revisit_readiness(session, result, cycle_id, root)
         closure = prepared.closure
     except AuthorityDriftError as exc:
         result.fail(
@@ -1081,9 +1109,15 @@ def check_revisit_readiness(
     """
     _validate_canonical_timestamp(timestamp)
     result = ContractResult()
+    lexical_workspace = Path(workspace)
     with workspace_transaction(workspace) as locked_workspace:
         session = ObservedReadSession(locked_workspace)
-        prepared = _prepare_revisit_readiness(session, result, cycle_id)
+        prepared = _prepare_revisit_readiness(
+            session,
+            result,
+            cycle_id,
+            lexical_workspace,
+        )
         closure = prepared.closure
 
         # Recheck the closure once after preparation. Any boundary change is a

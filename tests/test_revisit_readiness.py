@@ -947,6 +947,70 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
             )
             self.assertEqual("artifacts/proof.md", drift_issue.path)
 
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
+    def test_workspace_alias_absolute_artifact_is_ready_across_routes(self):
+        def make_alias_workspace(root: Path) -> tuple[Path, Path, str]:
+            workspace, cycle_id = make_task6_ready_workspace(root)
+            artifact = workspace / "artifacts" / "proof.md"
+            artifact.parent.mkdir()
+            payload = b"Workspace alias artifact evidence.\n"
+            artifact.write_bytes(payload)
+            alias = root / "workspace-alias"
+            os.symlink(workspace, alias, target_is_directory=True)
+
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            cycle["intake"]["triggers"][0]["evidence_refs"] = [
+                {
+                    "kind": "artifact",
+                    "path": str(alias / "artifacts" / "proof.md"),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "locator": "Workspace alias absolute artifact proof",
+                    "checked_at": cycle["created_at"],
+                }
+            ]
+            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            attach_valid_audit(cycle)
+            revisit_contract.persist_cycle(
+                workspace,
+                cycle,
+                expected_sha256=revisit_contract.sha256_file(
+                    workspace / "revisit_cycles" / f"{cycle_id}.json"
+                ),
+            )
+            return workspace, alias, cycle_id
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _workspace, alias, cycle_id = make_alias_workspace(Path(temp_dir))
+            direct = evaluate_revisit_readiness(alias, cycle_id)
+            self.assertTrue(
+                direct.passed,
+                [issue.display() for issue in direct.failures],
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _workspace, alias, _cycle_id = make_alias_workspace(Path(temp_dir))
+            profile = evaluate_workspace(
+                alias,
+                ContractProfile(mode="ticker", target="revisit_report"),
+            )
+            self.assertTrue(
+                profile.passed,
+                [issue.display() for issue in profile.failures],
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _workspace, alias, cycle_id = make_alias_workspace(Path(temp_dir))
+            checked = check_revisit_readiness(
+                alias,
+                cycle_id,
+                timestamp="2026-07-17T12:00:00Z",
+            )
+            self.assertTrue(
+                checked.result.passed,
+                [issue.display() for issue in checked.result.failures],
+            )
+            self.assertEqual(RevisitCheckEffect.TRANSITIONED, checked.effect)
+
     # ------------------------------------------------------------------
     # Named-selection tests
     # ------------------------------------------------------------------

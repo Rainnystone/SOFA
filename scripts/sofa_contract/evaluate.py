@@ -1097,6 +1097,7 @@ def _check_dispatch_documents(
     delivered_payloads: tuple[tuple[str, bytes | None], ...],
     result: ContractResult,
     workspace: Path | None = None,
+    lexical_workspace: Path | None = None,
 ) -> tuple[dict, ...]:
     """Pure document owner: dispatch delivery semantics over preloaded facts.
 
@@ -1105,10 +1106,22 @@ def _check_dispatch_documents(
     delivery paths to their bytes (``None`` if the file is absent) and is used
     instead of filesystem existence checks.
 
-    ``workspace`` is used to normalize raw delivery paths. When omitted, only
-    already-relative POSIX paths are accepted.
+    ``workspace`` is the canonical root used to read the preloaded facts.
+    ``lexical_workspace`` preserves the caller's root for absolute delivery
+    paths; when omitted it is the same as ``workspace``. When ``workspace`` is
+    omitted, only already-relative POSIX paths are accepted.
     """
-    _normalize = _normalize_delivery_path if workspace is not None else _normalize_delivery_path_from_facts
+    _normalize = (
+        (
+            lambda delivery_path: _normalize_delivery_path(
+                lexical_workspace or workspace,
+                delivery_path,
+                resolved_workspace=workspace,
+            )
+        )
+        if workspace is not None
+        else _normalize_delivery_path_from_facts
+    )
     workflow_claims_delivery = _workflow_claims_subagent_delivery(workflow_text)
     if records is None:
         if not worker_output_paths and not workflow_claims_delivery:
@@ -1130,7 +1143,11 @@ def _check_dispatch_documents(
             evidence="no delivered host/native subagent record or approved degraded delivery record",
         )
     payload_by_path: dict[str, bytes | None] = dict(delivered_payloads)
-    for duplicate_path, dispatch_ids in _duplicate_delivered_paths(records, workspace=workspace).items():
+    for duplicate_path, dispatch_ids in _duplicate_delivered_paths(
+        records,
+        workspace=workspace,
+        lexical_workspace=lexical_workspace,
+    ).items():
         result.fail(
             code="DISPATCH_DELIVERY_PATH_DUPLICATE",
             message="delivered dispatch records must not reuse the same delivery_path",
@@ -1150,11 +1167,7 @@ def _check_dispatch_documents(
                     evidence=", ".join(missing_fields),
                 )
             else:
-                normalized_delivery_path = _normalize(
-                    record.get("delivery_path", "")
-                ) if workspace is None else _normalize(
-                    workspace, record.get("delivery_path", "")
-                )
+                normalized_delivery_path = _normalize(record.get("delivery_path", ""))
                 payload = payload_by_path.get(normalized_delivery_path) if normalized_delivery_path else None
                 if normalized_delivery_path is None or payload is None:
                     result.fail(
@@ -1200,11 +1213,7 @@ def _check_dispatch_documents(
         normalized_path
         for record in records
         if _dispatch_record_counts_as_delivery(record)
-        for normalized_path in [_normalize(
-            record.get("delivery_path", "")
-        ) if workspace is None else _normalize(
-            workspace, record.get("delivery_path", "")
-        )]
+        for normalized_path in [_normalize(record.get("delivery_path", ""))]
         if normalized_path is not None
     }
     for rel in worker_output_paths:
@@ -1222,19 +1231,26 @@ def _duplicate_delivered_paths(
     records: tuple[dict, ...],
     *,
     workspace: Path | None = None,
+    lexical_workspace: Path | None = None,
 ) -> dict[str, list[str]]:
-    _normalize = _normalize_delivery_path if workspace is not None else _normalize_delivery_path_from_facts
+    _normalize = (
+        (
+            lambda delivery_path: _normalize_delivery_path(
+                lexical_workspace or workspace,
+                delivery_path,
+                resolved_workspace=workspace,
+            )
+        )
+        if workspace is not None
+        else _normalize_delivery_path_from_facts
+    )
     dispatch_ids_by_path: dict[str, list[str]] = {}
     for record in records:
         if record.get("status") != "delivered":
             continue
         if not record.get("delivery_path"):
             continue
-        normalized_path = (
-            _normalize(record.get("delivery_path", ""))
-            if workspace is None
-            else _normalize(workspace, record.get("delivery_path", ""))
-        )
+        normalized_path = _normalize(record.get("delivery_path", ""))
         if normalized_path is None:
             continue
         dispatch_ids_by_path.setdefault(normalized_path, []).append(str(record.get("dispatch_id", "")))
@@ -1267,7 +1283,12 @@ def _dispatch_missing_evidence_from_facts(
     return "; ".join(evidence)
 
 
-def _normalize_delivery_path(workspace: Path, delivery_path) -> str | None:
+def _normalize_delivery_path(
+    workspace: Path,
+    delivery_path,
+    *,
+    resolved_workspace: Path | None = None,
+) -> str | None:
     """Normalize a dispatch delivery_path to a workspace-relative posix string.
 
     Guides pass workers the same absolute ``{WORKSPACE}/...`` path they write
@@ -1290,9 +1311,9 @@ def _normalize_delivery_path(workspace: Path, delivery_path) -> str | None:
             )
         lexical_relative = lexical_candidate.relative_to(lexical_workspace)
 
-        resolved_workspace = lexical_workspace.resolve()
-        resolved_candidate = lexical_candidate.resolve()
-        resolved_candidate.relative_to(resolved_workspace)
+        canonical_workspace = (resolved_workspace or lexical_workspace).resolve()
+        resolved_candidate = (canonical_workspace / lexical_relative).resolve()
+        resolved_candidate.relative_to(canonical_workspace)
         return lexical_relative.as_posix()
     except (TypeError, ValueError, OSError):
         return None
