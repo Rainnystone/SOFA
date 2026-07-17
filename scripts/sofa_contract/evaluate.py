@@ -5,6 +5,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal
 
 from workspace_contract import core_required_files, managed_block_for_name
 from capability_policy import RESULT_STATUS_COMPLETED, RESULT_STATUS_DEGRADED
@@ -93,14 +94,14 @@ except ImportError:
 
 try:
     from frontier_lifecycle import (
+        KNOWN_STAGES,
         LOOP_HEADER_RE,
-        derive_loop_counts,
         validate_registry,
     )
 except ImportError:
     from scripts.frontier_lifecycle import (
+        KNOWN_STAGES,
         LOOP_HEADER_RE,
-        derive_loop_counts,
         validate_registry,
     )
 
@@ -537,6 +538,173 @@ def _check_state_workflow_consistency(
     _check_state_workflow_documents(state, workflow_text, result)
 
 
+@dataclass(frozen=True)
+class _RevisitStateFacts:
+    mode: Literal["ticker", "sector"]
+    loop_count: int
+    stages_completed: frozenset[str]
+    current_stage: str | None
+
+
+@dataclass(frozen=True)
+class _RevisitWorkflowFacts:
+    text: str
+    stage_statuses: tuple[tuple[str, str], ...]
+
+    def status_for(self, stage: str) -> str | None:
+        return dict(self.stage_statuses).get(stage)
+
+
+@dataclass(frozen=True)
+class _RevisitLedgerFacts:
+    headers: tuple[tuple[int, str], ...]
+
+
+_WORKFLOW_STATUSES = frozenset({"pending", "in_progress", "complete"})
+_WORKFLOW_STAGE_CELL_RE = re.compile(
+    r"^Stage (?P<number>[0-9]+): (?P<label>.+)$"
+)
+
+
+def _parse_revisit_state_facts(value: Any) -> _RevisitStateFacts:
+    if not isinstance(value, dict):
+        raise ValueError("state.json JSON authority must be an object")
+    mode = value.get("mode")
+    if mode not in {"ticker", "sector"}:
+        raise ValueError("state.json mode must be ticker or sector")
+
+    loop_count = value.get("loop_count", 0)
+    if (
+        not isinstance(loop_count, int)
+        or isinstance(loop_count, bool)
+        or loop_count < 0
+    ):
+        raise ValueError(
+            "state.json loop_count must be a non-negative integer"
+        )
+
+    completed_value = value.get("stages_completed", [])
+    if not isinstance(completed_value, list):
+        raise ValueError("state.json stages_completed must be a list")
+    completed: list[str] = []
+    for stage in completed_value:
+        if not isinstance(stage, str) or stage not in KNOWN_STAGES:
+            raise ValueError(
+                "state.json stages_completed contains an invalid stage"
+            )
+        if stage in completed:
+            raise ValueError(
+                "state.json stages_completed contains a duplicate stage"
+            )
+        completed.append(stage)
+
+    current_stage = value.get("current_stage")
+    if current_stage is not None and (
+        not isinstance(current_stage, str)
+        or current_stage not in KNOWN_STAGES
+    ):
+        raise ValueError("state.json current_stage is invalid")
+
+    return _RevisitStateFacts(
+        mode=mode,
+        loop_count=loop_count,
+        stages_completed=frozenset(completed),
+        current_stage=current_stage,
+    )
+
+
+def _parse_revisit_workflow_facts(text: str) -> _RevisitWorkflowFacts:
+    statuses: dict[str, str] = {}
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not cells or cells[0] == "Stage":
+            continue
+        if not cells[0].startswith("Stage "):
+            continue
+        if len(cells) < 2:
+            raise ValueError(
+                f"workflow stage row {line_number} has no status"
+            )
+        match = _WORKFLOW_STAGE_CELL_RE.fullmatch(cells[0])
+        if match is None:
+            raise ValueError(
+                f"workflow stage row {line_number} has an invalid identifier"
+            )
+        stage = f"stage_{int(match.group('number'))}"
+        if stage not in KNOWN_STAGES:
+            raise ValueError(
+                f"workflow stage row {line_number} has an unknown identifier"
+            )
+        status = cells[1].lower()
+        if status not in _WORKFLOW_STATUSES:
+            raise ValueError(
+                f"workflow stage row {line_number} has invalid status {status!r}"
+            )
+        if stage in statuses:
+            raise ValueError(f"workflow contains duplicate row for {stage}")
+        statuses[stage] = status
+    return _RevisitWorkflowFacts(
+        text=text,
+        stage_statuses=tuple(sorted(statuses.items())),
+    )
+
+
+def _parse_revisit_ledger_facts(text: str) -> _RevisitLedgerFacts:
+    headers: list[tuple[int, str]] = []
+    seen_loop_numbers: set[int] = set()
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.rstrip()
+        if not line.startswith("## Loop"):
+            continue
+        match = LOOP_HEADER_RE.fullmatch(line)
+        if match is None:
+            raise ValueError(f"malformed loop header at line {line_number}: {line}")
+        loop_number = int(match.group("loop"))
+        if loop_number in seen_loop_numbers:
+            raise ValueError(
+                f"duplicate loop number at line {line_number}: {loop_number}"
+            )
+        seen_loop_numbers.add(loop_number)
+        headers.append((loop_number, match.group("frontier_id")))
+    return _RevisitLedgerFacts(headers=tuple(headers))
+
+
+def _check_state_workflow_facts(
+    state: _RevisitStateFacts,
+    workflow: _RevisitWorkflowFacts,
+    result: ContractResult,
+) -> None:
+    for stage in sorted(state.stages_completed):
+        status = workflow.status_for(stage)
+        if status != "complete":
+            rendered = status if status is not None else "missing"
+            result.fail(
+                code="STATE_WORKFLOW_STAGE_CONFLICT",
+                message=(
+                    f"{stage} is completed in state.json but {rendered} "
+                    "in research_workflow.md"
+                ),
+                path="research_workflow.md",
+                evidence=f"state.json stages_completed includes {stage}",
+            )
+    if (
+        state.current_stage == "stage_6"
+        and workflow.status_for("stage_5") != "complete"
+    ):
+        result.fail(
+            code="STATE_WORKFLOW_STAGE_CONFLICT",
+            message=(
+                "state.json current_stage is stage_6 but workflow Stage 5 "
+                "is not complete"
+            ),
+            path="research_workflow.md",
+            evidence="current_stage=stage_6",
+        )
+
+
 def _check_state_workflow_documents(
     state: dict | None,
     workflow_text: str | None,
@@ -557,15 +725,24 @@ def _check_state_workflow_documents(
         if status in {"pending", "in_progress"}:
             result.fail(
                 code="STATE_WORKFLOW_STAGE_CONFLICT",
-                message=f"{stage} is completed in state.json but {status} in research_workflow.md",
+                message=(
+                    f"{stage} is completed in state.json but {status} "
+                    "in research_workflow.md"
+                ),
                 path="research_workflow.md",
                 evidence=f"state.json stages_completed includes {stage}",
             )
     current_stage = state.get("current_stage")
-    if current_stage == "stage_6" and statuses.get("stage_5") in {"pending", "in_progress"}:
+    if (
+        current_stage == "stage_6"
+        and statuses.get("stage_5") in {"pending", "in_progress"}
+    ):
         result.fail(
             code="STATE_WORKFLOW_STAGE_CONFLICT",
-            message="state.json current_stage is stage_6 but workflow Stage 5 is not complete",
+            message=(
+                "state.json current_stage is stage_6 but workflow Stage 5 "
+                "is not complete"
+            ),
             path="research_workflow.md",
             evidence="current_stage=stage_6",
         )
@@ -685,7 +862,7 @@ def _prepare_revisit_frontier_facts(
     *,
     cycle: dict,
     registry: dict | None,
-    ledger_text: str | None,
+    ledger_facts: _RevisitLedgerFacts | None,
     dispatch_records: tuple[dict, ...] | None,
     covered_search_loops: frozenset[str] | None,
 ) -> _RevisitFrontierFacts:
@@ -726,36 +903,32 @@ def _prepare_revisit_frontier_facts(
             registry_issue_by_path[path] = legality_issue
 
     preparation_issue = None
-    progress_available = ledger_text is not None
+    progress_available = ledger_facts is not None
     live_loop_counts: dict[str, int] = {}
-    headers: list[tuple[int, str]] = []
-    if ledger_text is not None:
-        try:
-            live_loop_counts = derive_loop_counts(ledger_text, registry)
-        except ValueError as exc:
+    headers = list(ledger_facts.headers) if ledger_facts is not None else []
+    if ledger_facts is not None:
+        known_frontier_ids = frozenset(frontiers)
+        unknown_frontier_ids = tuple(
+            sorted(
+                {
+                    frontier_id
+                    for _loop_number, frontier_id in headers
+                    if frontier_id not in known_frontier_ids
+                }
+            )
+        )
+        if unknown_frontier_ids:
             preparation_issue = RevisitIssue(
                 "REVISIT_FRONTIER_BINDING_INVALID",
                 "evidence_ledger.md",
-                str(exc),
+                "ledger loop header references an unknown frontier",
+                ", ".join(unknown_frontier_ids),
             )
             progress_available = False
-        if progress_available:
-            for raw_line in ledger_text.splitlines():
-                line = raw_line.rstrip()
-                if not line.startswith("## Loop "):
-                    continue
-                match = LOOP_HEADER_RE.fullmatch(line)
-                if match is None:
-                    preparation_issue = RevisitIssue(
-                        "REVISIT_FRONTIER_BINDING_INVALID",
-                        "evidence_ledger.md",
-                        f"malformed loop header: {line}",
-                    )
-                    progress_available = False
-                    headers.clear()
-                    break
-                headers.append(
-                    (int(match.group("loop")), match.group("frontier_id"))
+        else:
+            for _loop_number, frontier_id in headers:
+                live_loop_counts[frontier_id] = (
+                    live_loop_counts.get(frontier_id, 0) + 1
                 )
 
     boundary = cycle["intake"]["workspace_boundary"][
@@ -1058,10 +1231,20 @@ def _derive_revisit_frontier_floor_issues_from_facts(
     covered_search_loops: frozenset[str],
 ) -> tuple[RevisitIssue, ...]:
     """Compatibility adapter preserving the existing composite issue order."""
+    try:
+        ledger_facts = _parse_revisit_ledger_facts(ledger_text)
+    except ValueError as exc:
+        return (
+            RevisitIssue(
+                "REVISIT_FRONTIER_BINDING_INVALID",
+                "evidence_ledger.md",
+                str(exc),
+            ),
+        )
     facts = _prepare_revisit_frontier_facts(
         cycle=cycle,
         registry=registry,
-        ledger_text=ledger_text,
+        ledger_facts=ledger_facts,
         dispatch_records=dispatch_records,
         covered_search_loops=covered_search_loops,
     )
@@ -1596,15 +1779,6 @@ def _delivered_roles_by_path_from_facts(
             continue
         roles_by_path[normalized_path] = role.slug
     return roles_by_path
-
-
-def _dispatch_missing_evidence(worker_outputs: list[Path], workflow_claims_delivery: bool) -> str:
-    evidence = []
-    if worker_outputs:
-        evidence.append(f"{len(worker_outputs)} worker output file(s)")
-    if workflow_claims_delivery:
-        evidence.append("research_workflow.md Subagent Dispatch Log delivered row")
-    return "; ".join(evidence)
 
 
 def _workflow_claims_subagent_delivery(workflow_text: str | None) -> bool:

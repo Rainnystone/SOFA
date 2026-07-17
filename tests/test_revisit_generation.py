@@ -1,10 +1,13 @@
+import errno
 import hashlib
 import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from scripts.revisit_contract import generation as generation_mod
 from scripts.revisit_contract.generation import (
     AbsentGeneration,
     AuthorityDriftError,
@@ -56,7 +59,229 @@ class _WorkspaceMixin:
         self.workspace.mkdir(parents=True, exist_ok=True)
 
 
+class TestUnexpectedIoBoundary(_WorkspaceMixin, unittest.TestCase):
+    def test_initial_lstat_eio_propagates_unchanged(self) -> None:
+        (self.workspace / "authority.txt").write_bytes(b"authority\n")
+        session = ObservedReadSession(self.workspace)
+
+        with mock.patch.object(
+            generation_mod.os,
+            "lstat",
+            side_effect=OSError(errno.EIO, "lstat fault"),
+        ):
+            with self.assertRaises(OSError) as raised:
+                session.read_optional("authority.txt")
+
+        self.assertEqual(errno.EIO, raised.exception.errno)
+
+    def test_initial_resolve_eio_propagates_unchanged(self) -> None:
+        (self.workspace / "authority.txt").write_bytes(b"authority\n")
+        session = ObservedReadSession(self.workspace)
+
+        with mock.patch.object(
+            Path,
+            "resolve",
+            side_effect=OSError(errno.EIO, "resolve fault"),
+        ):
+            with self.assertRaises(OSError) as raised:
+                session.read_optional("authority.txt")
+
+        self.assertEqual(errno.EIO, raised.exception.errno)
+
+    def test_initial_payload_and_directory_eio_propagate_unchanged(self) -> None:
+        (self.workspace / "authority.txt").write_bytes(b"authority\n")
+        (self.workspace / "authorities").mkdir()
+        for operation, patch_target, relative_path, kwargs in (
+            ("read", "read_bytes", "authority.txt", {}),
+            ("list", "iterdir", "authorities", {"recursive": False}),
+        ):
+            with self.subTest(operation=operation):
+                session = ObservedReadSession(self.workspace)
+                with mock.patch.object(
+                    Path,
+                    patch_target,
+                    side_effect=OSError(errno.EIO, f"{operation} fault"),
+                ):
+                    with self.assertRaises(OSError) as raised:
+                        if operation == "read":
+                            session.read_optional(relative_path)
+                        else:
+                            session.list_directory(relative_path, **kwargs)
+                self.assertEqual(errno.EIO, raised.exception.errno)
+
+    def test_closure_recheck_payload_and_directory_eio_propagate_unchanged(self) -> None:
+        (self.workspace / "authority.txt").write_bytes(b"authority\n")
+        (self.workspace / "authorities").mkdir()
+        for operation, patch_target, relative_path, kwargs in (
+            ("read", "read_bytes", "authority.txt", {}),
+            ("list", "iterdir", "authorities", {"recursive": False}),
+        ):
+            with self.subTest(operation=operation):
+                session = ObservedReadSession(self.workspace)
+                if operation == "read":
+                    session.read_optional(relative_path)
+                else:
+                    session.list_directory(relative_path, **kwargs)
+                closure = session.freeze()
+
+                with mock.patch.object(
+                    Path,
+                    patch_target,
+                    side_effect=OSError(errno.EIO, f"{operation} recheck fault"),
+                ):
+                    with self.assertRaises(OSError) as raised:
+                        closure.require_unchanged()
+                self.assertEqual(errno.EIO, raised.exception.errno)
+
+    def test_expected_access_denial_remains_stable_present_invalid(self) -> None:
+        (self.workspace / "authority.txt").write_bytes(b"authority\n")
+        session = ObservedReadSession(self.workspace)
+        denied = PermissionError(errno.EACCES, "access denied")
+
+        with mock.patch.object(Path, "read_bytes", side_effect=denied):
+            with self.assertRaises(RevisitContractError):
+                session.read_optional("authority.txt")
+            session.freeze().require_unchanged()
+
+
 class TestObservedFileGeneration(_WorkspaceMixin, unittest.TestCase):
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
+    def test_absence_to_broken_or_outside_symlink_is_exact_drift(self) -> None:
+        outside = Path(self._tempdir) / "outside.txt"
+        outside.write_bytes(b"outside\n")
+        cases = (
+            ("broken", self.workspace / "never-created.txt"),
+            ("outside", outside),
+        )
+        for label, target in cases:
+            with self.subTest(case=label):
+                lexical = self.workspace / f"{label}.txt"
+                session = ObservedReadSession(self.workspace)
+                self.assertIsNone(session.read_optional(lexical.name))
+                lexical.symlink_to(target)
+
+                with self.assertRaises(AuthorityDriftError) as drift:
+                    session.freeze().require_unchanged()
+                self.assertEqual(lexical.name, drift.exception.drift.relative_path)
+
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
+    def test_file_to_broken_or_outside_symlink_is_exact_drift(self) -> None:
+        outside = Path(self._tempdir) / "outside.txt"
+        outside.write_bytes(b"same\n")
+        cases = (
+            ("broken", self.workspace / "never-created.txt"),
+            ("outside", outside),
+        )
+        for label, target in cases:
+            with self.subTest(case=label):
+                lexical = self.workspace / f"{label}.txt"
+                lexical.write_bytes(b"same\n")
+                session = ObservedReadSession(self.workspace)
+                self.assertEqual(b"same\n", session.read_required(lexical.name))
+                lexical.unlink()
+                lexical.symlink_to(target)
+
+                with self.assertRaises(AuthorityDriftError) as drift:
+                    session.freeze().require_unchanged()
+                self.assertEqual(lexical.name, drift.exception.drift.relative_path)
+
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
+    def test_stable_broken_or_outside_symlink_is_present_invalid(self) -> None:
+        outside = Path(self._tempdir) / "outside.txt"
+        outside.write_bytes(b"outside\n")
+        cases = (
+            ("broken", self.workspace / "never-created.txt"),
+            ("outside", outside),
+        )
+        for label, target in cases:
+            with self.subTest(case=label):
+                lexical = self.workspace / f"stable-{label}.txt"
+                lexical.symlink_to(target)
+                session = ObservedReadSession(self.workspace)
+
+                with self.assertRaises(RevisitContractError):
+                    session.read_optional(lexical.name)
+
+                generations = session.freeze().generations
+                self.assertEqual(1, len(generations))
+                self.assertNotIsInstance(generations[0], AbsentGeneration)
+                GenerationClosure(
+                    workspace=self.workspace.resolve(),
+                    generations=generations,
+                ).require_unchanged()
+
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
+    def test_missing_child_below_outside_parent_symlink_is_not_absent(self) -> None:
+        outside = Path(self._tempdir) / "outside-directory"
+        outside.mkdir()
+        parent = self.workspace / "escaped-parent"
+        parent.symlink_to(outside, target_is_directory=True)
+        session = ObservedReadSession(self.workspace)
+
+        with self.assertRaises(RevisitContractError):
+            session.read_optional("escaped-parent/missing.txt")
+
+        generations = session.freeze().generations
+        self.assertEqual(1, len(generations))
+        self.assertNotIsInstance(generations[0], AbsentGeneration)
+        GenerationClosure(
+            workspace=self.workspace.resolve(),
+            generations=generations,
+        ).require_unchanged()
+
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
+    def test_missing_child_binds_inside_parent_symlink_target(self) -> None:
+        first_parent = self.workspace / "first-parent"
+        second_parent = self.workspace / "second-parent"
+        first_parent.mkdir()
+        second_parent.mkdir()
+        lexical_parent = self.workspace / "linked-parent"
+        lexical_parent.symlink_to(first_parent, target_is_directory=True)
+        session = ObservedReadSession(self.workspace)
+
+        self.assertIsNone(
+            session.read_optional("linked-parent/missing.txt")
+        )
+        lexical_parent.unlink()
+        lexical_parent.symlink_to(second_parent, target_is_directory=True)
+        self.assertIsNone(
+            session.read_optional("linked-parent/missing.txt")
+        )
+
+        with self.assertRaises(AuthorityDriftError) as drift:
+            session.freeze().require_unchanged()
+        self.assertEqual(
+            "linked-parent/missing.txt",
+            drift.exception.drift.relative_path,
+        )
+
+    def test_stable_directory_is_present_invalid_for_file_access(self) -> None:
+        directory = self.workspace / "not-a-file"
+        directory.mkdir()
+        session = ObservedReadSession(self.workspace)
+
+        with self.assertRaises(RevisitContractError):
+            session.read_optional("not-a-file")
+
+        session.freeze().require_unchanged()
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
+    def test_fifo_is_classified_without_opening_it(self) -> None:
+        fifo = self.workspace / "input.fifo"
+        os.mkfifo(fifo)
+        session = ObservedReadSession(self.workspace)
+
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            side_effect=AssertionError("FIFO must never be opened"),
+        ) as read_bytes:
+            with self.assertRaises(RevisitContractError):
+                session.read_optional("input.fifo")
+
+        read_bytes.assert_not_called()
+        session.freeze().require_unchanged()
+
     def test_repeated_read_returns_first_payload_and_closure_detects_drift(self) -> None:
         target = self.workspace / "a.txt"
         target.write_bytes(b"first\n")
@@ -283,6 +508,54 @@ class TestObservedDirectoryGeneration(_WorkspaceMixin, unittest.TestCase):
         with self.assertRaises(AuthorityDriftError):
             session2.freeze().require_unchanged()
 
+    def test_stable_file_is_present_invalid_for_optional_directory_access(
+        self,
+    ) -> None:
+        (self.workspace / "not-a-directory").write_bytes(b"file\n")
+        session = ObservedReadSession(self.workspace)
+
+        with self.assertRaises(RevisitContractError):
+            session.list_directory(
+                "not-a-directory",
+                recursive=False,
+                optional=True,
+            )
+
+        session.freeze().require_unchanged()
+
+    def test_cross_operation_access_reuses_first_lexical_node_state(self) -> None:
+        directory = self._make_dir("cross-directory")
+        directory_session = ObservedReadSession(self.workspace)
+        with self.assertRaises(RevisitContractError):
+            directory_session.read_optional("cross-directory")
+        directory.rmdir()
+        directory.write_bytes(b"replacement\n")
+        with self.assertRaises(AuthorityDriftError) as directory_drift:
+            directory_session.list_directory(
+                "cross-directory",
+                recursive=False,
+                optional=True,
+            )
+        self.assertEqual(
+            "cross-directory",
+            directory_drift.exception.drift.relative_path,
+        )
+
+        lexical_file = self.workspace / "cross-file"
+        lexical_file.write_bytes(b"file\n")
+        file_session = ObservedReadSession(self.workspace)
+        with self.assertRaises(RevisitContractError):
+            file_session.list_directory(
+                "cross-file",
+                recursive=False,
+                optional=True,
+            )
+        lexical_file.unlink()
+        lexical_file.mkdir()
+        with self.assertRaises(AuthorityDriftError) as file_drift:
+            file_session.read_optional("cross-file")
+        self.assertEqual("cross-file", file_drift.exception.drift.relative_path)
+
     def test_member_add_drifts(self) -> None:
         d = self._make_dir()
         (d / "a.txt").write_bytes(b"a\n")
@@ -291,7 +564,7 @@ class TestObservedDirectoryGeneration(_WorkspaceMixin, unittest.TestCase):
         (d / "b.txt").write_bytes(b"b\n")
         with self.assertRaises(AuthorityDriftError) as ctx:
             session.freeze().require_unchanged()
-        self.assertEqual(ctx.exception.drift.relative_path, "d")
+        self.assertEqual(ctx.exception.drift.relative_path, "d/b.txt")
 
     def test_member_remove_drifts(self) -> None:
         d = self._make_dir()
@@ -388,6 +661,38 @@ class TestObservedDirectoryGeneration(_WorkspaceMixin, unittest.TestCase):
         with self.assertRaises(AuthorityDriftError):
             session.freeze().require_unchanged()
 
+    def test_recursive_child_disappearance_reports_exact_child_path(self) -> None:
+        nested = self._make_dir() / "sub"
+        nested.mkdir()
+        child = nested / "deep.txt"
+        child.write_bytes(b"deep\n")
+        session = ObservedReadSession(self.workspace)
+        session.list_directory("d", recursive=True)
+        child.unlink()
+
+        with self.assertRaises(AuthorityDriftError) as drift:
+            session.freeze().require_unchanged()
+        self.assertEqual("d/sub/deep.txt", drift.exception.drift.relative_path)
+
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
+    def test_recursive_directory_member_escape_reports_exact_child_path(
+        self,
+    ) -> None:
+        root = self._make_dir()
+        nested = root / "sub"
+        nested.mkdir()
+        (nested / "deep.txt").write_bytes(b"deep\n")
+        outside = Path(self._tempdir) / "outside"
+        outside.mkdir()
+        session = ObservedReadSession(self.workspace)
+        session.list_directory("d", recursive=True)
+        shutil.rmtree(nested)
+        nested.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(AuthorityDriftError) as drift:
+            session.freeze().require_unchanged()
+        self.assertEqual("d/sub", drift.exception.drift.relative_path)
+
     def test_member_order_is_deterministic_by_relative_posix_path(self) -> None:
         d = self._make_dir()
         for name in ("zeta.txt", "alpha.txt", "mid.txt"):
@@ -413,25 +718,89 @@ class TestObservedDirectoryGeneration(_WorkspaceMixin, unittest.TestCase):
         self.assertEqual(len(gen), 1)
         self.assertIsInstance(gen[0], DirectoryGeneration)
 
-    def test_listing_caches_first_observation_per_recursive_key(self) -> None:
+    def test_nonrecursive_then_recursive_reuses_direct_membership(self) -> None:
         d = self._make_dir()
         (d / "a.txt").write_bytes(b"a\n")
         session = ObservedReadSession(self.workspace)
         first = session.list_directory("d", recursive=False)
         (d / "b.txt").write_bytes(b"b\n")
         second = session.list_directory("d", recursive=False)
-        # First observation wins: same entries, no b.txt.
         self.assertEqual(first, second)
         self.assertEqual(
             {e.relative_path for e in second}, {"d/a.txt"}
         )
-        # A recursive observation is a SEPARATE key and reflects nothing new
-        # because b.txt was added after the non-recursive capture but the
-        # recursive capture happens now (first recursive observation).
         recursive_entries = session.list_directory("d", recursive=True)
-        self.assertIn("d/b.txt", {e.relative_path for e in recursive_entries})
+        self.assertNotIn(
+            "d/b.txt",
+            {e.relative_path for e in recursive_entries},
+        )
+        with self.assertRaises(AuthorityDriftError) as drift:
+            session.freeze().require_unchanged()
+        self.assertEqual("d/b.txt", drift.exception.drift.relative_path)
 
-    def test_directory_generation_is_cached_in_closure(self) -> None:
+    def test_direct_membership_is_physically_observed_once(self) -> None:
+        root = self._make_dir()
+        nested = root / "sub"
+        nested.mkdir()
+        (nested / "deep.txt").write_bytes(b"deep\n")
+        observed: list[str] = []
+        real_iterdir = Path.iterdir
+
+        def counting_iterdir(path: Path):
+            try:
+                relative = path.resolve().relative_to(self.workspace.resolve())
+            except ValueError:
+                relative = path
+            observed.append(relative.as_posix())
+            return real_iterdir(path)
+
+        session = ObservedReadSession(self.workspace)
+        with mock.patch.object(Path, "iterdir", counting_iterdir):
+            session.list_directory("d", recursive=False)
+            recursive_entries = session.list_directory("d", recursive=True)
+
+        self.assertIn(
+            "d/sub/deep.txt",
+            {entry.relative_path for entry in recursive_entries},
+        )
+        self.assertEqual(1, observed.count("d"))
+        self.assertEqual(1, observed.count("d/sub"))
+
+    def test_parent_membership_injects_child_first_observation_once(self) -> None:
+        root = self._make_dir()
+        (root / "child.txt").write_bytes(b"child\n")
+        inspected: list[str] = []
+        real_inspect = generation_mod._inspect_node
+
+        def counting_inspect(workspace: Path, relative: str):
+            inspected.append(relative)
+            return real_inspect(workspace, relative)
+
+        session = ObservedReadSession(self.workspace)
+        with mock.patch.object(
+            generation_mod,
+            "_inspect_node",
+            counting_inspect,
+        ):
+            entries = session.list_directory("d", recursive=False)
+
+        self.assertEqual(["d/child.txt"], [entry.relative_path for entry in entries])
+        self.assertEqual(1, inspected.count("d/child.txt"))
+
+    def test_parent_scan_rejects_changed_explicit_child_observation(self) -> None:
+        root = self._make_dir()
+        child = root / "child"
+        child.write_bytes(b"first\n")
+        session = ObservedReadSession(self.workspace)
+        self.assertEqual(b"first\n", session.read_required("d/child"))
+        child.unlink()
+        child.mkdir()
+
+        with self.assertRaises(AuthorityDriftError) as drift:
+            session.list_directory("d", recursive=False)
+        self.assertEqual("d/child", drift.exception.drift.relative_path)
+
+    def test_direct_directory_generation_is_cached_in_closure(self) -> None:
         d = self._make_dir()
         (d / "a.txt").write_bytes(b"a\n")
         session = ObservedReadSession(self.workspace)
@@ -440,7 +809,39 @@ class TestObservedDirectoryGeneration(_WorkspaceMixin, unittest.TestCase):
         self.assertEqual(len(gen), 1)
         assert isinstance(gen[0], DirectoryGeneration)
         self.assertEqual(gen[0].relative_path, "d")
-        self.assertFalse(gen[0].recursive)
+
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
+    def test_directory_to_broken_or_outside_symlink_is_exact_drift(self) -> None:
+        outside = Path(self._tempdir) / "outside"
+        outside.mkdir()
+        cases = (
+            ("broken", self.workspace / "never-created"),
+            ("outside", outside),
+        )
+        for label, target in cases:
+            with self.subTest(case=label):
+                directory = self._make_dir(label)
+                session = ObservedReadSession(self.workspace)
+                session.list_directory(label, recursive=False)
+                directory.rmdir()
+                directory.symlink_to(target, target_is_directory=True)
+
+                with self.assertRaises(AuthorityDriftError) as drift:
+                    session.freeze().require_unchanged()
+                self.assertEqual(label, drift.exception.drift.relative_path)
+
+    def test_directory_disappearance_is_exact_drift(self) -> None:
+        directory = self._make_dir("disappearing")
+        session = ObservedReadSession(self.workspace)
+        session.list_directory("disappearing", recursive=False)
+        directory.rmdir()
+
+        with self.assertRaises(AuthorityDriftError) as drift:
+            session.freeze().require_unchanged()
+        self.assertEqual(
+            "disappearing",
+            drift.exception.drift.relative_path,
+        )
 
     def test_freeze_closes_session(self) -> None:
         d = self._make_dir()
@@ -448,15 +849,21 @@ class TestObservedDirectoryGeneration(_WorkspaceMixin, unittest.TestCase):
         session = ObservedReadSession(self.workspace)
         session.read_required("d/a.txt")
         closure = session.freeze()
-        # After freeze, further observations raise a clear error.
-        with self.assertRaises(RevisitContractError):
-            session.read_required("d/a.txt")
-        with self.assertRaises(RevisitContractError):
-            session.read_optional("d/a.txt")
-        with self.assertRaises(RevisitContractError):
-            session.list_directory("d", recursive=False)
-        with self.assertRaises(RevisitContractError):
-            session.freeze()
+        # A post-freeze observation is a programming error, not an invalid
+        # workspace-input error that a readiness owner may translate.
+        operations = (
+            lambda: session.read_required("d/a.txt"),
+            lambda: session.read_optional("d/a.txt"),
+            lambda: session.list_directory("d", recursive=False),
+            session.freeze,
+        )
+        for operation in operations:
+            with self.assertRaises(RuntimeError) as raised:
+                operation()
+            self.assertNotIsInstance(
+                raised.exception,
+                RevisitContractError,
+            )
         # The closure itself is immutable: generations is a tuple.
         self.assertIsInstance(closure.generations, tuple)
 

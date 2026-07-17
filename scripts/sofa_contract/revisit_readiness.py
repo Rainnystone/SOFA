@@ -28,10 +28,7 @@ from workspace_contract import all_worker_output_directories, is_main_thread_art
 
 from .result import ContractProfile, ContractResult
 
-from .workspace import (
-    iter_jsonl_records,
-    parse_stage_progress,
-)
+from .workspace import iter_jsonl_records
 
 try:
     from framing_contract import FramingContractError, evaluate_contract
@@ -41,17 +38,25 @@ except ImportError:
     from scripts.framing_contract.model import normalize_contract
 
 try:
-    from frontier_lifecycle import LifecycleError, validate_registry
+    from frontier_lifecycle import (
+        CURRENT_REGISTRY_VERSION,
+        LifecycleError,
+        validate_registry,
+    )
 except ImportError:
-    from scripts.frontier_lifecycle import LifecycleError, validate_registry
+    from scripts.frontier_lifecycle import (
+        CURRENT_REGISTRY_VERSION,
+        LifecycleError,
+        validate_registry,
+    )
 
 try:
     from revisit_contract import (
+        CYCLE_ID_RE,
         RevisitContractError,
         derive_claim_issues,
         derive_freshness_issues,
         evaluate_history,
-        list_cycle_ids,
         mark_ready_for_report,
         persist_cycle,
         sha256_bytes,
@@ -61,11 +66,11 @@ try:
     from revisit_contract.store import RevisitPersistenceRollbackError
 except ImportError:
     from scripts.revisit_contract import (
+        CYCLE_ID_RE,
         RevisitContractError,
         derive_claim_issues,
         derive_freshness_issues,
         evaluate_history,
-        list_cycle_ids,
         mark_ready_for_report,
         persist_cycle,
         sha256_bytes,
@@ -92,16 +97,27 @@ except ImportError:
     )
 
 try:
-    from source_cache import SOURCE_INDEX_FILENAME
+    from source_cache import (
+        SOURCE_INDEX_FILENAME,
+        SourceCacheEvaluation,
+        SourceIssue,
+    )
     from source_cache.store import evaluate_index_documents, plan_index_document
 except ImportError:
-    from scripts.source_cache import SOURCE_INDEX_FILENAME
+    from scripts.source_cache import (
+        SOURCE_INDEX_FILENAME,
+        SourceCacheEvaluation,
+        SourceIssue,
+    )
     from scripts.source_cache.store import evaluate_index_documents, plan_index_document
 
 from .evaluate import (  # noqa: E402
     TICKER_REPORT_REQUIREMENTS,
+    _RevisitLedgerFacts,
+    _RevisitStateFacts,
+    _RevisitWorkflowFacts,
     _check_dispatch_documents,
-    _check_state_workflow_documents,
+    _check_state_workflow_facts,
     _check_worker_output_documents,
     _derive_revisit_dispatch_floor_issues_from_facts,
     _derive_revisit_frontier_progress_issues_from_facts,
@@ -115,6 +131,9 @@ from .evaluate import (  # noqa: E402
     _normalize_delivery_path,
     _normalize_delivery_path_from_facts,
     _prepare_revisit_frontier_facts,
+    _parse_revisit_ledger_facts,
+    _parse_revisit_state_facts,
+    _parse_revisit_workflow_facts,
     _search_facts_from_records,
 )
 
@@ -156,6 +175,48 @@ class _ReadinessRequirement:
     invariant: bool = False
 
 
+_SelectedCycleStatus = Literal[
+    "active",
+    "ready_for_report",
+    "completed",
+]
+
+
+@dataclass(frozen=True)
+class _SelectedCycle:
+    cycle_id: str
+    cycle: dict[str, Any]
+    cycle_sha256: str
+    status: _SelectedCycleStatus
+
+    def __post_init__(self) -> None:
+        if self.cycle.get("cycle_id") != self.cycle_id:
+            raise ReadinessPlanError(
+                "selected cycle ID disagrees with the selected document"
+            )
+        if self.cycle.get("status") != self.status:
+            raise ReadinessPlanError(
+                "selected cycle status disagrees with the selected document"
+            )
+        if self.status not in {
+            "active",
+            "ready_for_report",
+            "completed",
+        }:
+            raise ReadinessPlanError(
+                "selected cycle has an ineligible status"
+            )
+        if re.fullmatch(r"[0-9a-f]{64}", self.cycle_sha256) is None:
+            raise ReadinessPlanError(
+                "selected cycle digest must be a lowercase SHA-256"
+            )
+
+
+@dataclass(frozen=True)
+class _RevisitRegistryFacts:
+    document: dict[str, Any]
+
+
 @dataclass
 class _ReadinessContext:
     session: ObservedReadSession
@@ -164,30 +225,28 @@ class _ReadinessContext:
     lexical_workspace: Path
     workspace: Path
     state_payload: bytes | None = None
-    state: dict | None = None
+    state_facts: _RevisitStateFacts | None = None
     state_error: Exception | None = None
     workflow_payload: bytes | None = None
-    workflow_text: str | None = None
-    workflow_error: UnicodeDecodeError | None = None
+    workflow_facts: _RevisitWorkflowFacts | None = None
+    workflow_error: Exception | None = None
     pointer: dict | None = None
     pointer_error: RevisitContractError | None = None
     history: Any = None
     history_load_issues: list[tuple[str, str, str, str]] = field(
         default_factory=list
     )
-    selected_cycle_id: str | None = None
-    cycle: dict | None = None
-    cycle_sha256: str | None = None
+    selected_cycle: _SelectedCycle | None = None
     payload_by_path: dict[str, bytes] = field(default_factory=dict)
     source_evaluation: Any = None
     source_ids: frozenset[str] = frozenset()
     source_context_valid: bool = False
     registry_payload: bytes | None = None
-    registry: dict | None = None
+    registry_facts: _RevisitRegistryFacts | None = None
     registry_error: Exception | None = None
     ledger_payload: bytes | None = None
-    ledger_text: str | None = None
-    ledger_error: UnicodeDecodeError | None = None
+    ledger_facts: _RevisitLedgerFacts | None = None
+    ledger_error: Exception | None = None
     search_payload: bytes | None = None
     search_records: tuple[dict, ...] | None = ()
     search_error: Exception | None = None
@@ -195,10 +254,28 @@ class _ReadinessContext:
     delivered_payloads: tuple[tuple[str, bytes | None], ...] = ()
     dispatch_error: Exception | None = None
     worker_outputs: tuple[tuple[str, str], ...] = ()
+    worker_output_errors: tuple[tuple[str, str], ...] = ()
+    worker_output_paths: tuple[str, ...] = ()
     frontier_facts: Any = None
     prerequisite_status: dict[str, bool] = field(default_factory=dict)
     trace: list[_ReadinessTraceEntry] = field(default_factory=list)
     closure: GenerationClosure | None = None
+
+    @property
+    def selected_cycle_id(self) -> str | None:
+        return (
+            self.selected_cycle.cycle_id
+            if self.selected_cycle is not None
+            else None
+        )
+
+    @property
+    def cycle(self) -> dict[str, Any] | None:
+        return (
+            self.selected_cycle.cycle
+            if self.selected_cycle is not None
+            else None
+        )
 
 
 @dataclass(frozen=True)
@@ -206,11 +283,17 @@ class _PreparedRevisitReadiness:
     """Module-private result of one complete executable readiness pass."""
 
     result: ContractResult
-    cycle_id: str | None
-    cycle: dict | None
-    cycle_sha256: str | None
+    selected_cycle: _SelectedCycle | None
     closure: GenerationClosure
     trace: tuple[_ReadinessTraceEntry, ...]
+
+    @property
+    def cycle_id(self) -> str | None:
+        return (
+            self.selected_cycle.cycle_id
+            if self.selected_cycle is not None
+            else None
+        )
 
 
 class RevisitCheckEffect(str, Enum):
@@ -218,7 +301,8 @@ class RevisitCheckEffect(str, Enum):
 
     * ``BLOCKED`` -- semantic or drift failure; zero writes.
     * ``TRANSITIONED`` -- active->ready; exactly one ``check`` audit entry.
-    * ``UNCHANGED_READY`` -- already ready; byte-preserving no-op (no audit).
+    * ``UNCHANGED_READY`` -- ready or completed-unpublished; byte-preserving
+      no-op (no audit).
     """
 
     BLOCKED = "blocked"
@@ -237,6 +321,33 @@ class RevisitCheckOutcome:
     result: ContractResult
     cycle_id: str | None
     effect: RevisitCheckEffect
+
+
+def _make_revisit_check_outcome(
+    result: ContractResult,
+    selected_cycle: _SelectedCycle | None,
+) -> RevisitCheckOutcome:
+    """Reduce one complete semantic state to the sole public outcome shape."""
+    cycle_id = (
+        selected_cycle.cycle_id if selected_cycle is not None else None
+    )
+    if not result.passed:
+        effect = RevisitCheckEffect.BLOCKED
+        return RevisitCheckOutcome(result, cycle_id, effect)
+    if selected_cycle is None:
+        raise ReadinessPlanError(
+            "passing readiness requires one complete selected cycle"
+        )
+    if selected_cycle.status == "active":
+        effect = RevisitCheckEffect.TRANSITIONED
+    elif selected_cycle.status in {"ready_for_report", "completed"}:
+        effect = RevisitCheckEffect.UNCHANGED_READY
+    else:
+        raise ReadinessPlanError(
+            f"passing readiness selected impossible status: "
+            f"{selected_cycle.status}"
+        )
+    return RevisitCheckOutcome(result, selected_cycle.cycle_id, effect)
 
 
 # Canonical UTC seconds: ``YYYY-MM-DDTHH:MM:SSZ``. Invalid caller timestamps
@@ -279,6 +390,23 @@ def _iter_jsonl_bytes(payload: bytes | None) -> tuple[tuple[int, dict[str, Any]]
             raise ValueError(f"line {line_number} JSONL record must be an object")
         records.append((line_number, value))
     return tuple(records)
+
+
+def _observe_optional_file(
+    session: ObservedReadSession,
+    relative_path: str,
+) -> tuple[bytes | None, Exception | None]:
+    """Observe one expected file without translating its domain category.
+
+    The observed lexical-node generation records missing and every present
+    kind before attempting a read. The calling owner decides which stable
+    issue code applies. A post-freeze call remains a generation-layer
+    programming error and fails loudly.
+    """
+    try:
+        return session.read_optional(relative_path), None
+    except RevisitContractError as exc:
+        return None, exc
 
 
 def _check_intake_authorities_from_facts(
@@ -443,14 +571,62 @@ def _evaluate_source_cache_from_session(
 
     Returns ``(evaluation, source_ids, source_context_valid)``.
     """
-    index_payload = session.read_optional(SOURCE_INDEX_FILENAME)
+    index_payload, index_error = _observe_optional_file(
+        session,
+        SOURCE_INDEX_FILENAME,
+    )
+    if index_error is not None:
+        evaluation = SourceCacheEvaluation(
+            (),
+            (
+                SourceIssue(
+                    "SOURCE_INDEX_MALFORMED",
+                    SOURCE_INDEX_FILENAME,
+                    f"cannot read {SOURCE_INDEX_FILENAME}: {index_error}",
+                ),
+            ),
+            (),
+        )
+        return evaluation, frozenset(), False
     plan = plan_index_document(index_payload)
+    try:
+        source_entries = session.list_directory(
+            "sources",
+            recursive=True,
+            optional=True,
+        )
+    except RevisitContractError as exc:
+        evaluation = SourceCacheEvaluation(
+            (),
+            (
+                SourceIssue(
+                    "SOURCE_INDEX_MALFORMED",
+                    "sources",
+                    f"source cache root is invalid or unreadable: {exc}",
+                ),
+            ),
+            (),
+        )
+        return evaluation, frozenset(), False
+
+    invalid_members = tuple(
+        SourceIssue(
+            "SOURCE_INDEX_MALFORMED",
+            entry.relative_path,
+            "source cache member must be a lexical regular file or directory",
+        )
+        for entry in source_entries
+        if entry.kind == "other"
+    )
     excerpt_payloads: list[tuple[str, bytes | None]] = []
     for excerpt_path in plan.excerpt_paths:
-        excerpt_payloads.append(
-            (excerpt_path, session.read_optional(excerpt_path))
+        excerpt_payload, _excerpt_error = _observe_optional_file(
+            session,
+            excerpt_path,
         )
-    source_entries = session.list_directory("sources", recursive=True, optional=True)
+        excerpt_payloads.append(
+            (excerpt_path, excerpt_payload)
+        )
     source_files = tuple(
         entry.relative_path
         for entry in source_entries
@@ -459,6 +635,12 @@ def _evaluate_source_cache_from_session(
     evaluation = evaluate_index_documents(
         plan, tuple(excerpt_payloads), source_files
     )
+    if invalid_members:
+        evaluation = SourceCacheEvaluation(
+            evaluation.records,
+            (*evaluation.issues, *invalid_members),
+            evaluation.warnings,
+        )
     source_ids = frozenset(
         str(record["source_id"]) for record in evaluation.records
     )
@@ -468,25 +650,55 @@ def _evaluate_source_cache_from_session(
 
 def _load_worker_output_facts(
     session: ObservedReadSession,
-) -> tuple[tuple[str, str], ...]:
+) -> tuple[
+    tuple[tuple[str, str], ...],
+    tuple[tuple[str, str], ...],
+    tuple[str, ...],
+]:
     """Read every known worker-output directory member through the session."""
     outputs: list[tuple[str, str]] = []
+    errors: list[tuple[str, str]] = []
+    output_paths: list[str] = []
     for dirname in all_worker_output_directories():
-        entries = session.list_directory(dirname, recursive=False, optional=True)
+        try:
+            entries = session.list_directory(
+                dirname,
+                recursive=False,
+                optional=True,
+            )
+        except RevisitContractError as exc:
+            errors.append((dirname, str(exc)))
+            continue
         for entry in entries:
-            if entry.kind != "file" or not entry.relative_path.endswith(".md"):
+            if not entry.relative_path.endswith(".md"):
                 continue
             if is_main_thread_artifact(entry.relative_path):
                 continue
-            payload = session.read_optional(entry.relative_path)
+            output_paths.append(entry.relative_path)
+            if entry.kind != "file":
+                errors.append(
+                    (
+                        entry.relative_path,
+                        "worker output must be a lexical regular file",
+                    )
+                )
+                continue
+            payload, read_error = _observe_optional_file(
+                session,
+                entry.relative_path,
+            )
+            if read_error is not None:
+                errors.append((entry.relative_path, str(read_error)))
+                continue
             if payload is None:
                 continue
             try:
                 text = payload.decode("utf-8")
-            except UnicodeDecodeError:
+            except UnicodeDecodeError as exc:
+                errors.append((entry.relative_path, str(exc)))
                 continue
             outputs.append((entry.relative_path, text))
-    return tuple(outputs)
+    return tuple(outputs), tuple(errors), tuple(output_paths)
 
 
 def _load_dispatch_facts(
@@ -503,7 +715,12 @@ def _load_dispatch_facts(
     Returns parsed records, delivered payloads, and a parse error if present.
     The Row 9 owner is the only code that translates the error to an issue.
     """
-    payload = session.read_optional("dispatch_log.jsonl")
+    payload, read_error = _observe_optional_file(
+        session,
+        "dispatch_log.jsonl",
+    )
+    if read_error is not None:
+        return None, (), read_error
     if payload is None:
         return (), (), None
     try:
@@ -527,16 +744,23 @@ def _load_dispatch_facts(
         if normalized is None or normalized in seen:
             continue
         seen.add(normalized)
-        delivered_payloads.append(
-            (normalized, session.read_optional(normalized))
+        delivered_payload, _delivery_error = _observe_optional_file(
+            session,
+            normalized,
         )
+        delivered_payloads.append((normalized, delivered_payload))
     return record_tuple, tuple(delivered_payloads), None
 
 
 def _load_search_facts(
     session: ObservedReadSession,
 ) -> tuple[bytes | None, tuple[dict, ...] | None, Exception | None]:
-    payload = session.read_optional("search_log.jsonl")
+    payload, read_error = _observe_optional_file(
+        session,
+        "search_log.jsonl",
+    )
+    if read_error is not None:
+        return None, None, read_error
     if payload is None:
         return None, (), None
     try:
@@ -599,29 +823,48 @@ def _append_revisit_issues(
 
 
 def _load_core_facts(context: _ReadinessContext) -> None:
-    context.state_payload = context.session.read_optional("state.json")
-    if context.state_payload is not None:
+    context.state_payload, context.state_error = _observe_optional_file(
+        context.session,
+        "state.json",
+    )
+    if context.state_payload is not None and context.state_error is None:
         try:
             state_value = json.loads(context.state_payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            context.state_facts = _parse_revisit_state_facts(state_value)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             context.state_error = exc
-        else:
-            if isinstance(state_value, dict):
-                context.state = state_value
 
-    context.workflow_payload = context.session.read_optional(
-        "research_workflow.md"
+    (
+        context.workflow_payload,
+        context.workflow_error,
+    ) = _observe_optional_file(
+        context.session,
+        "research_workflow.md",
     )
-    if context.workflow_payload is not None:
+    if (
+        context.workflow_payload is not None
+        and context.workflow_error is None
+    ):
         try:
-            context.workflow_text = context.workflow_payload.decode("utf-8")
-        except UnicodeDecodeError as exc:
+            workflow_text = context.workflow_payload.decode("utf-8")
+            context.workflow_facts = _parse_revisit_workflow_facts(
+                workflow_text
+            )
+        except (UnicodeDecodeError, ValueError) as exc:
             context.workflow_error = exc
 
 
 def _load_history_facts(context: _ReadinessContext) -> None:
-    pointer_payload = context.session.read_optional("revisit_contract.json")
-    if pointer_payload is None:
+    pointer_payload, pointer_read_error = _observe_optional_file(
+        context.session,
+        "revisit_contract.json",
+    )
+    if pointer_read_error is not None:
+        context.pointer_error = RevisitContractError(
+            "revisit_contract.json is invalid or unreadable: "
+            f"{pointer_read_error}"
+        )
+    elif pointer_payload is None:
         context.pointer_error = RevisitContractError(
             "required authority is missing: revisit_contract.json"
         )
@@ -637,6 +880,7 @@ def _load_history_facts(context: _ReadinessContext) -> None:
         cycle_entries = context.session.list_directory(
             "revisit_cycles",
             recursive=False,
+            optional=False,
         )
     except RevisitContractError as exc:
         context.history_load_issues.append(
@@ -653,13 +897,48 @@ def _load_history_facts(context: _ReadinessContext) -> None:
     cycle_payloads: dict[str, bytes] = {}
     cycles_by_id: dict[str, dict] = {}
     for entry in cycle_entries:
-        if entry.kind != "file" or not entry.relative_path.endswith(".json"):
+        member = Path(entry.relative_path)
+        cycle_id_from_name = member.stem
+        if (
+            entry.kind != "file"
+            or member.suffix not in {".json", ".md"}
+            or CYCLE_ID_RE.fullmatch(cycle_id_from_name) is None
+        ):
+            context.history_load_issues.append(
+                (
+                    "REVISIT_CYCLE_MALFORMED",
+                    "cycle history member must be a lexical regular "
+                    "RC-NNNN.json or RC-NNNN.md file",
+                    entry.relative_path,
+                    "",
+                )
+            )
             continue
-        cycle_id_from_name = Path(entry.relative_path).stem
-        if not cycle_id_from_name:
+        if member.suffix == ".md":
             continue
-        payload = context.session.read_optional(entry.relative_path)
+        payload, payload_error = _observe_optional_file(
+            context.session,
+            entry.relative_path,
+        )
+        if payload_error is not None:
+            context.history_load_issues.append(
+                (
+                    "REVISIT_CYCLE_MALFORMED",
+                    str(payload_error),
+                    entry.relative_path,
+                    "",
+                )
+            )
+            continue
         if payload is None:
+            context.history_load_issues.append(
+                (
+                    "REVISIT_CYCLE_MALFORMED",
+                    "cycle JSON disappeared during observation",
+                    entry.relative_path,
+                    "",
+                )
+            )
             continue
         cycle_payloads[cycle_id_from_name] = payload
         try:
@@ -692,16 +971,27 @@ def _load_history_facts(context: _ReadinessContext) -> None:
                 *context.history.completed_unpublished_cycle_ids,
             )
             if len(eligible) == 1:
-                context.selected_cycle_id = eligible[0]
-                context.cycle = cycles_by_id.get(eligible[0])
+                selected_cycle_id = eligible[0]
+                selected_cycle = cycles_by_id.get(selected_cycle_id)
                 payload = cycle_payloads.get(eligible[0])
-                if context.cycle is not None and payload is not None:
-                    context.cycle_sha256 = sha256_bytes(payload)
+                if selected_cycle is None or payload is None:
+                    raise ReadinessPlanError(
+                        "eligible history cycle lacks its validated document"
+                    )
+                context.selected_cycle = _SelectedCycle(
+                    cycle_id=selected_cycle_id,
+                    cycle=selected_cycle,
+                    cycle_sha256=sha256_bytes(payload),
+                    status=selected_cycle["status"],
+                )
 
         current = context.pointer.get("current_revision")
         if current is not None:
             report_path = current["report_path"]
-            report_payload = context.session.read_optional(report_path)
+            report_payload, _report_error = _observe_optional_file(
+                context.session,
+                report_path,
+            )
             if report_payload is not None:
                 context.payload_by_path[report_path] = report_payload
 
@@ -715,9 +1005,16 @@ def _load_source_facts(context: _ReadinessContext) -> None:
 
 
 def _load_registry_facts(context: _ReadinessContext) -> None:
-    context.registry_payload = context.session.read_optional(
-        "frontier_registry.json"
+    (
+        context.registry_payload,
+        registry_read_error,
+    ) = _observe_optional_file(
+        context.session,
+        "frontier_registry.json",
     )
+    if registry_read_error is not None:
+        context.registry_error = registry_read_error
+        return
     if context.registry_payload is None:
         return
     try:
@@ -726,21 +1023,36 @@ def _load_registry_facts(context: _ReadinessContext) -> None:
             "frontier_registry.json",
         )
         validate_registry(registry_value)
+        if registry_value.get("version") != CURRENT_REGISTRY_VERSION:
+            raise LifecycleError(
+                "revisit readiness requires the current registry schema"
+            )
+        if registry_value.get("mode") != "ticker":
+            raise LifecycleError(
+                "revisit readiness requires a ticker registry"
+            )
     except (RevisitContractError, LifecycleError) as exc:
         context.registry_error = exc
         return
-    context.registry = registry_value
+    context.registry_facts = _RevisitRegistryFacts(registry_value)
 
 
 def _load_ledger_facts(context: _ReadinessContext) -> None:
-    context.ledger_payload = context.session.read_optional("evidence_ledger.md")
+    (
+        context.ledger_payload,
+        context.ledger_error,
+    ) = _observe_optional_file(
+        context.session,
+        "evidence_ledger.md",
+    )
     if context.ledger_payload is None:
-        context.ledger_text = ""
         return
-    try:
-        context.ledger_text = context.ledger_payload.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        context.ledger_error = exc
+    if context.ledger_error is None:
+        try:
+            ledger_text = context.ledger_payload.decode("utf-8")
+            context.ledger_facts = _parse_revisit_ledger_facts(ledger_text)
+        except (UnicodeDecodeError, ValueError) as exc:
+            context.ledger_error = exc
 
 
 def _load_cycle_artifact_facts(context: _ReadinessContext) -> None:
@@ -749,7 +1061,10 @@ def _load_cycle_artifact_facts(context: _ReadinessContext) -> None:
         return
 
     def observe(relative_path: str) -> None:
-        payload = context.session.read_optional(relative_path)
+        payload, _read_error = _observe_optional_file(
+            context.session,
+            relative_path,
+        )
         if payload is not None:
             context.payload_by_path[relative_path] = payload
 
@@ -808,14 +1123,18 @@ def _load_readiness_facts(context: _ReadinessContext) -> None:
         context.workspace,
         context.lexical_workspace,
     )
-    context.worker_outputs = _load_worker_output_facts(context.session)
+    (
+        context.worker_outputs,
+        context.worker_output_errors,
+        context.worker_output_paths,
+    ) = _load_worker_output_facts(context.session)
     _load_cycle_artifact_facts(context)
 
     context.prerequisite_status.update(
         {
             "ticker_mode": (
-                context.state is not None
-                and context.state.get("mode") == "ticker"
+                context.state_facts is not None
+                and context.state_facts.mode == "ticker"
             ),
             "cycle": context.cycle is not None,
         }
@@ -833,12 +1152,12 @@ def _frontier_facts(context: _ReadinessContext):
             )
         context.frontier_facts = _prepare_revisit_frontier_facts(
             cycle=context.cycle,
-            registry=context.registry,
-            ledger_text=(
-                context.ledger_text
-                if context.ledger_error is None
+            registry=(
+                context.registry_facts.document
+                if context.registry_facts is not None
                 else None
             ),
+            ledger_facts=context.ledger_facts,
             dispatch_records=context.dispatch_records,
             covered_search_loops=covered_search_loops,
         )
@@ -846,57 +1165,79 @@ def _frontier_facts(context: _ReadinessContext):
 
 
 def _evaluate_core_state_workflow(context: _ReadinessContext) -> None:
-    if context.state_error is not None:
-        context.result.fail(
-            code="STATE_JSON_INVALID",
-            message=f"state.json is not valid JSON: {context.state_error}",
-            path="state.json",
-        )
-    if context.workflow_error is not None:
-        context.result.fail(
-            code="RESEARCH_WORKFLOW_INVALID",
-            message=(
-                "research_workflow.md is not valid UTF-8: "
-                f"{context.workflow_error}"
-            ),
-            path="research_workflow.md",
-        )
-    if context.ledger_error is not None:
-        context.result.fail(
-            code="EVIDENCE_LEDGER_INVALID",
-            message=(
-                "evidence_ledger.md is not valid UTF-8: "
-                f"{context.ledger_error}"
-            ),
-            path="evidence_ledger.md",
-        )
-
-    if context.state is None:
-        context.result.fail(
-            code="REVISIT_CYCLE_MALFORMED",
-            message="revisit_report requires state.json with mode=ticker",
-            path="state.json",
-        )
-        return
-    mode = context.state.get("mode")
-    if mode == "sector":
+    if (
+        context.state_facts is not None
+        and context.state_facts.mode == "sector"
+    ):
         context.result.fail(
             code="REVISIT_UNSUPPORTED_MODE",
             message="revisit_report is unavailable for Sector workspaces",
             path="state.json",
         )
         return
-    if mode != "ticker":
+
+    if context.state_payload is None and context.state_error is None:
         context.result.fail(
-            code="REVISIT_CYCLE_MALFORMED",
-            message="revisit_report requires state.json with mode=ticker",
+            code="STATE_JSON_MISSING",
+            message=(
+                "state.json is required as the machine-readable workspace "
+                "authority"
+            ),
             path="state.json",
         )
+    elif context.state_error is not None:
+        context.result.fail(
+            code="STATE_JSON_INVALID",
+            message=(
+                "state.json is invalid or unreadable: "
+                f"{context.state_error}"
+            ),
+            path="state.json",
+        )
+
+    if context.workflow_payload is None and context.workflow_error is None:
+        context.result.fail(
+            code="RESEARCH_WORKFLOW_MISSING",
+            message=(
+                "research_workflow.md is required as the human-readable "
+                "workflow mirror"
+            ),
+            path="research_workflow.md",
+        )
+    elif context.workflow_error is not None:
+        context.result.fail(
+            code="RESEARCH_WORKFLOW_INVALID",
+            message=(
+                "research_workflow.md is invalid or unreadable: "
+                f"{context.workflow_error}"
+            ),
+            path="research_workflow.md",
+        )
+
+    if context.ledger_payload is None and context.ledger_error is None:
+        context.result.fail(
+            code="EVIDENCE_LEDGER_MISSING",
+            message=(
+                "evidence_ledger.md is required for evidence-first research"
+            ),
+            path="evidence_ledger.md",
+        )
+    elif context.ledger_error is not None:
+        context.result.fail(
+            code="EVIDENCE_LEDGER_INVALID",
+            message=(
+                "evidence_ledger.md is invalid or unreadable: "
+                f"{context.ledger_error}"
+            ),
+            path="evidence_ledger.md",
+        )
+
+    if context.state_facts is None:
         return
-    if context.workflow_text is not None:
-        _check_state_workflow_documents(
-            context.state,
-            context.workflow_text,
+    if context.workflow_facts is not None:
+        _check_state_workflow_facts(
+            context.state_facts,
+            context.workflow_facts,
             context.result,
         )
 
@@ -1075,19 +1416,19 @@ def _evaluate_claim_freshness(context: _ReadinessContext) -> None:
 
 
 def _evaluate_frontier_registry(context: _ReadinessContext) -> None:
+    if context.registry_error is not None:
+        context.result.fail(
+            code="REVISIT_FRONTIER_REGISTRY_MALFORMED",
+            message=str(context.registry_error),
+            path="frontier_registry.json",
+        )
+        return
     if context.registry_payload is None:
         context.result.fail(
             code="FRONTIER_REGISTRY_MISSING",
             message=(
                 "frontier_registry.json is required for revisit readiness"
             ),
-            path="frontier_registry.json",
-        )
-        return
-    if context.registry_error is not None:
-        context.result.fail(
-            code="REVISIT_FRONTIER_REGISTRY_MALFORMED",
-            message=str(context.registry_error),
             path="frontier_registry.json",
         )
         return
@@ -1124,8 +1465,8 @@ def _evaluate_search_coverage(context: _ReadinessContext) -> None:
         return
 
     state_loop_count = (
-        int(context.state.get("loop_count", 0) or 0)
-        if isinstance(context.state, dict)
+        context.state_facts.loop_count
+        if context.state_facts is not None
         else 0
     )
     covered_loop_ids, has_any_valid = _search_facts_from_records(
@@ -1186,18 +1527,18 @@ def _evaluate_dispatch_delivery(context: _ReadinessContext) -> None:
         )
         return
 
-    worker_output_paths = tuple(
-        relative_path
-        for relative_path, _text in context.worker_outputs
-    )
     _check_dispatch_documents(
         records=context.dispatch_records or (),
-        workflow_text=context.workflow_text,
+        workflow_text=(
+            context.workflow_facts.text
+            if context.workflow_facts is not None
+            else None
+        ),
         profile=ContractProfile(
             mode="ticker",
             target="revisit_report",
         ),
-        worker_output_paths=worker_output_paths,
+        worker_output_paths=context.worker_output_paths,
         delivered_payloads=context.delivered_payloads,
         result=context.result,
         workspace=context.workspace,
@@ -1213,6 +1554,12 @@ def _evaluate_dispatch_delivery(context: _ReadinessContext) -> None:
 
 
 def _evaluate_worker_outputs(context: _ReadinessContext) -> None:
+    for relative_path, message in context.worker_output_errors:
+        context.result.fail(
+            code="WORKER_OUTPUT_INVALID",
+            message=f"worker output is invalid or unreadable: {message}",
+            path=relative_path,
+        )
     delivered_roles = (
         _delivered_roles_from_records(context.dispatch_records)
         if context.dispatch_records is not None
@@ -1267,6 +1614,10 @@ def _evaluate_route_and_effect_parity(
         raise ReadinessPlanError(
             "route/effect invariant requires a frozen generation closure"
         )
+    _make_revisit_check_outcome(
+        context.result,
+        context.selected_cycle,
+    )
 
 
 _ALLOWED_PREREQUISITES = frozenset(
@@ -1472,9 +1823,7 @@ def _prepare_revisit_readiness(
         )
     return _PreparedRevisitReadiness(
         result=context.result,
-        cycle_id=context.selected_cycle_id,
-        cycle=context.cycle,
-        cycle_sha256=context.cycle_sha256,
+        selected_cycle=context.selected_cycle,
         closure=context.closure,
         trace=tuple(context.trace),
     )
@@ -1533,11 +1882,6 @@ def evaluate_revisit_readiness(
             path=exc.drift.relative_path,
         )
         return result
-    except ReadinessPlanError:
-        raise
-    except (OSError, RevisitContractError, LifecycleError, ValueError) as exc:
-        # Unexpected I/O or impossible internal value propagates.
-        raise
 
     try:
         closure.require_unchanged()
@@ -1596,57 +1940,48 @@ def check_revisit_readiness(
                 message=str(exc),
                 path=exc.drift.relative_path,
             )
-            return RevisitCheckOutcome(
-                result=result,
-                cycle_id=prepared.cycle_id,
-                effect=RevisitCheckEffect.BLOCKED,
+            return _make_revisit_check_outcome(
+                result,
+                prepared.selected_cycle,
             )
 
-        # Malformed history or semantic failure -> BLOCKED with zero writes.
-        if not result.passed:
-            return RevisitCheckOutcome(
-                result=result,
-                cycle_id=prepared.cycle_id,
-                effect=RevisitCheckEffect.BLOCKED,
-            )
+        outcome = _make_revisit_check_outcome(
+            result,
+            prepared.selected_cycle,
+        )
+        if outcome.effect == RevisitCheckEffect.BLOCKED:
+            return outcome
 
-        cycle = prepared.cycle
-        if cycle is None or prepared.cycle_sha256 is None:
-            # Selection succeeded but the cycle payload itself was unusable.
-            return RevisitCheckOutcome(
-                result=result,
-                cycle_id=prepared.cycle_id,
-                effect=RevisitCheckEffect.BLOCKED,
+        selected_cycle = prepared.selected_cycle
+        if selected_cycle is None:
+            raise ReadinessPlanError(
+                "non-blocked effect lacks a complete selected cycle"
             )
-
-        if cycle["status"] == "ready_for_report":
+        if outcome.effect == RevisitCheckEffect.UNCHANGED_READY:
             # Byte-preserving no-op: recheck the complete unexcluded closure
             # exactly once (already done above) and return without rendering,
             # writing, or appending an audit entry.
-            return RevisitCheckOutcome(
-                result=result,
-                cycle_id=prepared.cycle_id,
-                effect=RevisitCheckEffect.UNCHANGED_READY,
-            )
+            return outcome
 
         # TRANSITIONED: active -> ready_for_report with one ``check`` audit at
         # the supplied timestamp. Persistence delegates to ``persist_cycle``
         # with the frozen closure so the store rechecks the non-excluded
         # closure before+after the write and derives the cycle/mirror
         # exclusions itself.
+        cycle = selected_cycle.cycle
         proposed = mark_ready_for_report(cycle)
         updated = with_audit(
             cycle,
             proposed,
             "check",
-            [prepared.cycle_id],
+            [selected_cycle.cycle_id],
             timestamp,
         )
         try:
             persist_cycle(
                 locked_workspace,
                 updated,
-                expected_sha256=prepared.cycle_sha256,
+                expected_sha256=selected_cycle.cycle_sha256,
                 generation_closure=closure,
             )
         except AuthorityDriftError as exc:
@@ -1657,16 +1992,11 @@ def check_revisit_readiness(
                 message=str(exc),
                 path=exc.drift.relative_path,
             )
-            return RevisitCheckOutcome(
-                result=result,
-                cycle_id=prepared.cycle_id,
-                effect=RevisitCheckEffect.BLOCKED,
+            return _make_revisit_check_outcome(
+                result,
+                selected_cycle,
             )
-        return RevisitCheckOutcome(
-            result=result,
-            cycle_id=prepared.cycle_id,
-            effect=RevisitCheckEffect.TRANSITIONED,
-        )
+        return outcome
 
 
 # Import helpers only to expose them for the read-only seam and tests.

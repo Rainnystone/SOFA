@@ -6405,7 +6405,11 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                 ),
             ),
         )
-        for state_case in ("missing", "unknown"):
+        expected_by_state_case = {
+            "missing": "STATE_JSON_MISSING",
+            "unknown": "STATE_JSON_INVALID",
+        }
+        for state_case, expected_code in expected_by_state_case.items():
             for evaluator_name, evaluate in evaluators:
                 with (
                     self.subTest(
@@ -6431,8 +6435,8 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                     result = evaluate(workspace, cycle_id)
 
                     self.assertFalse(result.passed)
-                    self.assertIn(
-                        "REVISIT_CYCLE_MALFORMED",
+                    self.assertEqual(
+                        [expected_code],
                         [issue.code for issue in result.failures],
                     )
 
