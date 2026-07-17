@@ -24,11 +24,7 @@ from .model import (
     validate_intake_request,
     validate_pointer,
 )
-from .generation import (
-    AuthorityDriftError,
-    GenerationClosure,
-    _require_unchanged_except,
-)
+from .generation import GenerationClosure, _require_unchanged_except
 from .render import render_cycle_markdown
 
 
@@ -795,9 +791,8 @@ def _persist_cycle_with_closure(
     paths allowed to change are the cycle JSON and Markdown mirror, derived from
     ``cycle["cycle_id"]``; every other observed authority (file bytes,
     absence, directory membership) must be byte-for-byte identical before and
-    after the write. On post-write ``AuthorityDriftError`` the exact prior
-    cycle/mirror bytes are restored and the error is re-raised so the readiness
-    seam can translate it to BLOCKED.
+    after the write. On any post-write validation exception the exact prior
+    cycle/mirror bytes are restored and the original error is re-raised.
     """
     if not isinstance(closure, GenerationClosure):
         raise RevisitContractError(
@@ -839,7 +834,7 @@ def _persist_cycle_with_closure(
         raise
     try:
         _require_unchanged_except(closure, excluded)
-    except AuthorityDriftError as original_error:
+    except Exception as original_error:
         try:
             _restore_committed_cycle_pair(
                 json_path=json_path,

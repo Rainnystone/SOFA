@@ -442,6 +442,44 @@ class TestRevisitCheckAuthorityDrift(unittest.TestCase):
                 outcome, ws, cid, pc, pm, expected_relative=excerpt_rel
             )
 
+    def test_post_write_validation_error_restores_pair_before_propagating(self):
+        from revisit_contract import store as revisit_store
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            mirror_path = workspace / "revisit_cycles" / f"{cycle_id}.md"
+            prior_cycle = cycle_path.read_bytes()
+            prior_mirror = mirror_path.read_bytes()
+            real_require = revisit_store._require_unchanged_except
+            calls = []
+
+            def fail_second_validation(closure, excluded):
+                calls.append(None)
+                if len(calls) == 2:
+                    raise revisit_contract.RevisitContractError(
+                        "synthetic post-write generation failure"
+                    )
+                return real_require(closure, excluded)
+
+            with unittest.mock.patch.object(
+                revisit_store,
+                "_require_unchanged_except",
+                fail_second_validation,
+            ):
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    "synthetic post-write generation failure",
+                ):
+                    check_revisit_readiness(
+                        workspace,
+                        cycle_id,
+                        timestamp=self.TIMESTAMP,
+                    )
+
+            self.assertEqual(prior_cycle, cycle_path.read_bytes())
+            self.assertEqual(prior_mirror, mirror_path.read_bytes())
+
     # ------------------------------------------------------------------
     # Cycle-sibling membership change: a new cycle JSON appears in
     # revisit_cycles/ during the pre-write window.
