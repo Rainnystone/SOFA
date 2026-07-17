@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -43,9 +44,12 @@ from sofa_contract.revisit_readiness import REVISIT_REQUIREMENT_IDS  # noqa: E40
 # Module-level helpers from the existing revisit-contract test corpus. These are
 # importable (NOT the instance-method ``assert_revisit_failure``).
 from tests.test_revisit_contract import (  # noqa: E402
+    CAN_SYMLINK,
+    attach_valid_audit,
     make_task6_ready_workspace,
     run_revisit_cycle_cli,
     snapshot_tree,
+    test_semantic_sha256,
 )
 
 import revisit_contract  # noqa: E402
@@ -839,6 +843,71 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
                 if issue.code == "REVISIT_AUTHORITY_DRIFT"
             )
             self.assertEqual(excerpt_rel, drift_issue.path)
+
+    @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
+    def test_artifact_symlink_retarget_reports_lexical_authority(self):
+        from revisit_contract.generation import ObservedReadSession
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+            artifacts = workspace / "artifacts"
+            artifacts.mkdir()
+            first_target = artifacts / "first.md"
+            second_target = artifacts / "second.md"
+            payload = b"Same artifact evidence generation.\n"
+            first_target.write_bytes(payload)
+            second_target.write_bytes(payload)
+            lexical_link = artifacts / "proof.md"
+            os.symlink(first_target.name, lexical_link)
+
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            cycle["intake"]["triggers"][0]["evidence_refs"] = [
+                {
+                    "kind": "artifact",
+                    "path": "artifacts/proof.md",
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "locator": "Same-byte lexical artifact proof",
+                    "checked_at": cycle["created_at"],
+                }
+            ]
+            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            attach_valid_audit(cycle)
+            revisit_contract.persist_cycle(
+                workspace,
+                cycle,
+                expected_sha256=revisit_contract.sha256_file(
+                    workspace / "revisit_cycles" / f"{cycle_id}.json"
+                ),
+            )
+
+            real_freeze = ObservedReadSession.freeze
+            retargeted = False
+
+            def retarget_then_freeze(session):
+                nonlocal retargeted
+                if not retargeted:
+                    lexical_link.unlink()
+                    os.symlink(second_target.name, lexical_link)
+                    retargeted = True
+                return real_freeze(session)
+
+            with mock.patch.object(
+                ObservedReadSession,
+                "freeze",
+                retarget_then_freeze,
+            ):
+                result = evaluate_revisit_readiness(workspace, cycle_id)
+
+            self.assertFalse(
+                result.passed,
+                [issue.display() for issue in result.failures],
+            )
+            drift_issue = next(
+                issue
+                for issue in result.failures
+                if issue.code == "REVISIT_AUTHORITY_DRIFT"
+            )
+            self.assertEqual("artifacts/proof.md", drift_issue.path)
 
     # ------------------------------------------------------------------
     # Named-selection tests

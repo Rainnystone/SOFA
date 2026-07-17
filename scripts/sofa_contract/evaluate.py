@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -1273,17 +1274,27 @@ def _normalize_delivery_path(workspace: Path, delivery_path) -> str | None:
     to, so dispatch_log.jsonl often records absolute paths. Worker outputs are
     compared as workspace-relative paths. Relative paths may also include
     harmless ``./`` or ``..`` segments. Paths that escape the workspace are not
-    accepted as delivered outputs.
+    accepted as delivered outputs. The returned identity stays lexical so an
+    observed-read session can detect symbolic-link retargeting; resolution is
+    used only to reject targets outside the workspace.
     """
     raw = str(delivery_path)
     try:
+        lexical_workspace = Path(os.path.abspath(workspace))
         candidate = Path(raw)
         if candidate.is_absolute():
-            resolved = candidate.resolve()
+            lexical_candidate = Path(os.path.abspath(candidate))
         else:
-            resolved = (workspace / candidate).resolve()
-        return resolved.relative_to(workspace.resolve()).as_posix()
-    except (ValueError, OSError):
+            lexical_candidate = Path(
+                os.path.abspath(lexical_workspace / candidate)
+            )
+        lexical_relative = lexical_candidate.relative_to(lexical_workspace)
+
+        resolved_workspace = lexical_workspace.resolve()
+        resolved_candidate = lexical_candidate.resolve()
+        resolved_candidate.relative_to(resolved_workspace)
+        return lexical_relative.as_posix()
+    except (TypeError, ValueError, OSError):
         return None
 
 
