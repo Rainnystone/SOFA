@@ -246,7 +246,12 @@ def _load_workspace_boundary(
     ledger_path = workspace / "evidence_ledger.md"
     ledger_generation = _read_authority_generation(workspace, ledger_path)
     ledger_payload = ledger_generation.payload
-    ledger_text = ledger_payload.decode("utf-8")
+    try:
+        ledger_text = ledger_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RevisitContractError(
+            "evidence_ledger.md must be valid UTF-8"
+        ) from exc
     max_loop_number = 0
     if "## Loop " in ledger_text:
         derive_loop_counts(ledger_text, registry)

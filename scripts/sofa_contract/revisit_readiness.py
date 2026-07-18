@@ -122,6 +122,7 @@ from .evaluate import (  # noqa: E402
     _current_revision_matches_completed_cycle,
     _derive_revisit_dispatch_floor_issues_from_facts,
     _derive_revisit_frontier_progress_issues_from_facts,
+    _derive_revisit_query_replay_issues,
     _derive_revisit_registry_issues_from_facts,
     _derive_revisit_search_floor_issues_from_facts,
     _dispatch_record_counts_as_delivery,
@@ -1568,6 +1569,15 @@ def _evaluate_search_coverage(context: _ReadinessContext) -> None:
                 path="search_log.jsonl",
                 evidence="no valid search record found",
             )
+
+    if context.selected_cycle is not None:
+        _append_revisit_issues(
+            context.result,
+            _derive_revisit_query_replay_issues(
+                context.selected_cycle.cycle,
+                context.search_records or (),
+            ),
+        )
 
     facts = _frontier_facts(context)
     if facts is not None:

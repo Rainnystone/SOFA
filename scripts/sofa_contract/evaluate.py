@@ -1315,6 +1315,96 @@ def _search_facts_from_records(
     return loop_ids, has_any_valid
 
 
+_REVISIT_QUERY_VARIATION_DIMENSIONS = frozenset(
+    {
+        "source",
+        "operator",
+        "language",
+        "time_window",
+        "evidence_hypothesis",
+    }
+)
+_SEARCH_LOOP_ID_RE = re.compile(r"^loop_([1-9][0-9]*)$")
+
+
+def _derive_revisit_query_replay_issues(
+    cycle: dict,
+    search_records: tuple[dict, ...],
+) -> tuple[RevisitIssue, ...]:
+    """Derive exact post-boundary query-replay issues from preloaded facts."""
+    boundary = cycle["intake"]["workspace_boundary"][
+        "max_existing_loop_number"
+    ]
+
+    def is_post_boundary(record: dict) -> bool:
+        loop_id = record.get("loop_id")
+        match = _SEARCH_LOOP_ID_RE.fullmatch(loop_id) if isinstance(loop_id, str) else None
+        return match is not None and int(match.group(1)) > boundary
+
+    historical_queries: set[str] = set()
+    historical_dead_ends: set[str] = set()
+    for record in search_records:
+        if is_post_boundary(record):
+            continue
+        query = record.get("query")
+        if isinstance(query, str):
+            historical_queries.add(query)
+        dead_ends = record.get("dead_ends")
+        if not isinstance(dead_ends, list):
+            continue
+        for dead_end in dead_ends:
+            if not isinstance(dead_end, dict):
+                continue
+            dead_end_query = dead_end.get("query")
+            if isinstance(dead_end_query, str):
+                historical_dead_ends.add(dead_end_query)
+
+    issues: list[RevisitIssue] = []
+    for record in search_records:
+        if not is_post_boundary(record):
+            continue
+        query = record.get("query")
+        is_replay = isinstance(query, str) and (
+            query in historical_queries or query in historical_dead_ends
+        )
+        has_dimension = "variation_dimension" in record
+        has_reason = "variation_reason" in record
+        dimension = record.get("variation_dimension")
+        reason = record.get("variation_reason")
+        valid_explanation = (
+            is_replay
+            and has_dimension
+            and has_reason
+            and isinstance(dimension, str)
+            and dimension in _REVISIT_QUERY_VARIATION_DIMENSIONS
+            and isinstance(reason, str)
+            and bool(reason.strip())
+        )
+        if valid_explanation or (not is_replay and not has_dimension and not has_reason):
+            continue
+
+        loop_id = record.get("loop_id")
+        if is_replay:
+            message = (
+                "exact prior-query or dead-end replay requires an allowed "
+                "variation_dimension and non-empty variation_reason"
+            )
+        else:
+            message = (
+                "variation fields are allowed only on an exact prior-query "
+                "or dead-end replay"
+            )
+        issues.append(
+            RevisitIssue(
+                "REVISIT_QUERY_REPLAY_UNEXPLAINED",
+                "search_log.jsonl",
+                message,
+                f"loop_id={loop_id!r}; query={query!r}",
+            )
+        )
+    return tuple(issues)
+
+
 def _revisit_review_lifecycle_coherent(
     frontier: dict,
     review_decision: dict,

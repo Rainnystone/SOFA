@@ -1,5 +1,7 @@
 import ast
 import re
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from urllib.parse import unquote
@@ -148,6 +150,13 @@ ROOT_LEAK_LITERALS = (
     "docs/" + "superpowers",
 )
 TRAVERSAL_PATH_SEGMENT = re.compile(r"(?:^|[\\/])\.\.[\\/]")
+TASK9_FIXTURE_MARKER = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])"
+    r"(?:task\s*9|task9|todo|fixme|tbd|template|placeholder|replace\s+me)"
+    r"(?![A-Za-z0-9_-])"
+    r"|\{(?:PLUGIN_DIR|WORKSPACE|SUBJECT|TICKER|DATE|LOOP_ID|FRONTIER_ID)\}"
+    r"|\{\{|\}\}"
+)
 TEST_PATH_LITERAL_ALLOWLIST = {
     (
         "tests/test_dispatch_assembly.py",
@@ -296,6 +305,41 @@ TEST_PATH_LITERAL_ALLOWLIST = {
         "reason": "observed-read dot-segment escape rejection",
         "expected_count": 1,
     },
+    (
+        "tests/test_revisit_contract.py",
+        ".." + "/" + "escape",
+    ): {
+        "reason": "observed-read workspace traversal rejection",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_contract.py",
+        ".." + "/" + "outside.md",
+    ): {
+        "reason": "emergent dispatch delivery escape rejection",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_contract.py",
+        "/" + "RC-0001.json",
+    ): {
+        "reason": "f-string cycle JSON authority path suffix",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_contract.py",
+        "/" + "RC-0001.md",
+    ): {
+        "reason": "f-string cycle mirror authority path suffix",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_contract.py",
+        "/" + "loop",
+    ): {
+        "reason": "f-string representative worker output path fragment",
+        "expected_count": 1,
+    },
 }
 
 
@@ -333,8 +377,15 @@ class TestSofaStructure(unittest.TestCase):
             "scripts/run_coverage.py",
             "scripts/prompts/frontier_review_prompt.md",
             # Task 6 observed-read readiness architecture (deep seam + tests).
+            "scripts/revisit_contract/__init__.py",
+            "scripts/revisit_contract/context.py",
+            "scripts/revisit_contract/model.py",
+            "scripts/revisit_contract/render.py",
+            "scripts/revisit_contract/store.py",
             "scripts/revisit_contract/generation.py",
+            "scripts/revisit_cycle.py",
             "scripts/sofa_contract/revisit_readiness.py",
+            "tests/fixtures/revisit_completed_ticker",
             "tests/test_revisit_generation.py",
             "tests/test_revisit_readiness.py",
         ]
@@ -560,8 +611,8 @@ class TestSofaStructure(unittest.TestCase):
         unexpected, stale = classify(occurrences, allowlist)
         self.assertEqual({}, unexpected)
         self.assertEqual({}, stale)
-        self.assertEqual(21, sum(entry["expected_count"] for entry in allowlist.values()))
-        self.assertEqual(21, sum(len(records) for records in occurrences.values()))
+        self.assertEqual(26, sum(entry["expected_count"] for entry in allowlist.values()))
+        self.assertEqual(26, sum(len(records) for records in occurrences.values()))
         self.assertEqual(
             [],
             [key for key, entry in allowlist.items() if not entry["reason"].strip()],
@@ -818,6 +869,61 @@ class TestSofaStructure(unittest.TestCase):
             profile_routes,
             "evaluate_workspace must route the revisit_report target to "
             "evaluate_revisit_readiness",
+        )
+
+    def test_revisit_package_and_cli_support_package_and_flat_imports(self):
+        cases = (
+            (
+                "package",
+                ROOT,
+                "import scripts.revisit_contract; import scripts.revisit_cycle",
+            ),
+            (
+                "flat",
+                ROOT / "scripts",
+                "import revisit_contract; import revisit_cycle",
+            ),
+        )
+        for label, cwd, statement in cases:
+            with self.subTest(mode=label):
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", statement],
+                    cwd=str(cwd),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_task9_fixture_text_is_strict_utf8_repo_relative_and_marker_free(self):
+        fixture_root = ROOT / "tests" / "fixtures" / "revisit_completed_ticker"
+        self.assertTrue(fixture_root.is_dir(), fixture_root)
+        violations = []
+        for path in sorted(fixture_root.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(ROOT)
+            try:
+                text = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                violations.append(f"invalid-utf8:{relative.as_posix()}:{exc.start}")
+                continue
+            if text.startswith("\ufeff"):
+                violations.append(f"utf8-bom:{relative.as_posix()}")
+            for match in TASK9_FIXTURE_MARKER.finditer(text):
+                line_number = text.count("\n", 0, match.start()) + 1
+                violations.append(
+                    f"fixture-marker:{relative.as_posix()}:{line_number}:"
+                    f"{match.group(0)}"
+                )
+            violations.extend(_repository_text_line_violations(relative, text))
+            if path.suffix == ".md":
+                violations.extend(_markdown_link_violations(path, text))
+        self.assertEqual(
+            [],
+            sorted(violations),
+            "Task 9 fixture must contain only strict UTF-8, repository-relative "
+            "text without task/template markers:\n" + "\n".join(sorted(violations)),
         )
 
     def test_repository_file_references_are_self_contained(self):

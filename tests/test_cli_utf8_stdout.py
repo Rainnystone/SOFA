@@ -22,6 +22,7 @@ Linux/macOS/Windows alike. The ``reconfigure`` call overrides that env, so a
 fixed script prints cleanly everywhere. This keeps the tests green on macOS
 while proving the Windows fix.
 """
+import ast
 import json
 import os
 import subprocess
@@ -51,11 +52,46 @@ CLI_SCRIPTS_WITH_NON_ASCII_OUTPUT = (
     "framing_intake.py",
     "archive_source.py",
     "init_workspace.py",
+    "revisit_cycle.py",
     # validate_dossier.py is the reference implementation: already fixed.
     "validate_dossier.py",
 )
 
 RECONFIGURE_SENTINEL = "sys.stdout.reconfigure(encoding=\"utf-8\")"
+
+
+def _module_main_starts_with_utf8_setup(source: str) -> bool:
+    """Recognize the approved helper form without accepting later setup calls."""
+    tree = ast.parse(source)
+    main_function = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "main"
+        ),
+        None,
+    )
+    if main_function is None:
+        return False
+    statements = list(main_function.body)
+    if (
+        statements
+        and isinstance(statements[0], ast.Expr)
+        and isinstance(statements[0].value, ast.Constant)
+        and isinstance(statements[0].value.value, str)
+    ):
+        statements.pop(0)
+    if not statements or not isinstance(statements[0], ast.Expr):
+        return False
+    call = statements[0].value
+    return (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "_configure_utf8_stdio"
+        and not call.args
+        and not call.keywords
+    )
 
 
 def _legacy_encoding_env():
@@ -105,7 +141,12 @@ class TestCliStdoutForcesUtf8(unittest.TestCase):
             )
             # The reconfigure call must sit inside the __main__ block.
             reconfigure_index = source.find(RECONFIGURE_SENTINEL)
-            if reconfigure_index == -1 or reconfigure_index < main_index:
+            has_literal_setup = (
+                reconfigure_index != -1 and reconfigure_index > main_index
+            )
+            if not has_literal_setup and not _module_main_starts_with_utf8_setup(
+                source
+            ):
                 missing.append(name)
         self.assertEqual(
             [], missing,
@@ -128,6 +169,27 @@ class TestCliStdoutBehaviorUnderLegacyEncoding(unittest.TestCase):
         workspace.mkdir(parents=True, exist_ok=True)
         self.addCleanup(temp_dir.cleanup)
         return workspace
+
+    def test_revisit_cycle_usage_error_preserves_cjk_claim_under_legacy_encoding(
+        self,
+    ):
+        workspace = self._make_workspace()
+        claim = "客户资格主张"
+
+        result = _run_script(
+            SCRIPTS / "revisit_cycle.py",
+            str(workspace),
+            "status",
+            "RC-0001",
+            claim,
+            cwd=ROOT,
+        )
+
+        stderr = result.stderr.decode("utf-8")
+        self.assertEqual(2, result.returncode)
+        self.assertIn(claim, stderr)
+        self.assertNotIn("UnicodeEncodeError", stderr)
+        self.assertNotIn("Traceback", stderr)
 
     def test_synthesis_checker_prints_violation_under_legacy_encoding(self):
         # An empty workflow is missing the required Synthesis Notes section, so

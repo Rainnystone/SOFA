@@ -1,0 +1,100 @@
+{
+  "version": 3,
+  "subject": "AXTI",
+  "mode": "ticker",
+  "layer_labels": [],
+  "frontiers": [
+    {
+      "id": "F1",
+      "name": "Customer qualification timing",
+      "proposed_at_loop": 1,
+      "source": "initial",
+      "source_frontier": null,
+      "status": "Continued",
+      "review_count": 1,
+      "max_reviews": 3,
+      "retire_category": null,
+      "lifecycle": [
+        {
+          "to": "New",
+          "at_loop": 1,
+          "ts": "2026-06-01T00:00:00Z"
+        },
+        {
+          "to": "Active",
+          "at_loop": 1,
+          "ts": "2026-06-01T00:00:00Z"
+        },
+        {
+          "to": "Continued",
+          "at_loop": 9,
+          "ts": "2026-07-01T12:00:00Z",
+          "rationale": "Qualification remains decision-relevant under the watch trigger."
+        }
+      ],
+      "review_decisions": [
+        {
+          "review_number": 1,
+          "at_loop": 9,
+          "decision": "Continued",
+          "retire_category": null,
+          "rationale_short": "Qualification remains decision-relevant under the watch trigger.",
+          "portfolio_actions": []
+        }
+      ],
+      "evidence_pointers": [],
+      "layer": null,
+      "parent_frontier": null
+    },
+    {
+      "id": "F2",
+      "name": "Manufacturing capacity expansion",
+      "proposed_at_loop": 2,
+      "source": "initial",
+      "source_frontier": null,
+      "status": "Continued",
+      "review_count": 1,
+      "max_reviews": 3,
+      "retire_category": null,
+      "lifecycle": [
+        {
+          "to": "New",
+          "at_loop": 2,
+          "ts": "2026-06-01T00:05:00Z"
+        },
+        {
+          "to": "Active",
+          "at_loop": 2,
+          "ts": "2026-06-01T00:05:00Z"
+        },
+        {
+          "to": "Continued",
+          "at_loop": 9,
+          "ts": "2026-07-01T12:00:01Z",
+          "rationale": "Capacity remains monitored but is not affected by the fired trigger."
+        }
+      ],
+      "review_decisions": [
+        {
+          "review_number": 1,
+          "at_loop": 9,
+          "decision": "Continued",
+          "retire_category": null,
+          "rationale_short": "Capacity remains monitored but is not affected by the fired trigger.",
+          "portfolio_actions": []
+        }
+      ],
+      "evidence_pointers": [],
+      "layer": null,
+      "parent_frontier": null
+    }
+  ],
+  "portfolio_limits": {
+    "max_active": 3,
+    "max_active_plus_new": 5
+  },
+  "review_trigger": {
+    "every_loops": 3,
+    "max_reviews": 3
+  }
+}

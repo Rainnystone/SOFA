@@ -1,0 +1,4 @@
+{"loop_id":"stage_0","query":"AXTI manufacturing capacity construction schedule","result_status":"completed","dead_ends":[{"query":"AXTI capacity rumor without primary source","category":"unverified"}],"evidence_refs":["https://capacity.example.test/schedule","src-002"]}
+{"loop_id":"loop_7","query":"AXTI customer qualification milestone evidence","result_status":"completed","dead_ends":[],"evidence_refs":["https://qualification.example.test/milestone","src-001"]}
+{"loop_id":"loop_8","query":"AXTI qualification timing customer validation","result_status":"completed","dead_ends":[{"query":"AXTI obsolete qualification forum rumor","category":"stale"}],"evidence_refs":["https://qualification.example.test/validation","src-001"]}
+{"loop_id":"loop_9","query":"AXTI qualification counter-evidence primary source","result_status":"completed","dead_ends":[],"evidence_refs":["https://qualification.example.test/counter-evidence","src-001"]}

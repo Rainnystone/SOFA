@@ -59,6 +59,7 @@ from tests.test_revisit_contract import (  # noqa: E402
     make_registration_workspace,
     make_task6_binding_workspace,
     make_task6_ready_workspace,
+    make_task9_query_replay_workspace,
     make_terminal_cycle_fixture,
     run_revisit_cycle_cli,
     snapshot_tree,
@@ -83,6 +84,24 @@ EXPECTED_REQUIREMENT_IDS = (
     "generation_closure",
     "route_and_effect_parity",
 )
+
+
+class TestTask9QueryReplay(unittest.TestCase):
+    def test_named_profile_and_check_share_exact_replay_issue_order(self):
+        for replay_kind in ("prior_query", "dead_end"):
+            with self.subTest(replay_kind=replay_kind):
+                _assert_three_route_failure_codes(
+                    self,
+                    lambda root, kind=replay_kind: make_task9_query_replay_workspace(
+                        root,
+                        replay_kind=kind,
+                        variation_fields=None,
+                    ),
+                    lambda _workspace, cycle_id: cycle_id,
+                    expected_codes_for_named=[
+                        "REVISIT_QUERY_REPLAY_UNEXPLAINED"
+                    ],
+                )
 
 
 def _noop_requirement(_context) -> None:

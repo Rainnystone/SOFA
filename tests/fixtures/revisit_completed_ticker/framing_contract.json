@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "subject_resolution": {
+    "confirmed_name": "AXT, Inc.",
+    "tickers": [
+      "AXTI"
+    ],
+    "exchange": "NASDAQ",
+    "resolution_method": "deterministic_quote",
+    "candidates": []
+  },
+  "mode": "ticker",
+  "research_posture": "fresh",
+  "time_horizon": "6-12 months",
+  "market_scope": "US public market",
+  "risk_appetite": "moderate",
+  "output_expectation": "decision memo",
+  "report_language": "en",
+  "budget_appetite": "standard",
+  "clarifications": []
+}

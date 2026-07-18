@@ -8,6 +8,7 @@ import json
 import os
 import re
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from unittest import mock
 
 import scripts.revisit_contract as revisit_contract
 import scripts.revisit_contract.context as revisit_context
+import scripts.revisit_contract.generation as revisit_generation
 import scripts.revisit_contract.model as revisit_model
 import scripts.revisit_contract.store as revisit_store
 import scripts.revisit_cycle as revisit_cycle_cli
@@ -30,12 +32,20 @@ from scripts.frontier_lifecycle import (
     make_registry,
     set_layer_labels,
     transition,
+    validate_registry,
 )
+from scripts.framing_contract import evaluate_contract, load_contract
+from scripts.capability_policy.search_records import build_prior_query_digest
 from scripts.sofa_contract import (
     RevisitCheckEffect,
     check_revisit_readiness,
 )
-from scripts.source_cache import EXCERPT_MAX_CHARS, excerpt_sha256
+from scripts.source_cache import (
+    EXCERPT_MAX_CHARS,
+    add_source,
+    evaluate_index,
+    excerpt_sha256,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVISIT_CYCLE_SCRIPT = REPO_ROOT / "scripts" / "revisit_cycle.py"
@@ -69,6 +79,31 @@ def _can_create_symlink() -> bool:
 
 
 CAN_SYMLINK = _can_create_symlink()
+
+TASK9_FIXTURE_PATHS = (
+    "state.json",
+    "research_workflow.md",
+    "evidence_ledger.md",
+    "claim_ledger.md",
+    "search_log.jsonl",
+    "dispatch_log.jsonl",
+    "frontier_registry.json",
+    "framing_contract.json",
+    "sources_index.jsonl",
+    "sources/src-001.md",
+    "sources/src-002.md",
+    "scouts/loop7_customer_qualification.md",
+    "scouts/loop8_customer_qualification.md",
+    "scouts/loop9_customer_qualification.md",
+    "challenges/loop7_challenge.md",
+    "challenges/loop8_challenge.md",
+    "challenges/loop9_challenge.md",
+    "financials/AXTI_bridge.md",
+    "redteam/round1_redteam.md",
+    "redteam/round1_defense.md",
+    "redteam/thesis_revision.md",
+    "reports/AXTI_SOFA_Report_2026-07-01.md",
+)
 
 
 def complete_ticker_report_bytes() -> bytes:
@@ -735,6 +770,62 @@ def make_task6_ready_workspace(
         cycle_id,
         frontier_id="F1",
         current_ref=current_ref,
+    )
+    return workspace, cycle_id
+
+
+TASK9_PRIOR_QUERY = "AXTI exact historical qualification query"
+TASK9_PRIOR_DEAD_END_QUERY = "AXTI exact historical qualification dead end"
+
+
+def make_task9_query_replay_workspace(
+    root: Path,
+    *,
+    replay_kind: str,
+    variation_fields: dict[str, object] | None = None,
+    post_boundary_query: str | None = None,
+) -> tuple[Path, str]:
+    workspace, cycle_id = make_task6_ready_workspace(root)
+    search_path = workspace / "search_log.jsonl"
+    records = [
+        json.loads(line)
+        for line in search_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    records.insert(
+        0,
+        {
+            "loop_id": "loop_7",
+            "query": TASK9_PRIOR_QUERY,
+            "result_status": "completed",
+            "dead_ends": [
+                {
+                    "query": TASK9_PRIOR_DEAD_END_QUERY,
+                    "category": "stale",
+                }
+            ],
+            "evidence_refs": ["src-001"],
+        },
+    )
+    post_boundary = next(record for record in records if record["loop_id"] == "loop_8")
+    replay_queries = {
+        "prior_query": TASK9_PRIOR_QUERY,
+        "dead_end": TASK9_PRIOR_DEAD_END_QUERY,
+        "novel": "AXTI genuinely novel post-trigger qualification query",
+    }
+    post_boundary["query"] = (
+        post_boundary_query
+        if post_boundary_query is not None
+        else replay_queries[replay_kind]
+    )
+    if variation_fields is not None:
+        post_boundary.update(variation_fields)
+    search_path.write_text(
+        "".join(
+            json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+            for record in records
+        ),
+        encoding="utf-8",
     )
     return workspace, cycle_id
 
@@ -4442,7 +4533,8 @@ class TestRevisitCycleAllocation(unittest.TestCase):
 
 
 class TestRevisitCycleStatusCli(unittest.TestCase):
-    def make_status_workspace(self, root, condition):
+    @staticmethod
+    def make_status_workspace(root, condition):
         workspace = root / "workspace"
         workspace.mkdir()
         (workspace / "state.json").write_text(
@@ -14791,3 +14883,2083 @@ class TestTask8Publication(unittest.TestCase):
                     for path in immutable_paths
                 },
             )
+
+
+class TestTask9QueryReplay(unittest.TestCase):
+    def _assert_case(
+        self,
+        *,
+        replay_kind: str,
+        variation_fields: dict[str, object] | None,
+        expected_codes: list[str],
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = make_task9_query_replay_workspace(
+                Path(directory),
+                replay_kind=replay_kind,
+                variation_fields=variation_fields,
+            )
+            before = snapshot_tree(workspace)
+
+            result = sofa_evaluate.evaluate_revisit_report(workspace, cycle_id)
+
+            self.assertEqual(expected_codes, [issue.code for issue in result.failures])
+            if expected_codes:
+                self.assertEqual(
+                    ["search_log.jsonl"],
+                    [issue.path for issue in result.failures],
+                )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_exact_prior_query_replay_without_explanation_fails_zero_write(self):
+        self._assert_case(
+            replay_kind="prior_query",
+            variation_fields=None,
+            expected_codes=["REVISIT_QUERY_REPLAY_UNEXPLAINED"],
+        )
+
+    def test_exact_dead_end_replay_without_explanation_fails_zero_write(self):
+        self._assert_case(
+            replay_kind="dead_end",
+            variation_fields=None,
+            expected_codes=["REVISIT_QUERY_REPLAY_UNEXPLAINED"],
+        )
+
+    def test_exact_replay_with_each_allowed_dimension_and_reason_passes(self):
+        for dimension in (
+            "source",
+            "operator",
+            "language",
+            "time_window",
+            "evidence_hypothesis",
+        ):
+            with self.subTest(dimension=dimension):
+                self._assert_case(
+                    replay_kind="prior_query",
+                    variation_fields={
+                        "variation_dimension": dimension,
+                        "variation_reason": (
+                            "The fired trigger changes this exact search dimension."
+                        ),
+                    },
+                    expected_codes=[],
+                )
+
+    def test_partial_invalid_and_empty_variation_metadata_fail(self):
+        cases = (
+            {"variation_dimension": "source"},
+            {"variation_reason": "A new source is now available."},
+            {
+                "variation_dimension": "unsupported",
+                "variation_reason": "A reason cannot legalize an invalid dimension.",
+            },
+            {
+                "variation_dimension": "language",
+                "variation_reason": "   ",
+            },
+            {
+                "variation_dimension": 1,
+                "variation_reason": "A non-string dimension is malformed.",
+            },
+            {
+                "variation_dimension": "source",
+                "variation_reason": 1,
+            },
+        )
+        for variation_fields in cases:
+            with self.subTest(variation_fields=variation_fields):
+                self._assert_case(
+                    replay_kind="prior_query",
+                    variation_fields=variation_fields,
+                    expected_codes=["REVISIT_QUERY_REPLAY_UNEXPLAINED"],
+                )
+
+    def test_novel_query_cannot_carry_replay_variation_fields(self):
+        self._assert_case(
+            replay_kind="novel",
+            variation_fields={
+                "variation_dimension": "operator",
+                "variation_reason": "A different operator was used.",
+            },
+            expected_codes=["REVISIT_QUERY_REPLAY_UNEXPLAINED"],
+        )
+
+    def test_case_and_whitespace_variants_are_novel_without_fuzzy_matching(self):
+        for query in (TASK9_PRIOR_QUERY.upper(), f"{TASK9_PRIOR_QUERY} "):
+            with self.subTest(query=query):
+                with tempfile.TemporaryDirectory() as directory:
+                    workspace, cycle_id = make_task9_query_replay_workspace(
+                        Path(directory),
+                        replay_kind="novel",
+                        variation_fields=None,
+                        post_boundary_query=query,
+                    )
+                    before = snapshot_tree(workspace)
+
+                    result = sofa_evaluate.evaluate_revisit_report(
+                        workspace,
+                        cycle_id,
+                    )
+
+                    self.assertTrue(
+                        result.passed,
+                        [issue.display() for issue in result.failures],
+                    )
+                    self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_unrelated_frontier_does_not_require_search_or_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, cycle_id = make_task6_ready_workspace(Path(directory))
+            unrelated_frontier_id = add_task6_frontier(
+                workspace,
+                initial_status="New",
+            )
+            before = snapshot_tree(workspace)
+
+            result = sofa_evaluate.evaluate_revisit_report(workspace, cycle_id)
+
+            self.assertTrue(result.passed, [issue.display() for issue in result.failures])
+            self.assertNotIn(
+                unrelated_frontier_id,
+                (workspace / "search_log.jsonl").read_text(encoding="utf-8"),
+            )
+            self.assertNotIn(
+                unrelated_frontier_id,
+                (workspace / "dispatch_log.jsonl").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+
+class TestTask9ObservedReadCoverage(unittest.TestCase):
+    def test_public_session_observes_cached_file_directory_and_absence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
+            (workspace / "authority.txt").write_bytes(b"stable authority\n")
+            tree = workspace / "tree"
+            tree.mkdir()
+            (tree / "child.txt").write_bytes(b"child\n")
+            (tree / "nested").mkdir()
+            (tree / "nested" / "leaf.txt").write_bytes(b"leaf\n")
+
+            session = revisit_generation.ObservedReadSession(workspace)
+            self.assertEqual(
+                b"stable authority\n",
+                session.read_required("authority.txt"),
+            )
+            self.assertEqual(
+                b"stable authority\n",
+                session.read_required("authority.txt"),
+            )
+            self.assertIsNone(session.read_optional("missing/input.json"))
+            self.assertEqual(
+                (),
+                session.list_directory(
+                    "missing-directory",
+                    recursive=False,
+                    optional=True,
+                ),
+            )
+            direct = session.list_directory("tree", recursive=False)
+            self.assertEqual(
+                ["tree/child.txt", "tree/nested"],
+                [entry.relative_path for entry in direct],
+            )
+            self.assertEqual(direct, session.list_directory("tree", recursive=False))
+            recursive = session.list_directory("tree", recursive=True)
+            self.assertEqual(
+                [
+                    "tree/child.txt",
+                    "tree/nested",
+                    "tree/nested/leaf.txt",
+                ],
+                [entry.relative_path for entry in recursive],
+            )
+
+            closure = session.freeze()
+            closure.require_unchanged()
+            with self.assertRaisesRegex(RuntimeError, "closed after freeze"):
+                session.read_optional("later.txt")
+            with self.assertRaisesRegex(RuntimeError, "closed after freeze"):
+                session.list_directory("tree", recursive=False)
+
+    def test_public_session_rejects_invalid_paths_and_wrong_node_kinds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
+            (workspace / "authority.txt").write_bytes(b"authority\n")
+            (workspace / "tree").mkdir()
+
+            for invalid in (
+                "",
+                ".",
+                "../escape",
+                str(workspace.resolve()),
+                "control\npath",
+            ):
+                with self.subTest(path=invalid):
+                    session = revisit_generation.ObservedReadSession(workspace)
+                    with self.assertRaises(revisit_contract.RevisitContractError):
+                        session.read_optional(invalid)
+
+            session = revisit_generation.ObservedReadSession(workspace)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "not a readable file",
+            ):
+                session.read_required("tree")
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "not a readable directory",
+            ):
+                session.list_directory("authority.txt", recursive=False)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "not a readable file",
+            ):
+                session.read_optional("authority.txt/child")
+            closure = session.freeze()
+            closure.require_unchanged()
+
+            required = revisit_generation.ObservedReadSession(workspace)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "required authority is missing",
+            ):
+                required.read_required("absent.txt")
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "required directory is missing",
+            ):
+                required.list_directory("absent-directory", recursive=False)
+
+    def test_frozen_closure_detects_file_absence_and_directory_drift(self):
+        cases = ("file-bytes", "absent-created", "member-added", "member-removed", "member-kind")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory) / "workspace"
+                workspace.mkdir()
+                tree = workspace / "tree"
+                tree.mkdir()
+                child = tree / "child.txt"
+                child.write_bytes(b"child\n")
+                authority = workspace / "authority.txt"
+                authority.write_bytes(b"before\n")
+                session = revisit_generation.ObservedReadSession(workspace)
+
+                if case == "file-bytes":
+                    session.read_required("authority.txt")
+                elif case == "absent-created":
+                    self.assertIsNone(session.read_optional("absent.txt"))
+                else:
+                    session.list_directory("tree", recursive=False)
+                closure = session.freeze()
+
+                if case == "file-bytes":
+                    authority.write_bytes(b"after\n")
+                    expected = "file bytes changed"
+                elif case == "absent-created":
+                    (workspace / "absent.txt").write_bytes(b"created\n")
+                    expected = "lexical state changed"
+                elif case == "member-added":
+                    (tree / "added.txt").write_bytes(b"added\n")
+                    expected = "directory member was added"
+                elif case == "member-removed":
+                    child.unlink()
+                    expected = "directory member was removed"
+                else:
+                    child.unlink()
+                    child.mkdir()
+                    expected = "lexical state or target changed"
+
+                with self.assertRaisesRegex(
+                    revisit_generation.AuthorityDriftError,
+                    expected,
+                ):
+                    closure.require_unchanged()
+
+
+class TestTask9InProcessCliCoverage(unittest.TestCase):
+    def cli_at(
+        self,
+        workspace: Path,
+        *arguments: str,
+        timestamp: str = "2026-07-18T01:00:00Z",
+    ) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                revisit_cycle_cli,
+                "_utc_now_seconds",
+                return_value=timestamp,
+            ),
+            mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+            mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+        ):
+            return_code = revisit_cycle_cli.main(
+                [str(workspace), *arguments]
+            )
+        return return_code, stdout.getvalue(), stderr.getvalue()
+
+    def test_status_json_and_text_cover_each_public_operational_state_read_only(self):
+        cases = (
+            (
+                "empty",
+                [],
+                "register-current --report REPORT --action-class ACTION_CLASS",
+            ),
+            (
+                "active",
+                ["active"],
+                "abort RC-0001 --reason TEXT",
+            ),
+            (
+                "completed-unpublished",
+                ["completed-unpublished"],
+                "publish RC-0001",
+            ),
+        )
+        for condition, statuses, next_command in cases:
+            with self.subTest(condition=condition), tempfile.TemporaryDirectory() as directory:
+                workspace = TestRevisitCycleStatusCli.make_status_workspace(
+                    Path(directory),
+                    condition,
+                )
+                before = snapshot_tree(workspace)
+                return_code, stdout, stderr = self.cli_at(
+                    workspace,
+                    "status",
+                    "--json",
+                )
+                self.assertEqual(0, return_code, stderr)
+                summary = json.loads(stdout)
+                self.assertEqual(
+                    statuses,
+                    [row["status"] for row in summary["cycles"]],
+                )
+                self.assertEqual(next_command, summary["next_legal_command"])
+
+                return_code, stdout, stderr = self.cli_at(workspace, "status")
+                self.assertEqual(0, return_code, stderr)
+                self.assertIn(f"NEXT LEGAL COMMAND: {next_command}", stdout)
+                for status in statuses:
+                    self.assertIn(f"STATUS: {status}", stdout)
+                self.assertEqual(before, snapshot_tree(workspace))
+
+                if condition == "active":
+                    return_code, stdout, stderr = self.cli_at(
+                        workspace,
+                        "status",
+                        "RC-0001",
+                        "--json",
+                    )
+                    self.assertEqual(0, return_code, stderr)
+                    self.assertEqual(
+                        ["RC-0001"],
+                        [
+                            row["cycle_id"]
+                            for row in json.loads(stdout)["cycles"]
+                        ],
+                    )
+                    return_code, _stdout, stderr = self.cli_at(
+                        workspace,
+                        "status",
+                        "RC-9999",
+                        "--json",
+                    )
+                    self.assertEqual(2, return_code)
+                    self.assertIn("cycle authority is missing", stderr)
+                    self.assertEqual(before, snapshot_tree(workspace))
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = TestRevisitCycleStatusCli.make_status_workspace(
+                Path(directory),
+                "empty",
+            )
+            revisit_contract.persist_cycle(
+                workspace,
+                make_history_cycle(1, 2, "completed"),
+                expected_sha256=None,
+            )
+            before = snapshot_tree(workspace)
+            return_code, stdout, stderr = self.cli_at(
+                workspace,
+                "status",
+                "--json",
+            )
+            self.assertEqual(0, return_code, stderr)
+            summary = json.loads(stdout)
+            self.assertTrue(summary["issues"])
+            self.assertIsNone(summary["next_legal_command"])
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_abort_validates_reason_persists_once_and_rejects_terminal_repeat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, request_path = make_revisit_start_workspace(root)
+            return_code, _stdout, stderr = self.cli_at(
+                workspace,
+                "start",
+                "--intake-file",
+                str(request_path),
+            )
+            self.assertEqual(0, return_code, stderr)
+
+            before_invalid = snapshot_tree(workspace)
+            return_code, _stdout, stderr = self.cli_at(
+                workspace,
+                "abort",
+                "RC-0001",
+                "--reason",
+                " ",
+            )
+            self.assertEqual(2, return_code)
+            self.assertIn("abort reason must be non-empty", stderr)
+            self.assertEqual(before_invalid, snapshot_tree(workspace))
+
+            reason = "The selected qualification proof is no longer available."
+            return_code, stdout, stderr = self.cli_at(
+                workspace,
+                "abort",
+                "RC-0001",
+                "--reason",
+                reason,
+                timestamp="2026-07-18T01:05:00Z",
+            )
+            self.assertEqual(0, return_code, stderr)
+            self.assertIn("REVISIT CYCLE ABORTED: RC-0001", stdout)
+            aborted = revisit_contract.load_cycle(workspace, "RC-0001")
+            self.assertEqual("aborted", aborted["status"])
+            self.assertEqual(reason, aborted["abort_reason"])
+            self.assertEqual("2026-07-18T01:05:00Z", aborted["aborted_at"])
+            self.assertEqual("abort", aborted["audit"][-1]["command"])
+            self.assertEqual(["RC-0001"], aborted["audit"][-1]["affected_ids"])
+            self.assertEqual(
+                revisit_contract.cycle_state_sha256(aborted),
+                aborted["audit"][-1]["post_state_sha256"],
+            )
+
+            before_repeat = snapshot_tree(workspace)
+            return_code, _stdout, stderr = self.cli_at(
+                workspace,
+                "abort",
+                "RC-0001",
+                "--reason",
+                "A second abort must be rejected.",
+            )
+            self.assertEqual(2, return_code)
+            self.assertIn("cannot abort cycle RC-0001 with status aborted", stderr)
+            self.assertEqual(before_repeat, snapshot_tree(workspace))
+
+    def test_emergent_derived_claim_rejects_bad_dispatch_then_persists_valid_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            invalid_request = make_emergent_claim_request()
+            invalid_request["accepted_from"]["dispatch_id"] = "dispatch_missing"
+            invalid_path = root / "invalid-derived-claim.json"
+            invalid_path.write_text(
+                json.dumps(invalid_request, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            before_invalid = snapshot_tree(workspace)
+            return_code, _stdout, stderr = self.cli_at(
+                workspace,
+                "add-derived-claim",
+                cycle_id,
+                "--request-file",
+                str(invalid_path),
+            )
+            self.assertEqual(2, return_code)
+            self.assertIn("dispatch", stderr.lower())
+            self.assertEqual(before_invalid, snapshot_tree(workspace))
+
+            valid_request = make_emergent_claim_request()
+            valid_path = root / "valid-derived-claim.json"
+            valid_path.write_text(
+                json.dumps(valid_request, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            dispatch_before = (workspace / "dispatch_log.jsonl").read_bytes()
+            source_before = (workspace / "sources" / "src-002.md").read_bytes()
+            return_code, stdout, stderr = self.cli_at(
+                workspace,
+                "add-derived-claim",
+                cycle_id,
+                "--request-file",
+                str(valid_path),
+                timestamp="2026-07-18T01:10:00Z",
+            )
+            self.assertEqual(0, return_code, stderr)
+            self.assertIn("DERIVED CLAIM ADDED: RC-0001-DC-01", stdout)
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(
+                "RC-0001-DC-01",
+                cycle["derived_claims"][0]["claim_id"],
+            )
+            self.assertEqual(
+                "cycle-pending-validation",
+                cycle["claim_resolutions"][1]["status"],
+            )
+            self.assertEqual(
+                "2026-07-18T01:10:00Z",
+                cycle["audit"][-1]["timestamp"],
+            )
+            self.assertEqual(
+                "add-derived-claim",
+                cycle["audit"][-1]["command"],
+            )
+            self.assertEqual(
+                ["RC-0001-DC-01"],
+                cycle["audit"][-1]["affected_ids"],
+            )
+            self.assertEqual(
+                revisit_contract.cycle_state_sha256(cycle),
+                cycle["audit"][-1]["post_state_sha256"],
+            )
+            self.assertEqual(
+                dispatch_before,
+                (workspace / "dispatch_log.jsonl").read_bytes(),
+            )
+            self.assertEqual(
+                source_before,
+                (workspace / "sources" / "src-002.md").read_bytes(),
+            )
+
+
+class TestTask9StoreAuthorityCoverage(unittest.TestCase):
+    def test_intake_loader_rejects_missing_malformed_and_non_object_without_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            missing = root / "missing-request.json"
+            before = snapshot_tree(root)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                r"intake request is missing: .*missing-request\.json",
+            ):
+                revisit_store.load_intake_request(missing)
+            self.assertEqual(before, snapshot_tree(root))
+
+            for name, payload in (
+                ("invalid-utf8.json", b"\xff"),
+                ("malformed.json", b"{broken"),
+            ):
+                with self.subTest(name=name):
+                    request_path = root / name
+                    request_path.write_bytes(payload)
+                    before = snapshot_tree(root)
+                    with self.assertRaisesRegex(
+                        revisit_contract.RevisitContractError,
+                        "intake request must be valid UTF-8 JSON",
+                    ):
+                        revisit_store.load_intake_request(request_path)
+                    self.assertEqual(before, snapshot_tree(root))
+
+            non_object = root / "non-object.json"
+            non_object.write_text("[]\n", encoding="utf-8")
+            before = snapshot_tree(root)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "request must be an object",
+            ):
+                revisit_store.load_intake_request(non_object)
+            self.assertEqual(before, snapshot_tree(root))
+
+    def test_public_path_artifact_and_history_rejections_are_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
+            artifact = workspace / "artifact.md"
+            artifact.write_bytes(b"trusted artifact\n")
+
+            before = snapshot_tree(workspace)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "workspace-relative path resolves to empty",
+            ):
+                revisit_contract.normalize_workspace_relative_path(".")
+            self.assertEqual(before, snapshot_tree(workspace))
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "artifact is not a file: missing.md",
+            ):
+                revisit_store.verify_workspace_artifact(
+                    workspace,
+                    "missing.md",
+                    "0" * 64,
+                )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "artifact hash mismatch: artifact.md",
+            ):
+                revisit_store.verify_workspace_artifact(
+                    workspace,
+                    "artifact.md",
+                    "0" * 64,
+                )
+            self.assertEqual(before, snapshot_tree(workspace))
+            relative, payload = revisit_store.verify_workspace_artifact(
+                workspace,
+                "artifact.md",
+                hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            )
+            self.assertEqual("artifact.md", relative)
+            self.assertEqual(b"trusted artifact\n", payload)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+            cycles = workspace / revisit_contract.CYCLES_DIRNAME
+            cycles.write_bytes(b"not a directory\n")
+            before = snapshot_tree(workspace)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "cycle authority directory is not a directory",
+            ):
+                revisit_contract.list_cycle_ids(workspace)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_persistence_rejects_stale_and_foreign_authorities_without_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            foreign_workspace = root / "foreign"
+            workspace.mkdir()
+            foreign_workspace.mkdir()
+            pointer = revisit_contract.empty_pointer()
+
+            before = snapshot_tree(workspace)
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "authority disappeared before write: revisit_contract.json",
+            ):
+                revisit_contract.persist_pointer(
+                    workspace,
+                    pointer,
+                    expected_sha256="0" * 64,
+                )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+            foreign_session = revisit_generation.ObservedReadSession(
+                foreign_workspace
+            )
+            self.assertIsNone(foreign_session.read_optional("absent.txt"))
+            foreign_closure = foreign_session.freeze()
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "generation_closure workspace must equal the locked workspace",
+            ):
+                revisit_contract.persist_pointer(
+                    workspace,
+                    pointer,
+                    expected_sha256=None,
+                    generation_closure=foreign_closure,
+                )
+            self.assertEqual(before, snapshot_tree(workspace))
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "generation_closure workspace must equal the locked workspace",
+            ):
+                revisit_contract.persist_cycle(
+                    workspace,
+                    make_minimal_cycle(),
+                    expected_sha256=None,
+                    generation_closure=foreign_closure,
+                )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+            foreign_authority = foreign_workspace / "authority.md"
+            foreign_authority.write_bytes(b"foreign authority\n")
+            foreign_snapshot = revisit_store.prepare_authority_snapshot(
+                foreign_workspace,
+                foreign_authority,
+                hashlib.sha256(foreign_authority.read_bytes()).hexdigest(),
+            )
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "prepared snapshot belongs to a different workspace",
+            ):
+                revisit_contract.persist_pointer(
+                    workspace,
+                    pointer,
+                    expected_sha256=None,
+                    authority_snapshots=(foreign_snapshot,),
+                )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+            with self.assertRaisesRegex(
+                revisit_contract.RevisitContractError,
+                "snapshot authority escapes workspace",
+            ):
+                revisit_store.prepare_authority_snapshot(
+                    workspace,
+                    foreign_authority,
+                    hashlib.sha256(foreign_authority.read_bytes()).hexdigest(),
+                )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+
+class TestTask9CliAuthorityCoverage(unittest.TestCase):
+    def cli_at(
+        self,
+        workspace: Path,
+        *arguments: str,
+    ) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                revisit_cycle_cli,
+                "_utc_now_seconds",
+                return_value="2026-07-18T02:00:00Z",
+            ),
+            mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+            mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+        ):
+            return_code = revisit_cycle_cli.main(
+                [str(workspace), *arguments]
+            )
+        return return_code, stdout.getvalue(), stderr.getvalue()
+
+    def test_request_document_errors_exit_two_and_preserve_authorities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            missing = root / "missing-derived-claim.json"
+            before = snapshot_tree(workspace)
+            return_code, _stdout, stderr = self.cli_at(
+                workspace,
+                "add-derived-claim",
+                cycle_id,
+                "--request-file",
+                str(missing),
+            )
+            self.assertEqual(2, return_code)
+            self.assertRegex(
+                stderr,
+                r"derived claim request is missing: .*missing-derived-claim\.json",
+            )
+            self.assertEqual(before, snapshot_tree(workspace))
+
+            for name, payload, expected in (
+                (
+                    "malformed-derived-claim.json",
+                    b"{broken",
+                    "derived claim request must be valid UTF-8 JSON",
+                ),
+                (
+                    "non-object-derived-claim.json",
+                    b"[]\n",
+                    "derived claim request must contain an object",
+                ),
+            ):
+                with self.subTest(name=name):
+                    request_path = root / name
+                    request_path.write_bytes(payload)
+                    request_before = request_path.read_bytes()
+                    before = snapshot_tree(workspace)
+                    return_code, _stdout, stderr = self.cli_at(
+                        workspace,
+                        "add-derived-claim",
+                        cycle_id,
+                        "--request-file",
+                        str(request_path),
+                    )
+                    self.assertEqual(2, return_code)
+                    self.assertIn(expected, stderr)
+                    self.assertEqual(before, snapshot_tree(workspace))
+                    self.assertEqual(request_before, request_path.read_bytes())
+
+    def test_start_rejects_invalid_framing_frontier_and_ledger_authorities(self):
+        def mutate_framing_json(workspace: Path) -> None:
+            (workspace / "framing_contract.json").write_bytes(b"{broken")
+
+        def mutate_framing_incomplete(workspace: Path) -> None:
+            path = workspace / "framing_contract.json"
+            framing = json.loads(path.read_text(encoding="utf-8"))
+            del framing["time_horizon"]
+            path.write_text(
+                json.dumps(framing, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        def mutate_framing_mode(workspace: Path) -> None:
+            path = workspace / "framing_contract.json"
+            framing = json.loads(path.read_text(encoding="utf-8"))
+            framing["mode"] = "sector"
+            path.write_text(
+                json.dumps(framing, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        def mutate_framing_posture(workspace: Path) -> None:
+            path = workspace / "framing_contract.json"
+            framing = json.loads(path.read_text(encoding="utf-8"))
+            framing["research_posture"] = "fresh"
+            path.write_text(
+                json.dumps(framing, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        def mutate_frontier_mode(workspace: Path) -> None:
+            path = workspace / "frontier_registry.json"
+            registry = json.loads(path.read_text(encoding="utf-8"))
+            registry["mode"] = "sector"
+            path.write_text(
+                json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        def mutate_ledger_encoding(workspace: Path) -> None:
+            (workspace / "evidence_ledger.md").write_bytes(b"\xff")
+
+        def mutate_ledger_header(workspace: Path) -> None:
+            (workspace / "evidence_ledger.md").write_text(
+                "# Evidence Ledger\n\n## Loop malformed\n",
+                encoding="utf-8",
+            )
+
+        cases = (
+            (
+                "framing-json",
+                mutate_framing_json,
+                "framing_contract.json must be valid UTF-8 JSON",
+            ),
+            (
+                "framing-incomplete",
+                mutate_framing_incomplete,
+                "framing contract is invalid",
+            ),
+            (
+                "framing-mode",
+                mutate_framing_mode,
+                "framing contract is invalid: FRAMING_MODE_DRIFT",
+            ),
+            (
+                "framing-posture",
+                mutate_framing_posture,
+                "framing contract research_posture must be revisit",
+            ),
+            (
+                "frontier-mode",
+                mutate_frontier_mode,
+                "frontier registry mode must be ticker",
+            ),
+            (
+                "ledger-encoding",
+                mutate_ledger_encoding,
+                "evidence_ledger.md must be valid UTF-8",
+            ),
+            (
+                "ledger-header",
+                mutate_ledger_header,
+                "malformed loop header",
+            ),
+        )
+        for label, mutate, expected in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                workspace, request_path = make_revisit_start_workspace(root)
+                mutate(workspace)
+                request_before = request_path.read_bytes()
+                before = snapshot_tree(workspace)
+                return_code, _stdout, stderr = self.cli_at(
+                    workspace,
+                    "start",
+                    "--intake-file",
+                    str(request_path),
+                )
+                self.assertEqual(2, return_code)
+                self.assertIn(expected, stderr)
+                self.assertEqual(before, snapshot_tree(workspace))
+                self.assertEqual(request_before, request_path.read_bytes())
+
+    def test_source_authority_rejections_exit_two_without_cycle_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            request = make_emergent_claim_request()
+            request["accepted_from"]["evidence_refs"][0]["source_id"] = (
+                "src-999"
+            )
+            request_path = root / "missing-source-claim.json"
+            request_path.write_text(
+                json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(workspace)
+            return_code, _stdout, stderr = self.cli_at(
+                workspace,
+                "add-derived-claim",
+                cycle_id,
+                "--request-file",
+                str(request_path),
+            )
+            self.assertEqual(2, return_code)
+            self.assertIn("source_id is not registered: src-999", stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, cycle_id = make_task5_mutation_workspace(root)
+            request_path = root / "corrupt-cache-claim.json"
+            request_path.write_text(
+                json.dumps(
+                    make_emergent_claim_request(),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with (workspace / "sources_index.jsonl").open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write("{broken\n")
+            before = snapshot_tree(workspace)
+            return_code, _stdout, stderr = self.cli_at(
+                workspace,
+                "add-derived-claim",
+                cycle_id,
+                "--request-file",
+                str(request_path),
+            )
+            self.assertEqual(2, return_code)
+            self.assertIn("source cache failed validation", stderr)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_status_renders_current_report_drift_as_read_only_issue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = TestRevisitCycleStatusCli.make_status_workspace(
+                Path(directory),
+                "registered",
+            )
+            report = workspace / "reports" / "initial.md"
+            report.write_bytes(report.read_bytes() + b"drift\n")
+            before = snapshot_tree(workspace)
+
+            return_code, stdout, stderr = self.cli_at(
+                workspace,
+                "status",
+                "--json",
+            )
+            self.assertEqual(0, return_code, stderr)
+            summary = json.loads(stdout)
+            self.assertTrue(
+                any(
+                    issue.startswith("current_report_invalid:")
+                    for issue in summary["issues"]
+                )
+            )
+            self.assertIsNone(summary["next_legal_command"])
+
+            return_code, stdout, stderr = self.cli_at(workspace, "status")
+            self.assertEqual(0, return_code, stderr)
+            self.assertIn("ISSUE: current_report_invalid:", stdout)
+            self.assertIn("NEXT LEGAL COMMAND: none", stdout)
+            self.assertEqual(before, snapshot_tree(workspace))
+
+
+class TestTask9CoverageClosure(unittest.TestCase):
+    def cli_at(
+        self,
+        workspace: Path,
+        *arguments: str,
+    ) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                revisit_cycle_cli,
+                "_utc_now_seconds",
+                return_value="2026-07-18T03:00:00Z",
+            ),
+            mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+            mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+        ):
+            return_code = revisit_cycle_cli.main(
+                [str(workspace), *arguments]
+            )
+        return return_code, stdout.getvalue(), stderr.getvalue()
+
+    def test_dispatch_delivery_and_provenance_rejections_are_zero_write(self):
+        cases = (
+            (
+                "non-utf8-log",
+                "dispatch_log.jsonl must be valid UTF-8 JSONL",
+            ),
+            (
+                "malformed-json",
+                "dispatch_log.jsonl line 1 must be valid JSON",
+            ),
+            (
+                "non-object-record",
+                "dispatch_log.jsonl line 1 must contain an object",
+            ),
+            (
+                "empty-delivery-path",
+                "dispatch dispatch_0010_scout delivery_path must be non-empty text",
+            ),
+            (
+                "escaping-delivery-path",
+                "dispatch dispatch_0010_scout delivery path escapes workspace",
+            ),
+            (
+                "missing-delivery-path",
+                "dispatch dispatch_0010_scout delivery path is missing or not a file",
+            ),
+            (
+                "duplicate-record",
+                "dispatch dispatch_0010_scout has multiple matching records for loop_10",
+            ),
+            (
+                "undelivered-record",
+                "dispatch dispatch_0010_scout must have status delivered",
+            ),
+            (
+                "delivery-as-evidence",
+                "worker delivery is provenance only and cannot be accepted as artifact evidence",
+            ),
+        )
+        for case, expected in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                workspace, cycle_id = make_task5_mutation_workspace(root)
+                dispatch_path = workspace / "dispatch_log.jsonl"
+                request = make_emergent_claim_request()
+
+                if case == "non-utf8-log":
+                    dispatch_path.write_bytes(b"\xff")
+                elif case == "malformed-json":
+                    dispatch_path.write_text("{broken\n", encoding="utf-8")
+                elif case == "non-object-record":
+                    dispatch_path.write_text("[]\n", encoding="utf-8")
+                elif case == "duplicate-record":
+                    dispatch_path.write_text(
+                        dispatch_path.read_text(encoding="utf-8") * 2,
+                        encoding="utf-8",
+                    )
+                elif case in {
+                    "empty-delivery-path",
+                    "escaping-delivery-path",
+                    "missing-delivery-path",
+                    "undelivered-record",
+                }:
+                    record = json.loads(
+                        dispatch_path.read_text(encoding="utf-8")
+                    )
+                    if case == "empty-delivery-path":
+                        record["delivery_path"] = ""
+                    elif case == "escaping-delivery-path":
+                        record["delivery_path"] = "../outside.md"
+                    elif case == "missing-delivery-path":
+                        record["delivery_path"] = "scouts/missing.md"
+                    else:
+                        record["status"] = "queued"
+                    dispatch_path.write_text(
+                        json.dumps(record, ensure_ascii=False) + "\n",
+                        encoding="utf-8",
+                    )
+                elif case == "delivery-as-evidence":
+                    delivery = workspace / "scouts" / "loop_10_scout.md"
+                    request["accepted_from"]["evidence_refs"] = [
+                        {
+                            "kind": "artifact",
+                            "path": "scouts/loop_10_scout.md",
+                            "sha256": hashlib.sha256(
+                                delivery.read_bytes()
+                            ).hexdigest(),
+                            "locator": "Entire delivered worker output",
+                            "checked_at": "2026-07-14T12:00:00Z",
+                        }
+                    ]
+
+                request_path = root / f"{case}.json"
+                request_path.write_text(
+                    json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                before = snapshot_tree(root)
+                return_code, _stdout, stderr = self.cli_at(
+                    workspace,
+                    "add-derived-claim",
+                    cycle_id,
+                    "--request-file",
+                    str(request_path),
+                )
+                self.assertEqual(2, return_code)
+                self.assertIn(expected, stderr)
+                self.assertEqual(before, snapshot_tree(root))
+
+    def test_closure_backed_cycle_json_failure_restores_exact_authorities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
+            stable_authority = workspace / "authority.md"
+            stable_authority.write_bytes(b"stable authority\n")
+            original = make_minimal_cycle()
+            json_path, markdown_path = revisit_contract.persist_cycle(
+                workspace,
+                original,
+                expected_sha256=None,
+            )
+            session = revisit_generation.ObservedReadSession(workspace)
+            self.assertEqual(
+                b"stable authority\n",
+                session.read_required("authority.md"),
+            )
+            session.list_directory(
+                revisit_contract.CYCLES_DIRNAME,
+                recursive=False,
+            )
+            session.read_required(
+                f"{revisit_contract.CYCLES_DIRNAME}/RC-0001.json"
+            )
+            session.read_required(
+                f"{revisit_contract.CYCLES_DIRNAME}/RC-0001.md"
+            )
+            closure = session.freeze()
+
+            updated = make_minimal_cycle()
+            updated["status"] = "ready_for_report"
+            attach_valid_audit(updated)
+            before = snapshot_tree(workspace)
+            original_json = json_path.read_bytes()
+            original_markdown = markdown_path.read_bytes()
+            real_replace = os.replace
+
+            def fail_cycle_json(source, destination):
+                if Path(destination).name == "RC-0001.json":
+                    raise OSError("closure cycle JSON replace failed")
+                return real_replace(source, destination)
+
+            with mock.patch(
+                "scripts.revisit_contract.store.os.replace",
+                side_effect=fail_cycle_json,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "closure cycle JSON replace failed",
+                ):
+                    revisit_contract.persist_cycle(
+                        workspace,
+                        updated,
+                        expected_sha256=hashlib.sha256(
+                            original_json
+                        ).hexdigest(),
+                        generation_closure=closure,
+                    )
+
+            self.assertEqual(original_json, json_path.read_bytes())
+            self.assertEqual(original_markdown, markdown_path.read_bytes())
+            self.assertEqual(b"stable authority\n", stable_authority.read_bytes())
+            self.assertEqual(before, snapshot_tree(workspace))
+
+    def test_second_start_rejects_active_cycle_without_authority_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, request_path = make_revisit_start_workspace(root)
+            return_code, stdout, stderr = self.cli_at(
+                workspace,
+                "start",
+                "--intake-file",
+                str(request_path),
+            )
+            self.assertEqual(0, return_code, stderr)
+            self.assertIn("REVISIT CYCLE STARTED: RC-0001", stdout)
+
+            pointer_path = workspace / revisit_contract.POINTER_FILENAME
+            cycle_json = (
+                workspace
+                / revisit_contract.CYCLES_DIRNAME
+                / "RC-0001.json"
+            )
+            cycle_markdown = cycle_json.with_suffix(".md")
+            authority_bytes = {
+                "pointer": pointer_path.read_bytes(),
+                "cycle_json": cycle_json.read_bytes(),
+                "cycle_markdown": cycle_markdown.read_bytes(),
+                "request": request_path.read_bytes(),
+            }
+            before = snapshot_tree(root)
+            return_code, stdout, stderr = self.cli_at(
+                workspace,
+                "start",
+                "--intake-file",
+                str(request_path),
+            )
+
+            self.assertEqual(2, return_code)
+            self.assertNotIn("REVISIT CYCLE STARTED", stdout)
+            self.assertIn("cycle conflict: RC-0001 is active", stderr)
+            self.assertEqual(authority_bytes["pointer"], pointer_path.read_bytes())
+            self.assertEqual(authority_bytes["cycle_json"], cycle_json.read_bytes())
+            self.assertEqual(
+                authority_bytes["cycle_markdown"],
+                cycle_markdown.read_bytes(),
+            )
+            self.assertEqual(authority_bytes["request"], request_path.read_bytes())
+            self.assertEqual(before, snapshot_tree(root))
+
+
+class TestTask9RepresentativeWorkflows(unittest.TestCase):
+    def test_three_copied_fixture_rows_publish_without_reducing_research_floors(self):
+        fixture_root = REPO_ROOT / "tests" / "fixtures" / "revisit_completed_ticker"
+        old_report_relative = "reports/AXTI_SOFA_Report_2026-07-01.md"
+        historical_reruns = (
+            "financials/AXTI_bridge.md",
+            "redteam/round1_redteam.md",
+            "redteam/round1_defense.md",
+            "redteam/thesis_revision.md",
+        )
+
+        def cli_at(workspace: Path, timestamp: str, *arguments: str):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    revisit_cycle_cli,
+                    "_utc_now_seconds",
+                    return_value=timestamp,
+                ),
+                mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+            ):
+                return_code = revisit_cycle_cli.main(
+                    [str(workspace), *arguments]
+                )
+            return return_code, stdout.getvalue(), stderr.getvalue()
+
+        def require_cli(
+            workspace: Path,
+            timestamp: str,
+            *arguments: str,
+        ) -> str:
+            return_code, stdout, stderr = cli_at(
+                workspace,
+                timestamp,
+                *arguments,
+            )
+            self.assertEqual(0, return_code, stderr)
+            return stdout
+
+        def prepare_assessed_row(root: Path, change_class: str):
+            workspace = root / "workspace"
+            shutil.copytree(fixture_root, workspace)
+            immutable_bytes = {
+                relative: (workspace / relative).read_bytes()
+                for relative in (old_report_relative, *historical_reruns)
+            }
+
+            require_cli(
+                workspace,
+                "2026-07-18T00:00:00Z",
+                "register-current",
+                "--report",
+                old_report_relative,
+                "--action-class",
+                "Watch with Trigger",
+            )
+            framing = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    str(REPO_ROOT / "scripts" / "framing_intake.py"),
+                    str(workspace),
+                    "set",
+                    "--field",
+                    "research_posture",
+                    "--value",
+                    "revisit",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+            )
+            self.assertEqual(0, framing.returncode, framing.stderr)
+            self.assertEqual("revisit", load_contract(workspace)["research_posture"])
+
+            claim_ledger = workspace / "claim_ledger.md"
+            request = {
+                "triggers": [
+                    {
+                        "kind": "downgrade",
+                        "statement": (
+                            "The named AXTI customer qualification milestone moved "
+                            "beyond the prior watch window."
+                        ),
+                        "observed_at": "2026-07-18T00:01:00Z",
+                        "evidence_refs": [
+                            {
+                                "kind": "source",
+                                "source_id": "src-001",
+                                "checked_at": "2026-07-18T00:01:00Z",
+                            }
+                        ],
+                    }
+                ],
+                "selected_claims": [
+                    {
+                        "statement": (
+                            "AXTI customer qualification completes inside the "
+                            "prior watch window."
+                        ),
+                        "source_ref": {
+                            "path": "claim_ledger.md",
+                            "sha256": hashlib.sha256(
+                                claim_ledger.read_bytes()
+                            ).hexdigest(),
+                            "locator": "Claim C1 - Customer qualification",
+                            "historical_claim_id": "C1",
+                        },
+                        "importance": "critical",
+                        "selection_reasons": [
+                            "trigger_affected",
+                            "decision_load_bearing",
+                        ],
+                        "trigger_indexes": [1],
+                        "inherited_grade": "B",
+                        "inherited_confidence": "medium",
+                        "inherited_evidence": [
+                            {
+                                "ref": {
+                                    "kind": "source",
+                                    "source_id": "src-001",
+                                    "checked_at": "2026-07-01T12:00:00Z",
+                                },
+                                "freshness": "stale",
+                                "checked_at": "2026-07-01T12:00:00Z",
+                                "reason": (
+                                    "The source predates the fired qualification trigger."
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            }
+            request_path = root / f"{change_class}-request.json"
+            request_path.write_text(
+                json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            require_cli(
+                workspace,
+                "2026-07-18T00:01:00Z",
+                "start",
+                "--intake-file",
+                str(request_path),
+            )
+            cycle_id = "RC-0001"
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(
+                9,
+                cycle["intake"]["workspace_boundary"][
+                    "max_existing_loop_number"
+                ],
+            )
+
+            registry_path = workspace / "frontier_registry.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry = transition(
+                registry,
+                "F1",
+                "Active",
+                {"F1": 3, "F2": 0},
+                mode="ticker",
+                action="reactivate",
+                at_loop=10,
+                ts="2026-07-18T00:02:00Z",
+            )
+            registry_path.write_text(
+                json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            require_cli(
+                workspace,
+                "2026-07-18T00:03:00Z",
+                "bind-frontier",
+                cycle_id,
+                "--frontier",
+                "F1",
+                "--action",
+                "reactivated",
+                "--claim",
+                f"{cycle_id}-CL-01",
+                "--expected-evidence",
+                "Current AXTI qualification evidence and counter-evidence.",
+            )
+
+            historical_dossier = b"".join(
+                (workspace / relative).read_bytes()
+                for relative in (
+                    old_report_relative,
+                    "claim_ledger.md",
+                    "evidence_ledger.md",
+                    "search_log.jsonl",
+                    "sources_index.jsonl",
+                    "sources/src-001.md",
+                    "sources/src-002.md",
+                )
+            )
+            contexts = {
+                role: revisit_context.build_revisit_context(
+                    workspace,
+                    cycle_id,
+                    "F1",
+                    (f"{cycle_id}-CL-01",),
+                    role,
+                    "loop_10",
+                )
+                for role in ("frontier_scout", "challenge_probe")
+            }
+            for role, context in contexts.items():
+                with self.subTest(change_class=change_class, role=role):
+                    self.assertLess(
+                        len(context.text.encode("utf-8")),
+                        len(historical_dossier),
+                    )
+                    for required in (
+                        cycle_id,
+                        "loop_10",
+                        "F1",
+                        f"{cycle_id}-CL-01",
+                    ):
+                        self.assertIn(required, context.text)
+                    self.assertNotIn("F2", context.text)
+                    self.assertNotIn("Omitted historical claim", context.text)
+            self.assertNotIn("src-002", contexts["frontier_scout"].text)
+            self.assertNotIn(
+                "AXTI manufacturing capacity construction schedule",
+                contexts["frontier_scout"].text,
+            )
+
+            index_path = workspace / "sources_index.jsonl"
+            source_bytes = {
+                path.relative_to(workspace).as_posix(): path.read_bytes()
+                for path in (workspace / "sources").glob("*.md")
+            }
+            index_bytes = index_path.read_bytes()
+            duplicate = add_source(
+                workspace,
+                url="https://qualification.example.test/milestone",
+                title="AXTI customer qualification update",
+                retrieved="2026-07-18",
+                grade="B",
+                excerpt_text=(workspace / "sources" / "src-001.md").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assertFalse(duplicate.created)
+            self.assertEqual("src-001", duplicate.source_id)
+            self.assertEqual(index_bytes, index_path.read_bytes())
+            self.assertEqual(
+                source_bytes,
+                {
+                    path.relative_to(workspace).as_posix(): path.read_bytes()
+                    for path in (workspace / "sources").glob("*.md")
+                },
+            )
+            self.assertEqual(
+                "stale",
+                revisit_contract.load_cycle(workspace, cycle_id)["intake"][
+                    "selected_claims"
+                ][0]["inherited_evidence"][0]["freshness"],
+            )
+
+            with (workspace / "evidence_ledger.md").open(
+                "a", encoding="utf-8"
+            ) as handle:
+                for loop_number in (10, 11, 12):
+                    handle.write(
+                        f"\n## Loop {loop_number}: F1 - Customer qualification timing\n\n"
+                        f"Cycle-relative AXTI evidence for loop {loop_number}.\n"
+                    )
+
+            search_path = workspace / "search_log.jsonl"
+            with search_path.open("a", encoding="utf-8") as handle:
+                for loop_number in (10, 11, 12):
+                    handle.write(
+                        json.dumps(
+                            {
+                                "loop_id": f"loop_{loop_number}",
+                                "query": (
+                                    f"AXTI post-trigger qualification evidence "
+                                    f"loop {loop_number}"
+                                ),
+                                "result_status": "completed",
+                                "dead_ends": [],
+                                "evidence_refs": ["src-001"],
+                            },
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
+
+            dispatch_path = workspace / "dispatch_log.jsonl"
+            with dispatch_path.open("a", encoding="utf-8") as dispatch_handle:
+                for loop_number in (10, 11, 12):
+                    for role, directory, suffix, cards in (
+                        (
+                            "frontier_scout",
+                            "scouts",
+                            "customer_qualification",
+                            "supply-chain-mapping, customer-graph-discovery",
+                        ),
+                        (
+                            "challenge_probe",
+                            "challenges",
+                            "challenge",
+                            (
+                                "red-team, supply-chain-mapping, "
+                                "customer-graph-discovery"
+                            ),
+                        ),
+                    ):
+                        relative = f"{directory}/loop{loop_number}_{suffix}.md"
+                        output_path = workspace / relative
+                        output_path.parent.mkdir(exist_ok=True)
+                        output_path.write_text(
+                            f"# {role} loop {loop_number}\n\n"
+                            f"Method cards loaded: {cards}.\n\n"
+                            "Sources consulted: src-001.\n\n"
+                            "Cycle-relative qualification evidence.\n",
+                            encoding="utf-8",
+                        )
+                        dispatch_handle.write(
+                            json.dumps(
+                                {
+                                    "dispatch_id": (
+                                        f"dispatch_loop_{loop_number}_{role}"
+                                    ),
+                                    "loop_id": f"loop_{loop_number}",
+                                    "role": role,
+                                    "mechanism": "host_subagent",
+                                    "delivery_path": relative,
+                                    "status": "delivered",
+                                },
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        )
+
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry = transition(
+                registry,
+                "F1",
+                "Continued",
+                {"F1": 6, "F2": 0},
+                mode="ticker",
+                action="review",
+                rationale="Three new loops completed the AXTI revisit review.",
+                at_loop=12,
+                ts="2026-07-18T00:12:00Z",
+            )
+            registry_path.write_text(
+                json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            resolution = make_confirmed_resolution_request()
+            resolution.update(
+                {
+                    "current_evidence_refs": [
+                        {
+                            "kind": "source",
+                            "source_id": "src-001",
+                            "checked_at": "2026-07-18T00:13:00Z",
+                        }
+                    ],
+                    "bound_frontier_ids": ["F1"],
+                    "rationale": (
+                        "Current AXTI evidence resolves the selected proposition."
+                    ),
+                }
+            )
+            resolution_path = root / f"{change_class}-resolution.json"
+            resolution_path.write_text(
+                json.dumps(resolution, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            require_cli(
+                workspace,
+                "2026-07-18T00:13:00Z",
+                "resolve-claim",
+                cycle_id,
+                f"{cycle_id}-CL-01",
+                "--resolution-file",
+                str(resolution_path),
+            )
+
+            assessment = make_decision_assessment_request()
+            if change_class == "financial_or_risk_change":
+                assessment.update(
+                    {
+                        "financial_bridge_affected": True,
+                        "financial_bridge_rationale": (
+                            "The accepted claim changes the affected revenue bridge."
+                        ),
+                    }
+                )
+            elif change_class == "action_class_change":
+                assessment.update(
+                    {
+                        "new_action_class": "Reject",
+                        "financial_bridge_affected": True,
+                        "financial_bridge_rationale": (
+                            "The action-class change requires a full bridge."
+                        ),
+                    }
+                )
+            assessment_path = root / f"{change_class}-assessment.json"
+            assessment_path.write_text(
+                json.dumps(assessment, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            require_cli(
+                workspace,
+                "2026-07-18T00:14:00Z",
+                "assess-decision",
+                cycle_id,
+                "--assessment-file",
+                str(assessment_path),
+            )
+            self.assertEqual(
+                change_class,
+                revisit_contract.load_cycle(workspace, cycle_id)[
+                    "decision_assessment"
+                ]["change_class"],
+            )
+            return workspace, cycle_id, immutable_bytes, contexts
+
+        def record_rerun_artifact(
+            workspace: Path,
+            cycle_id: str,
+            *,
+            timestamp: str,
+            kind: str,
+            relative: str,
+            scope: str | None = None,
+            round_number: int | None = None,
+            dispatch_role: str | None = None,
+        ) -> None:
+            artifact = workspace / relative
+            artifact.parent.mkdir(exist_ok=True)
+            card = "financial-bridge" if kind == "bridge" else "red-team"
+            artifact.write_text(
+                f"# {kind} rerun\n\nMethod cards loaded: {card}.\n\n"
+                "Sources consulted: src-001.\n\n"
+                f"Artifact: {relative}; scope: {scope}; round: {round_number}.\n",
+                encoding="utf-8",
+            )
+            arguments = [
+                "record-rerun",
+                cycle_id,
+                "--kind",
+                kind,
+                "--path",
+                relative,
+            ]
+            if scope is not None:
+                arguments.extend(("--scope", scope))
+            if round_number is not None:
+                arguments.extend(("--round", str(round_number)))
+            require_cli(workspace, timestamp, *arguments)
+            if dispatch_role is not None:
+                with (workspace / "dispatch_log.jsonl").open(
+                    "a", encoding="utf-8"
+                ) as handle:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "dispatch_id": (
+                                    f"dispatch_{kind}_{round_number or 0}"
+                                ),
+                                "loop_id": "loop_12",
+                                "role": dispatch_role,
+                                "mechanism": "host_subagent",
+                                "delivery_path": relative,
+                                "status": "delivered",
+                            },
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
+
+        def register_required_reruns(
+            workspace: Path,
+            cycle_id: str,
+            change_class: str,
+        ) -> None:
+            if change_class == "evidence_or_claim_only":
+                return
+            bridge_scope = (
+                "affected"
+                if change_class == "financial_or_risk_change"
+                else "full"
+            )
+            record_rerun_artifact(
+                workspace,
+                cycle_id,
+                timestamp="2026-07-18T00:15:00Z",
+                kind="bridge",
+                relative="financials/RC-0001_AXTI_bridge.md",
+                scope=bridge_scope,
+                dispatch_role="financial_bridge",
+            )
+            if change_class != "action_class_change":
+                return
+            minute = 16
+            for round_number in (1, 2):
+                record_rerun_artifact(
+                    workspace,
+                    cycle_id,
+                    timestamp=f"2026-07-18T00:{minute:02d}:00Z",
+                    kind="redteam-attack",
+                    relative=(
+                        f"redteam/RC-0001_round{round_number}_redteam.md"
+                    ),
+                    round_number=round_number,
+                    dispatch_role="red_team",
+                )
+                minute += 1
+                record_rerun_artifact(
+                    workspace,
+                    cycle_id,
+                    timestamp=f"2026-07-18T00:{minute:02d}:00Z",
+                    kind="redteam-defense",
+                    relative=(
+                        f"redteam/RC-0001_round{round_number}_defense.md"
+                    ),
+                    round_number=round_number,
+                )
+                minute += 1
+            record_rerun_artifact(
+                workspace,
+                cycle_id,
+                timestamp=f"2026-07-18T00:{minute:02d}:00Z",
+                kind="thesis-revision",
+                relative="redteam/RC-0001_thesis_revision.md",
+            )
+
+        def write_and_register_candidate(
+            workspace: Path,
+            cycle_id: str,
+            *,
+            timestamp: str,
+        ) -> Path:
+            metadata = require_cli(
+                workspace,
+                timestamp,
+                "render-report-metadata",
+                cycle_id,
+            )
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            self.assertEqual(revisit_contract.render_report_metadata(cycle), metadata)
+            report = workspace / "reports" / "AXTI_SOFA_Report_2026-07-18_REV-0002.md"
+            report.write_bytes(complete_revisit_report_bytes(cycle))
+            self.assertIn(metadata.encode("utf-8"), report.read_bytes())
+            require_cli(
+                workspace,
+                timestamp,
+                "register-report",
+                cycle_id,
+                "--report",
+                report.relative_to(workspace).as_posix(),
+            )
+            return report
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, cycle_id, immutable_bytes, _contexts = prepare_assessed_row(
+                root,
+                "action_class_change",
+            )
+            require_cli(
+                workspace,
+                "2026-07-18T00:25:00Z",
+                "check",
+                cycle_id,
+            )
+            write_and_register_candidate(
+                workspace,
+                cycle_id,
+                timestamp="2026-07-18T00:26:00Z",
+            )
+            return_code, _stdout, stderr = cli_at(
+                workspace,
+                "2026-07-18T00:26:00Z",
+                "check",
+                cycle_id,
+                "--final",
+            )
+            self.assertEqual(1, return_code)
+            self.assertIn("REVISIT_RERUN_ARTIFACT_MISSING", stderr)
+            self.assertEqual(
+                immutable_bytes,
+                {
+                    relative: (workspace / relative).read_bytes()
+                    for relative in immutable_bytes
+                },
+            )
+
+        for change_class in (
+            "evidence_or_claim_only",
+            "financial_or_risk_change",
+            "action_class_change",
+        ):
+            with self.subTest(change_class=change_class), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                workspace, cycle_id, immutable_bytes, contexts = prepare_assessed_row(
+                    root,
+                    change_class,
+                )
+
+                if change_class == "evidence_or_claim_only":
+                    probe = root / "unrelated-floor-probe"
+                    shutil.copytree(workspace, probe)
+                    search_path = probe / "search_log.jsonl"
+                    records = [
+                        json.loads(line)
+                        for line in search_path.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                    records = [
+                        record
+                        for record in records
+                        if record.get("loop_id") != "loop_12"
+                    ]
+                    records.append(
+                        {
+                            "loop_id": "loop_13",
+                            "query": "AXTI unrelated capacity follow-up",
+                            "result_status": "completed",
+                        }
+                    )
+                    search_path.write_text(
+                        "".join(
+                            json.dumps(record, separators=(",", ":")) + "\n"
+                            for record in records
+                        ),
+                        encoding="utf-8",
+                    )
+                    with (probe / "evidence_ledger.md").open(
+                        "a", encoding="utf-8"
+                    ) as handle:
+                        handle.write(
+                            "\n## Loop 13: F2 - Manufacturing capacity expansion\n\n"
+                            "Unrelated frontier evidence.\n"
+                        )
+                    before_probe = snapshot_tree(probe)
+                    probe_result = sofa_evaluate.evaluate_revisit_report(
+                        probe,
+                        cycle_id,
+                    )
+                    self.assertIn(
+                        "REVISIT_SEARCH_FLOOR_MISSING",
+                        [issue.code for issue in probe_result.failures],
+                    )
+                    self.assertEqual(before_probe, snapshot_tree(probe))
+
+                register_required_reruns(workspace, cycle_id, change_class)
+                require_cli(
+                    workspace,
+                    "2026-07-18T00:25:00Z",
+                    "check",
+                    cycle_id,
+                )
+                report = write_and_register_candidate(
+                    workspace,
+                    cycle_id,
+                    timestamp="2026-07-18T00:26:00Z",
+                )
+                require_cli(
+                    workspace,
+                    "2026-07-18T00:26:00Z",
+                    "check",
+                    cycle_id,
+                    "--final",
+                )
+
+                pointer_before = revisit_contract.load_pointer(workspace)
+                self.assertEqual(
+                    old_report_relative,
+                    pointer_before["current_revision"]["report_path"],
+                )
+                publish_events: list[tuple[str, str | None]] = []
+                real_persist_cycle = revisit_cycle_cli.persist_cycle
+                real_persist_pointer = revisit_cycle_cli.persist_pointer
+
+                def tracked_cycle(*args, **kwargs):
+                    publish_events.append(("cycle", args[1].get("status")))
+                    return real_persist_cycle(*args, **kwargs)
+
+                def tracked_pointer(*args, **kwargs):
+                    current = args[1].get("current_revision")
+                    publish_events.append(
+                        ("pointer", current.get("cycle_id") if current else None)
+                    )
+                    return real_persist_pointer(*args, **kwargs)
+
+                with (
+                    mock.patch.object(
+                        revisit_cycle_cli,
+                        "persist_cycle",
+                        side_effect=tracked_cycle,
+                    ),
+                    mock.patch.object(
+                        revisit_cycle_cli,
+                        "persist_pointer",
+                        side_effect=tracked_pointer,
+                    ),
+                ):
+                    require_cli(
+                        workspace,
+                        "2026-07-18T00:27:00Z",
+                        "publish",
+                        cycle_id,
+                    )
+
+                self.assertEqual(("pointer", cycle_id), publish_events[-1])
+                self.assertIn(("cycle", "completed"), publish_events[:-1])
+                pointer = revisit_contract.load_pointer(workspace)
+                self.assertEqual(
+                    report.relative_to(workspace).as_posix(),
+                    pointer["current_revision"]["report_path"],
+                )
+                self.assertEqual(
+                    hashlib.sha256(report.read_bytes()).hexdigest(),
+                    pointer["current_revision"]["report_sha256"],
+                )
+                self.assertEqual(
+                    "completed",
+                    revisit_contract.load_cycle(workspace, cycle_id)["status"],
+                )
+                ordinary = sofa_evaluate.evaluate_workspace(
+                    workspace,
+                    sofa_evaluate.ContractProfile(
+                        mode="ticker",
+                        target="final_report",
+                    ),
+                )
+                self.assertTrue(
+                    ordinary.passed,
+                    [issue.display() for issue in ordinary.failures],
+                )
+                self.assertEqual(
+                    immutable_bytes,
+                    {
+                        relative: (workspace / relative).read_bytes()
+                        for relative in immutable_bytes
+                    },
+                )
+                cycle = revisit_contract.load_cycle(workspace, cycle_id)
+                expected_rerun_counts = {
+                    "evidence_or_claim_only": 0,
+                    "financial_or_risk_change": 1,
+                    "action_class_change": 6,
+                }
+                self.assertEqual(
+                    expected_rerun_counts[change_class],
+                    len(cycle["rerun_artifacts"]),
+                )
+                for context in contexts.values():
+                    self.assertIn("loop_10", context.text)
+
+
+class TestTask9OfflineFixture(unittest.TestCase):
+    def test_completed_ticker_fixture_is_exact_immutable_and_semantically_valid(self):
+        fixture_root = REPO_ROOT / "tests" / "fixtures" / "revisit_completed_ticker"
+        self.assertTrue(
+            fixture_root.is_dir(),
+            f"missing Task 9 fixture root: {fixture_root}",
+        )
+
+        actual_paths = {
+            path.relative_to(fixture_root).as_posix()
+            for path in fixture_root.rglob("*")
+            if path.is_file()
+        }
+        expected_paths = set(TASK9_FIXTURE_PATHS)
+        self.assertEqual(
+            expected_paths,
+            actual_paths,
+            "Task 9 fixture path mismatch; "
+            f"missing={sorted(expected_paths - actual_paths)!r}; "
+            f"extra={sorted(actual_paths - expected_paths)!r}",
+        )
+        source_snapshot = snapshot_tree(fixture_root)
+
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root) / "workspace"
+            shutil.copytree(fixture_root, workspace)
+
+            state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual("AXTI", state["subject"])
+            self.assertEqual("ticker", state["mode"])
+
+            report_path = "reports/AXTI_SOFA_Report_2026-07-01.md"
+            report_result = sofa_evaluate._evaluate_specific_ticker_report_document(
+                report_path,
+                (workspace / report_path).read_bytes(),
+            )
+            self.assertTrue(
+                report_result.passed,
+                [issue.display() for issue in report_result.failures],
+            )
+
+            framing = load_contract(workspace)
+            framing_result = evaluate_contract(framing, state_mode="ticker")
+            self.assertTrue(framing_result.complete, framing_result.issues)
+            self.assertNotEqual("revisit", framing["research_posture"])
+
+            registry = json.loads(
+                (workspace / "frontier_registry.json").read_text(encoding="utf-8")
+            )
+            self.assertIs(registry, validate_registry(registry))
+            self.assertEqual(["F1", "F2"], [row["id"] for row in registry["frontiers"]])
+
+            source_result = evaluate_index(workspace)
+            self.assertEqual((), source_result.issues)
+            self.assertEqual(
+                ("src-001", "src-002"),
+                tuple(record["source_id"] for record in source_result.records),
+            )
+
+            digest = build_prior_query_digest(workspace)
+            self.assertTrue(any(group.dead_ends for group in digest))
+            self.assertEqual(
+                {"src-001", "src-002"},
+                {
+                    source_id
+                    for group in digest
+                    for source_id in group.source_identifiers
+                },
+            )
+
+            dispatch_result = sofa_evaluate.ContractResult()
+            dispatch_records = sofa_evaluate._read_dispatch_records(
+                workspace,
+                dispatch_result,
+            )
+            self.assertTrue(
+                dispatch_result.passed,
+                [issue.display() for issue in dispatch_result.failures],
+            )
+            self.assertEqual(10, len(dispatch_records or ()))
+
+            claim_ledger = (workspace / "claim_ledger.md").read_text(encoding="utf-8")
+            self.assertIn("Customer qualification", claim_ledger)
+            self.assertIn("Omitted historical claim", claim_ledger)
+            self.assertIn(
+                "Watch with Trigger",
+                (workspace / report_path).read_text(encoding="utf-8"),
+            )
+
+            self.assertEqual(source_snapshot, snapshot_tree(workspace))
+
+        self.assertEqual(source_snapshot, snapshot_tree(fixture_root))
