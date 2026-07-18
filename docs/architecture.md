@@ -131,11 +131,36 @@ The main analyst thread may decide whether a frontier should continue or retire.
 
 `scripts/workspace_contract/` is the deterministic source for workspace shape facts. It does not decide readiness; it gives setup and validation callers one place to ask which files, folders, ledgers, managed blocks, and worker-output paths belong to a SOFA workspace.
 
+## Revisit Contract
+
+The revisit contract is a Ticker-only append-only domain. `scripts/revisit_cycle.py` is its main-thread CLI; Sector Hunt, ordinary dispatch, action-class meanings, and existing research floors remain outside this surface. Its allowed dependency direction is:
+
+```text
+revisit_cycle.py -> revisit_contract
+revisit_cycle.py -> sofa_contract.revisit_readiness
+dispatch_assembly -> revisit_contract.context
+sofa_contract -> revisit_contract
+```
+
+The acyclic rule is explicit: **revisit_contract must not import sofa_contract**. `revisit_contract` owns cycle schema, validation, rendering, transitions, and persistence; `sofa_contract` remains the sole pass/fail verdict owner. The top-level CLI composes the two without moving verdict authority into the mutation domain.
+
+Authority is split by purpose, not duplicated:
+
+- **pointer authority**: `revisit_contract.json` names the exact canonical current Markdown path/hash and revision lineage;
+- **cycle authority**: `revisit_cycles/RC-####.json` owns immutable intake, trigger/claim/frontier facts, status, candidate, and audit; its Markdown mirror is deterministic human-readable narration, not a second authority;
+- report bytes become an immutable registered candidate before publication, while search, dispatch, source, framing, and frontier facts remain with their existing owners.
+
+Cycle commits use **mirror-first** and **JSON-last** persistence. Publication is report-first, then immutable-cycle-next (completed mirror first and completed cycle JSON last), and **pointer-last**. A pointer replacement failure therefore leaves the old current selection authoritative and exposes a completed-unpublished pointer-only retry instead of rewriting the completed cycle.
+
+`revisit_contract.context` is the role-safe context boundary for revisit Scout and Challenge packets: it selects only target-bound neutral facts, negative trace, and explicit source references, while the main thread keeps intake, acceptance, synthesis, lifecycle, and publication authority. Formal Red Team retains the complete current-thesis floor.
+
+The Phase 9 seam is limited to **stable typed facts** and immutable completed lineage. Phase 8 deliberately provides **no snapshot/compiler prebuild**: no persisted workspace snapshot, context compiler, migration layer, or general context manifest is introduced.
+
 ### Revisit Readiness And Observed-Read Consistency
 
 `scripts/sofa_contract/revisit_readiness.py` is the only revisit pre-report readiness seam. Direct (`evaluate_revisit_readiness(workspace, cycle_id)`), profile (`ContractProfile(target="revisit_report")`), and the real `check` command (`check_revisit_readiness`) share one global cycle history, one ordered thirteen-row semantic requirement plan, and one observed-read generation closure. No caller constructs an authority path list, a requested-source generation subset, or a manual authority union; the old CLI-side capture and the separate discovered-cycle semantic plan were deleted in favor of the single seam. `sofa_contract` remains the only readiness verdict authority; `revisit_readiness` composes existing domain owners (registry, framing, source cache, frontier floor, search, dispatch, worker-output) over preloaded bytes and returns strict facts plus a `ContractResult`, never a second verdict.
 
-`scripts/revisit_contract/generation.py` observes only the files, absences, resolved targets, and directory memberships that semantic owners actually consume during one evaluation. It caches the first observation per lexical path (and per `(relative_path, recursive)` key for directories), so a lexical authority read by multiple requirements is physically read once; freezing the session yields an immutable `GenerationClosure` whose `require_unchanged()` recheck detects byte drift, disappearance, same-byte target retarget, absence-to-appearance, and directory-member add/remove/rename/type-change. It is short-lived and in-memory only; it is neither a whole-workspace snapshot nor a Phase 9 context compiler or migration layer.
+`scripts/revisit_contract/generation.py` observes only the files, absences, resolved targets, and directory memberships that semantic owners actually consume during one evaluation. It caches the first observation per lexical path and captures direct membership once per lexical directory; recursive listings are composed from those cached direct snapshots, so no recursion mode creates a second generation. A lexical authority read by multiple requirements is physically read once; freezing the session yields an immutable `GenerationClosure` whose `require_unchanged()` recheck detects byte drift, disappearance, same-byte target retarget, absence-to-appearance, and directory-member add/remove/rename/type-change. It is short-lived and in-memory only; it is neither a whole-workspace snapshot nor a Phase 9 context compiler or migration layer.
 
 `scripts/revisit_contract/store.py` remains the transition, render, persistence, and rollback owner. When `persist_cycle` is given a `generation_closure`, it derives the only allowed mutation paths (`revisit_cycles/RC-NNNN.json` and its Markdown mirror) from the named cycle id, rechecks the unexcluded closure before and after the write through the package-private `_require_unchanged_except`, and restores exact prior bytes on a handled post-write drift. The consistency model is optimistic generation verification (a single boundary recheck plus a write-window recheck), not database-level multi-file atomicity; the workspace transaction remains re-entrant for cooperating writers but generation-closure rechecks are mandatory even while the lock is held. Any `LifecycleError` from canonical `frontier_lifecycle.validate_registry` maps to `REVISIT_FRONTIER_REGISTRY_MALFORMED`; any `AuthorityDriftError` from the closure maps to `REVISIT_AUTHORITY_DRIFT` at the exact lexical path. Malformed nested registry members can no longer be masked by a valid sibling, and a valid-but-unreferenced indexed excerpt that drifts after semantic use can no longer escape the consumed-generation closure.
 

@@ -15,10 +15,11 @@
 6. [Stage 4: Formal Red Team](#stage-4)
 7. [Stage 5: Final Verdict](#stage-5)
 8. [Stage 6: Watch Protocol](#stage-6)
-9. [Ticker Dive 模式要点](#ticker-dive)（简要，详见 `references/ticker-dive-guide.md`）
-10. [Sector Hunt 模式要点](#sector-hunt)（简要，详见 `references/sector-hunt-guide.md`）
-11. [主线程指南](#main-thread-guide)
-12. [搜索预算与停止规则](#search-budget)
+9. [Ticker Watch Revisit](#ticker-watch-revisit)
+10. [Ticker Dive 模式要点](#ticker-dive)（简要，详见 `references/ticker-dive-guide.md`）
+11. [Sector Hunt 模式要点](#sector-hunt)（简要，详见 `references/sector-hunt-guide.md`）
+12. [主线程指南](#main-thread-guide)
+13. [搜索预算与停止规则](#search-budget)
 
 ---
 
@@ -205,9 +206,9 @@ frontier 设计前读取 `framing_contract.json` 的 `research_posture`（Stage 
 - `fresh`：默认流程，无额外要求。
 - `verify-narrative`：第一个 frontier 必须对传入叙事取 contrarian 方向——传入叙事按 D 级线索处理，该 frontier 的 Key Claims 直接检验叙事最脆弱的前提。
 - `compare`：对比对象各自独立走完整 dive（两个 workspace 或先后两轮），最后做对比 synthesis；不新增研究模式。
-- `revisit`：本阶段仅记录；revisit 工作流属 Phase 8，落地前按 `fresh` 执行并在 workflow 中注明。
+- `revisit`：只有已完成的 Ticker workspace 加上明确的 fired trigger 或 revisit request，才转入 [Ticker Watch Revisit](#ticker-watch-revisit)；条件不完整时先澄清，不得静默回退为 `fresh`。Sector Hunt 不使用该路径。
 
-posture 只改变 frontier 设计模板；loop/challenge/red-team floors 不受任何 posture 或 `budget_appetite` 影响。
+`fresh`、`verify-narrative`、`compare` 只改变 frontier 设计模板；Ticker revisit 使用独立的 cycle-relative 工作流。任何 posture 或 `budget_appetite` 都不能降低 loop/challenge/red-team floors。
 
 ## Stage 2: Evidence Frontier Loop（核心引擎）{#stage-2}
 
@@ -590,6 +591,131 @@ Red Team 给出：
 1. 生成 Watch Protocol（基于 Stage 5 综合分析推理）
 2. 将最终报告写入文件：`{SUBJECT}_SOFA_Report_{YYYY-MM-DD}.md`
 3. 写入或复制到 `{WORKSPACE}/reports/` 目录
+4. Ticker / Ultra 的首次 Stage 6 完成必须显式登记 canonical current Markdown；新 workspace 在首次报告生成后登记，legacy completed workspace 只做一次 adoption：
+
+```bash
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" register-current --report "reports/{SUBJECT}_SOFA_Report_{YYYY-MM-DD}.md" --action-class "<ACTION_CLASS>"
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" status
+```
+
+Sector Hunt 的 map + ranked queue 与 Mapping and Queue Review Protocol 保持原流程，不登记 Ticker current pointer。
+
+---
+
+## Ticker Watch Revisit {#ticker-watch-revisit}
+
+本路径只处理“已完成 Ticker + 明确 fired trigger/revisit request”。主线程显式确认触发事实、发生证据和待复核 claim；不得自动检测 trigger、解析 Watch/Claim prose、运行 scheduler，或把 Sector Mapping 变成 revisit。CLI 的 `status`（必要时加 `--json`）与 cycle Markdown mirror 给出事实和下一合法动作；不要复制 schema，也不要手工改 JSON。
+
+### 1. Current registration 与 immutable intake
+
+Legacy completed workspace 如果还没有 current pointer，先执行上面的单次 `register-current`；已有 pointer 时不得重复 adoption。然后由 `framing_intake.py` 把当前主线程意图设为 `revisit`，准备只含显式 trigger/evidence/selected-claim 引用的临时 intake 文件，并启动 cycle：
+
+```bash
+python {PLUGIN_DIR}/scripts/framing_intake.py "{WORKSPACE}" set --field research_posture --value revisit
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" start --intake-file "<TEMP_INTAKE_REQUEST>.json"
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" status RC-####
+```
+
+这是 **no stage reset** 流程：旧 Stage 0–6 完成记录保留，`state.json` 不重置；新 loop/search/dispatch 继续追加，cycle JSON 与 mirror 记录本次进度。
+
+### 2. Delta frontiers 与 claims
+
+主线程只通过既有 lifecycle CLI 合法 reactivate 或 add/start frontier，然后在第一条新 loop 之前绑定 cycle；`--claim` 可重复，每个值必须已经存在于该 cycle，并由本次 `bind-frontier` 命令绑定到目标 frontier。Binding invariant: each --claim already exists in the cycle; this bind-frontier command binds it to the target frontier.
+
+```bash
+# Existing Continued frontier:
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" reactivate F#
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" bind-frontier RC-#### --frontier F# --action reactivated --claim RC-####-CL-## --expected-evidence "<EXPECTED_EVIDENCE>"
+
+# New delta frontier（使用 add 输出的 stable F#）：
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "<FRONTIER_NAME>" --source user --layer <0_TO_5> --at-loop <NEXT_GLOBAL_LOOP>
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F#
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" bind-frontier RC-#### --frontier F# --action added --claim RC-####-CL-## --expected-evidence "<EXPECTED_EVIDENCE>"
+```
+
+如果本轮证据产生 split-child 或主线程接受的 emergent claim，先通过结构化 request 登记：
+
+```bash
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" add-derived-claim RC-#### --request-file "<DERIVED_CLAIM_REQUEST>.json"
+
+# 1a. 创建并启动一个与任何已绑定 frontier 不同的新 eligible frontier：
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" add --name "<FRONTIER_NAME>" --source user --layer <0_TO_5> --at-loop <NEXT_GLOBAL_LOOP>
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" start F#
+
+# 或 1b. 合法重启另一个 eligible frontier：
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" reactivate F#
+
+# 2. 在该 frontier 的第一条新 loop 之前绑定刚登记的 derived claim；对 1a 只运行 added 路线：
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" bind-frontier RC-#### --frontier F# --action added --claim RC-####-DC-## --expected-evidence "<EXPECTED_EVIDENCE>"
+
+# 对 1b 只运行 reactivated 路线；不要与 added 路线同时执行：
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" bind-frontier RC-#### --frontier F# --action reactivated --claim RC-####-DC-## --expected-evidence "<EXPECTED_EVIDENCE>"
+```
+
+Flow invariant (no backfill): different eligible frontier -> bind derived claim -> three new loops (each: search + Scout + Challenge) -> new Frontier Review -> only then resolve.
+
+禁止把 derived claim 回填到已经绑定的 frontier。绑定完成后，严格按 Ticker Dive Steps 1-5 跑三条新 loop；每一条都必须完成 search + Scout + Challenge。第三条新 loop 后记录一次新的 Frontier Review，并按 review 事实选择合法 decision（下例为 `Continued`）：
+
+```bash
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" check-review
+python {PLUGIN_DIR}/scripts/frontier_review.py "{WORKSPACE}" record F# --decision Continued --rationale "<WHY_THIS_FRONTIER_REMAINS_IN_THE_DURABLE_QUEUE>"
+```
+
+完成上述 floor 和新 review 之后才允许 resolve；所有 selected/derived claims 都有主线程接受的 terminal resolution 后，才运行 decision assessment：
+
+```bash
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" resolve-claim RC-#### RC-####-DC-## --resolution-file "<CLAIM_RESOLUTION>.json"
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" assess-decision RC-#### --assessment-file "<DECISION_ASSESSMENT>.json"
+```
+
+### 3. Decision matrix 与 cycle-specific reruns
+
+`assess-decision` 从事实派生且只允许以下三行；共同前提始终包含 trigger/intake、delta frontier floors、Challenge、Frontier Review 与全部 claim outcomes：
+
+| Derived class | 额外最低要求 | 报告职责 |
+| --- | --- | --- |
+| `evidence_or_claim_only` | 不机械重跑 Financial Bridge 或 Formal Red Team | 解释 verdict 与 transmission 为何不变 |
+| `financial_or_risk_change` | affected-scope Financial Bridge recheck | 解释受影响 transmission，以及 action class 为何不变 |
+| `action_class_change` | full Financial Bridge recheck + 至少两轮新的 Formal Red Team、paired defenses、thesis revision | 解释 old/new action class 与 post-red-team verdict |
+
+只有 matrix 要求的 cycle-specific artifact 才登记；以下命令展示 parser 支持的精确 flag，按实际派生行选择，不要用旧 artifact 充数：
+
+```bash
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" record-rerun RC-#### --kind bridge --path "financials/RC-####_<TICKER>_bridge.md" --scope affected
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" record-rerun RC-#### --kind redteam-attack --path "redteam/RC-####_round1_redteam.md" --round 1
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" record-rerun RC-#### --kind redteam-defense --path "redteam/RC-####_round1_defense.md" --round 1
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" record-rerun RC-#### --kind thesis-revision --path "redteam/RC-####_thesis_revision.md"
+```
+
+`action_class_change` 的 bridge 命令把 `--scope` 改为 `full`，并为至少两轮 attack/defense 分别登记真实 `--round`；不得无条件运行或省略 matrix 规定的工作。
+
+### 4. Readiness、report 与 pointer-last publication
+
+所有 deterministic verdict 都通过 revisit CLI 调用 `sofa_contract`；主线程不直接调用内部 evaluator，也不手工编辑 authority：
+
+```bash
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" check RC-####
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" render-report-metadata RC-####
+# 将上条命令的 exact managed block 写入一份新的完整 REV-#### Markdown 报告。
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" register-report RC-#### --report "reports/<SUBJECT>_SOFA_Report_<YYYY-MM-DD>_REV-####.md"
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" check RC-#### --final
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" publish RC-####
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" status RC-####
+```
+
+`check` 的 passing pre-report 路径把 active cycle 审计为 `ready_for_report`；`--final` 只验证已登记的 exact candidate。`publish` 先完成 immutable cycle，再最后替换 current pointer。若 cycle 已完成而 pointer replace 失败，`status` 显示 `completed-unpublished`；修复操作环境后，对同一 `publish RC-####` 做 **pointer-only retry**，不得重写 immutable cycle 或另加 audit。
+
+需要停止时必须显式说明原因：
+
+```bash
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" abort RC-#### --reason "<NON_EMPTY_MAIN_THREAD_REASON>"
+```
+
+`abort` 只适用于 active/ready cycle，保留 ID 和 audit，且永不改变 current pointer；没有自动 abort 或自动 trigger。
+
+### 5. Search/reuse efficiency boundary
+
+项目边界是 **no new external search provider or tool**。Exact prior-query replay 必须声明一个 **variation dimension**（source/operator/language/time window/evidence hypothesis）和 **non-empty reason**；不能用相同 query 无解释重跑。Cached source reuse 必须保留 explicit freshness disposition，并且 **never implies truth or currentness**；search、Scout、Challenge 与 review floor 均不因此降低。
 
 ---
 

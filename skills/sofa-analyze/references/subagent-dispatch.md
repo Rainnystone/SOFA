@@ -100,6 +100,20 @@ The assembler fills the catalog-declared slots in the curated prompt template, c
 
 Name-field values (`--loop`, `--frontier-slug`, `--round`, `--ticker`, `--version`) are ASCII-only (`[A-Za-z0-9_-]`); romanize Chinese frontier names before using them in filenames.
 
+### Ticker revisit Scout/Challenge context
+
+For a revisit Scout or Challenge, append this optional group to the ordinary assembler command:
+
+```text
+--revisit-cycle RC-#### --frontier F# --claim RC-####-CL-## [--claim RC-####-DC-##]
+```
+
+The three field types are **all-or-none**: one cycle, one frontier, and at least one repeatable claim are required together, and revisit assembly also requires the ordinary `--loop` name field. Every claim must belong to that cycle and be legally bound to the target frontier.
+
+For these two isolated roles, revisit context **replaces the ordinary whole-workspace prior-query digest and source bibliography**. `revisit_contract.context` supplies only the target-filtered negative trace and explicitly referenced source IDs/raw excerpts; the existing forbidden-input screening still covers the packet, selected context, and final attachments. Unrelated frontier facts, interpreted positive trace, thesis, action class, confidence, framing intent, and prior worker conclusions stay out.
+
+**Non-revisit dispatch is unchanged.** Ordinary assembly keeps its existing digest/bibliography behavior and role fields. **Formal Red Team still receives the complete current thesis** and its existing input floor when the decision matrix requires that role; the isolated revisit attachment does not replace Formal Red Team or turn Challenge into Red Team.
+
 Degraded fallback (manual assembly):
 
 1. Read the standalone prompt template.

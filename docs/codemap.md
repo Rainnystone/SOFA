@@ -45,7 +45,7 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 | `scripts/source_cache/` + `scripts/archive_source.py` | `tests/test_source_cache.py`, `tests/test_cli_utf8_stdout.py` | Workspace source cache authority: index schema, append-only archival, hash dedupe, validation issue codes, source-id pattern, and bibliography rendering. Consumed by `sofa_contract` and `dispatch_assembly`. |
 | `scripts/sofa_contract/` | `tests/test_sofa_contract.py` | Shared compliance contract package for structured pass/fail/warn results and DSV4P-hardening checks; consumes `workspace_contract` for workspace shape facts and `worker_role_catalog` for role-specific dispatch and worker-output checks. |
 | `scripts/sofa_contract/revisit_readiness.py` | `tests/test_revisit_readiness.py` | Sole thirteen-row revisit readiness composition and atomic `check` orchestration; direct/profile/check share one global history, one ordered semantic plan, and one observed-read generation closure. Exports `evaluate_revisit_readiness`, `check_revisit_readiness`, `RevisitCheckEffect`, `RevisitCheckOutcome`. |
-| `scripts/revisit_contract/generation.py` | `tests/test_revisit_generation.py` | Observed-read file/absence/directory generations and immutable closure verification; caches first observation per lexical path and per `(relative_path, recursive)` directory key. Short-lived, in-memory only; consumed by readiness composition and persistence. |
+| `scripts/revisit_contract/generation.py` | `tests/test_revisit_generation.py` | Sole observed-read generation owner for file/absence/directory facts and immutable closure verification; captures direct membership once per lexical directory and composes recursive listings from cached direct snapshots. Short-lived, in-memory only; consumed by readiness composition and persistence. |
 | `scripts/frontier_lifecycle.py` | `tests/test_frontier_lifecycle.py` | Pure registry/lifecycle model: v2/v3 validation, explicit v2 adoption, layer binding, stable-ID loop facts, transitions, review due, portfolio limits, frontier layer coverage and advisories, and rendering. |
 | `scripts/frontier_review.py` | `tests/test_frontier_review_cli.py`, `tests/test_cli_utf8_stdout.py` | Parser and mutation orchestrator for lifecycle, `set-layers`, and `bind-layer`; owns shared render-before-write and two-file registry/workflow persistence. |
 | `scripts/loop_enforcer.py` | `tests/test_frontier_lifecycle.py`, `tests/test_frontier_gate.py` | Validate ledger loop headers against registry IDs from supplied canonical documents; direct standalone reads remain supported. |
@@ -53,10 +53,59 @@ Keep shared lifecycle language synchronized across `workflow-guide.md`, `ticker-
 | `scripts/timeliness_checker.py` | `tests/test_frontier_gate.py` | Consume the Stage 2 gate's preloaded ledger without a second read while retaining standalone behavior. |
 | `scripts/capability_check.py` | `tests/test_capability_check.py` | Detect optional search and financial-data capability availability. |
 | `scripts/generate_ultra_packet.py` | structure and workspace tests | Generate bounded Ultra Dive packets from Sector Hunt outputs. |
-| `scripts/run_coverage.py` | manual verification gate | Run cross-platform coverage for the lifecycle module. |
+| `scripts/run_coverage.py` | manual verification gate | Run the locked cross-platform `frontier` and `revisit` coverage targets with default frontier compatibility and no threshold weakening. |
 | report and score validators | structure and targeted validator tests | Validate scorecards, freshness, synthesis, red-team debate, and final dossiers. |
 
 If a script enforces a rule that appears in a guide, update both the script tests and the guide text in the same change.
+
+## Revisit Contract Change Path
+
+The current `scripts/revisit_contract/` package has six files. Keep generation ownership singular; do not move observed-read capture back into callers or omit `generation.py` from the package inventory.
+
+| Package file | Responsibility |
+| --- | --- |
+| `scripts/revisit_contract/__init__.py` | Stable package exports for revisit domain types and operations; generation internals remain private. |
+| `scripts/revisit_contract/context.py` | Role-safe, target-bound Scout/Challenge context from validated cycle/frontier/claim facts, filtered negative trace, and explicit source references. |
+| `scripts/revisit_contract/generation.py` | First-observed file/absence/direct-directory facts, recursive composition from cached direct snapshots, immutable closure, and exact drift detection. |
+| `scripts/revisit_contract/model.py` | Pointer/cycle schema vocabulary, validation, IDs, pure transitions, claim/frontier/decision rules, and report-lineage facts. |
+| `scripts/revisit_contract/render.py` | Deterministic cycle Markdown mirror and managed report-revision metadata rendering. |
+| `scripts/revisit_contract/store.py` | Pointer/cycle/history loading, path containment, workspace transaction, mirror-first/JSON-last persistence, closure exclusions, and exact rollback. |
+
+The user-facing CLI and sole readiness seam sit beside that package:
+
+| Path | Main tests | Responsibility |
+| --- | --- | --- |
+| `scripts/revisit_cycle.py` | `tests/test_revisit_contract.py`, `tests/test_cli_utf8_stdout.py` | Main-thread lifecycle CLI for registration, intake, binding, resolution, decision/rerun facts, checks, report registration, publication, status, and abort. |
+| `scripts/sofa_contract/revisit_readiness.py` | `tests/test_revisit_readiness.py` | Sole thirteen-row revisit readiness composition and atomic check orchestration over one observed-read closure. |
+
+Current approved integration owners are limited to the files below; `scripts/run_coverage.py` is verification support, not another domain or integration owner.
+
+| Integration files | Revisit responsibility |
+| --- | --- |
+| `scripts/workspace_contract/artifacts.py`, `scripts/init_workspace.py` | Declare and scaffold pointer/cycle authority paths without changing ordinary workspace ownership. |
+| `scripts/sofa_contract/workspace.py` | Own safe path containment and the exact Markdown byte-reading adapter; it does not select the current pointer or validate report hash, metadata, or required sections. Sector report behavior remains separate. |
+| `scripts/sofa_contract/__init__.py`, `scripts/sofa_contract/evaluate.py` | Export named/profile evaluation; `evaluate.py` owns pointer-selected current report evaluation, hash/metadata/required-section validation, and routing to the sole readiness seam while retaining ordinary contract gates. |
+| `scripts/dispatch_assembly/assemble.py`, `scripts/assemble_dispatch.py` | Accept all-or-none revisit cycle/frontier/claim inputs and replace ordinary attachments with role-safe context; non-revisit assembly is unchanged. |
+| `scripts/frontier_lifecycle.py` | Own canonical strict registry validation consumed by revisit readiness; lifecycle mutation semantics stay with the existing owner. |
+| `scripts/source_cache/store.py` | Expose preloaded-document evaluation so semantic reads and generation capture remain one operation; source schema is unchanged. |
+| `scripts/timeliness_checker.py` | Consume deterministic revisit freshness issues without inferring truth or a universal staleness threshold. |
+
+Core behavior lives in `tests/test_revisit_contract.py`, `tests/test_revisit_generation.py`, and `tests/test_revisit_readiness.py`, with representative prior completed state under `tests/fixtures/revisit_completed_ticker/`. Integration coverage is in `tests/test_dispatch_assembly.py`, `tests/test_sofa_contract.py`, `tests/test_frontier_lifecycle.py`, `tests/test_frontier_gate.py`, `tests/test_source_cache.py`, `tests/test_workspace_contract.py`, and `tests/test_workspace_scripts.py`; structure, UTF-8, and coverage-runner boundaries are locked by `tests/test_structure.py`, `tests/test_cli_utf8_stdout.py`, and `tests/test_run_coverage.py`.
+
+Run the locked revisit coverage target with:
+
+```bash
+python scripts/run_coverage.py --target revisit --fail-under 90
+```
+
+Use the smallest ownership route for future edits:
+
+| Change | Start here | Then verify |
+| --- | --- | --- |
+| Pointer changes | Pointer schema and persistence in `scripts/revisit_contract/model.py` and `scripts/revisit_contract/store.py`; scaffold facts in `scripts/workspace_contract/artifacts.py` only when the artifact inventory changes; pointer-selected current report evaluation and hash/metadata/required-section validation in `scripts/sofa_contract/evaluate.py`; safe path containment and the exact Markdown byte-reading adapter in `scripts/sofa_contract/workspace.py` | Revisit contract, workspace contract/scripts, and SOFA contract tests |
+| Schema changes | `scripts/revisit_contract/model.py`, then store/render/CLI consumers | Revisit contract/readiness tests plus explicit human approval for any public persistence change |
+| Context changes | `scripts/revisit_contract/context.py`, then `scripts/dispatch_assembly/assemble.py` and `scripts/assemble_dispatch.py` | Revisit contract and dispatch assembly tests; preserve isolated roles and ordinary dispatch bytes |
+| Report changes | Report rendering and mutation in `scripts/revisit_contract/render.py` and `scripts/revisit_cycle.py`; pointer-selected exact-report routing plus hash/metadata/required-section validation in `scripts/sofa_contract/evaluate.py`; safe path containment and the exact Markdown byte-reading adapter in `scripts/sofa_contract/workspace.py`; user guidance in `skills/sofa-analyze/references/final-report.md` | Revisit contract/readiness/SOFA contract tests plus the exact candidate/pointer workflow |
 
 ## Workspace Artifact Contract Change Path
 

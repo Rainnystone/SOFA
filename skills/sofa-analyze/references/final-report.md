@@ -198,10 +198,13 @@ Watch Protocol 的目标是让未来复盘有标准，而不是让 thesis 无限
    - `redteam/` 目录下 Red Team 辩论文件（round{N}_redteam.md + round{N}_defense.md + thesis_revision.md）
    - `maps/` 目录下供应链/客户链映射文件（如有）
 
-2. 调用 **docx 技能**（如可用）生成 Word 文档，否则生成 Markdown 文件
+2. 始终先生成完整 Markdown 报告；如需演示版且 **docx 技能**可用，再从已定稿 Markdown 派生 Word 文档
 
 3. 文件命名规则：
-   - `[SUBJECT]_SOFA_Report_[YYYY-MM-DD].md`（如可用 docx 技能，优先生成 `.docx`）
+   - 首次普通报告：`[SUBJECT]_SOFA_Report_[YYYY-MM-DD].md`
+   - Ticker revisit revision：`reports/<SUBJECT>_SOFA_Report_<YYYY-MM-DD>_REV-####.md`
+
+**Markdown is canonical; Word is only a derivative.** `.docx` 不进入 current pointer，也不能替代 Markdown readiness validation。
 
 ### Frontier Layer Snapshot 边界
 
@@ -217,7 +220,7 @@ Audit Appendix 必须包含 registry-derived Frontier Layer Snapshot，并明确
 **研究日期**: YYYY-MM-DD
 **研究模式**: [Ticker Dive / Ultra Dive / Sector Hunt]
 [以下两行只保留当前研究模式对应的一行]
-**最终 Action Class（Ticker Dive / Ultra Dive only）**: [Act / Watch / Trade-only / Basket-only / Reject / Needs Primary Evidence]
+**最终 Action Class（Ticker Dive / Ultra Dive only）**: [Act / Watch with Trigger / Trade-only / Basket-only / Reject / Needs Primary Evidence]
 **最终输出（Sector Hunt only）**: Map + Ranked Candidate Queue
 **Confidence**: [High / Medium / Low]
 **Time Horizon**: [6 months / 1-2 years / 3-5 years]
@@ -361,3 +364,39 @@ Audit Appendix 必须包含 registry-derived Frontier Layer Snapshot，并明确
    - "存在不确定性"（改为具体是什么不确定性、需要什么证据才能消除）
    - "值得深入研究"（改为具体研究什么、用什么方法、什么结果会改变判断）
    - "可能有机会也可能有风险"（改为在什么条件下有机会、什么条件下有风险）
+
+## Ticker Revisit Revision Contract
+
+Ticker revisit 不是 delta memo，而是一份新的完整 current report。它必须保留 **every ordinary Ticker report section**，并在正文中增加以下七个 cycle-relative areas；不要复制 cycle schema，事实以 CLI `status`/mirror 为准：
+
+1. `Revisit Revision Metadata`
+2. `Trigger Delta`
+3. `Claim Delta`
+4. `Evidence Freshness Delta`
+5. `Frontier Delta`
+6. `Financial/Red-Team Delta`
+7. `Unresolved or Blocked Gaps`
+
+Blocked claim 必须在第七项披露 missing proof、attempted paths 与 verdict impact；它没有继承的 current grade，不得进入 positive support。报告文件名必须包含 cycle 已预留的 `REV-####`，且不能覆盖 base 或旧 revision。
+
+主线程在 pre-report `check` 通过后，用下列精确命令取得 managed metadata block：
+
+```bash
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" render-report-metadata RC-####
+```
+
+把命令输出的 exact block 原样置入完整 Markdown，再只登记一次 candidate：
+
+```bash
+python {PLUGIN_DIR}/scripts/revisit_cycle.py "{WORKSPACE}" register-report RC-#### --report "reports/<SUBJECT>_SOFA_Report_<YYYY-MM-DD>_REV-####.md"
+```
+
+`register-report` 锁定 path、hash 和 **immutable candidate bytes**。登记后任何 byte change 都是 integrity drift；不能再次登记来“认可”修改后的文件，只能恢复原 bytes 或显式 abort，修正版使用新的 cycle/revision ID。
+
+Canonical current selection 只读取 `revisit_contract.json` 指向的 exact Markdown path/hash，并验证对应 lineage；文件名、mtime、目录顺序或另一个旧报告都不能替代它。Publication commit points 固定为：
+
+1. **report-first**：完整 report 已写入、含 exact metadata、并完成一次 candidate registration；
+2. **immutable-cycle-next**：`publish` 在 final `sofa_contract` pass 后先原子写 completed mirror、再以 **JSON-last** 写 completed cycle authority；
+3. **pointer-last**：最后才替换 current pointer，失败时旧 pointer 仍是 canonical current。
+
+如果 cycle 已完成但最后 pointer replace 失败，`status` 会报告 `completed-unpublished`。修复操作条件后，对同一 cycle 执行 **pointer-only retry**；重跑 `publish` 只重验并替换 pointer，不重写 immutable cycle、不追加第二条 audit。
