@@ -408,6 +408,8 @@ def _observe_optional_file(
     """
     try:
         return session.read_optional(relative_path), None
+    except AuthorityDriftError:
+        raise
     except RevisitContractError as exc:
         return None, exc
 
@@ -614,6 +616,8 @@ def _evaluate_source_cache_from_session(
             recursive=True,
             optional=True,
         )
+    except AuthorityDriftError:
+        raise
     except RevisitContractError as exc:
         evaluation = SourceCacheEvaluation(
             (),
@@ -685,6 +689,8 @@ def _load_worker_output_facts(
                 recursive=False,
                 optional=True,
             )
+        except AuthorityDriftError:
+            raise
         except RevisitContractError as exc:
             errors.append((dirname, str(exc)))
             continue
@@ -905,6 +911,8 @@ def _load_history_facts(context: _ReadinessContext) -> None:
             recursive=False,
             optional=False,
         )
+    except AuthorityDriftError:
+        raise
     except RevisitContractError as exc:
         context.history_load_issues.append(
             (

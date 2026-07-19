@@ -18,6 +18,7 @@ module's public seam.
 from __future__ import annotations
 
 import hashlib
+import io
 import errno
 import json
 import os
@@ -67,6 +68,11 @@ from tests.test_revisit_contract import (  # noqa: E402
 )
 
 import revisit_contract  # noqa: E402
+import revisit_cycle as revisit_cycle_cli  # noqa: E402
+from revisit_contract.generation import (  # noqa: E402
+    AuthorityDriftError,
+    GenerationDrift,
+)
 
 
 EXPECTED_REQUIREMENT_IDS = (
@@ -3045,6 +3051,144 @@ class TestReadOnlyReadinessIOAndDrift(unittest.TestCase):
         self.assertIn("revisit_cycles/RC-0001.json", read_paths)
         self.assertIn("revisit_cycles/RC-0002.json", read_paths)
         self.assertIn(excerpt_rel, read_paths)
+
+
+class TestInitialAuthorityDriftPropagation(unittest.TestCase):
+    """Initial adapter drift must retain the one public drift category."""
+
+    def _assert_initial_drift_across_public_routes(
+        self,
+        *,
+        operation: str,
+        adapter_path: str,
+        drift_path: str,
+        prepare_workspace=None,
+    ) -> None:
+        for route in ("direct", "profile", "cli"):
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as temp_dir:
+                workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+                if prepare_workspace is not None:
+                    prepare_workspace(workspace)
+                prior_tree = snapshot_tree(workspace)
+
+                if operation == "read_optional":
+                    real_operation = readiness_mod.ObservedReadSession.read_optional
+
+                    def inject_drift(session, relative_path):
+                        if relative_path == adapter_path:
+                            raise AuthorityDriftError(
+                                GenerationDrift(
+                                    drift_path,
+                                    "simulated initial file drift",
+                                )
+                            )
+                        return real_operation(session, relative_path)
+
+                elif operation == "list_directory":
+                    real_operation = readiness_mod.ObservedReadSession.list_directory
+
+                    def inject_drift(
+                        session,
+                        relative_path,
+                        *,
+                        recursive,
+                        optional=False,
+                    ):
+                        if relative_path == adapter_path:
+                            raise AuthorityDriftError(
+                                GenerationDrift(
+                                    drift_path,
+                                    "simulated initial directory drift",
+                                )
+                            )
+                        return real_operation(
+                            session,
+                            relative_path,
+                            recursive=recursive,
+                            optional=optional,
+                        )
+
+                else:
+                    self.fail(f"unsupported observed operation: {operation}")
+
+                with mock.patch.object(
+                    readiness_mod.ObservedReadSession,
+                    operation,
+                    inject_drift,
+                ):
+                    if route == "direct":
+                        result = evaluate_revisit_readiness(workspace, cycle_id)
+                        failures = result.failures
+                    elif route == "profile":
+                        result = evaluate_workspace(
+                            workspace,
+                            ContractProfile(mode="ticker", target="revisit_report"),
+                        )
+                        failures = result.failures
+                    else:
+                        stdout = io.StringIO()
+                        stderr = io.StringIO()
+                        with (
+                            mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                            mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                        ):
+                            exit_code = revisit_cycle_cli.main(
+                                [
+                                    str(workspace),
+                                    "check",
+                                    cycle_id,
+                                    "--final",
+                                    "--json",
+                                ]
+                            )
+                        output = stdout.getvalue()
+                        error_output = stderr.getvalue()
+                        self.assertEqual(1, exit_code, error_output)
+                        self.assertNotIn("Traceback", output + error_output)
+                        failures = json.loads(output)["failures"]
+
+                if route == "cli":
+                    self.assertEqual(
+                        [("REVISIT_AUTHORITY_DRIFT", drift_path)],
+                        [(issue["code"], issue["path"]) for issue in failures],
+                    )
+                else:
+                    self.assertEqual(
+                        [("REVISIT_AUTHORITY_DRIFT", drift_path)],
+                        [(issue.code, issue.path) for issue in failures],
+                    )
+                self.assertEqual(prior_tree, snapshot_tree(workspace))
+
+    def test_initial_observed_file_drift_is_exact_across_public_routes(self):
+        self._assert_initial_drift_across_public_routes(
+            operation="read_optional",
+            adapter_path="state.json",
+            drift_path="state.json",
+        )
+
+    def test_initial_sources_membership_drift_is_exact_across_public_routes(self):
+        self._assert_initial_drift_across_public_routes(
+            operation="list_directory",
+            adapter_path="sources",
+            drift_path="sources/new-source.md",
+        )
+
+    def test_initial_worker_output_drift_is_exact_across_public_routes(self):
+        self._assert_initial_drift_across_public_routes(
+            operation="list_directory",
+            adapter_path="scouts",
+            drift_path="scouts/new-scout.md",
+            prepare_workspace=lambda workspace: (workspace / "scouts").mkdir(
+                exist_ok=True
+            ),
+        )
+
+    def test_initial_cycle_history_drift_is_exact_across_public_routes(self):
+        self._assert_initial_drift_across_public_routes(
+            operation="list_directory",
+            adapter_path="revisit_cycles",
+            drift_path="revisit_cycles/RC-9999.json",
+        )
 
 
 class TestUnexpectedIoReadinessBoundary(unittest.TestCase):
