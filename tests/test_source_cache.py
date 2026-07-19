@@ -273,6 +273,106 @@ class EvaluateIndexTests(unittest.TestCase):
             self.assertIn("sha256", " ".join(issue.message for issue in evaluation.issues))
             self.assertEqual(frozenset(), registered_source_ids(workspace))
 
+    def test_indexed_excerpt_permission_error_is_malformed_and_later_record_is_evaluated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            add_fixture_source(
+                workspace,
+                url="https://www.sec.gov/acme-10k-risk",
+                title="FY2025 10-K — Risk Factors",
+                excerpt_text="Risk factors: single-source substrate dependency.\n",
+            )
+            denied_path = workspace / SOURCES_DIRNAME / "src-001.md"
+            (workspace / SOURCES_DIRNAME / "src-002.md").write_text(
+                "Edited after indexing.\n", encoding="utf-8"
+            )
+            (workspace / SOURCES_DIRNAME / "later-orphan.md").write_text(
+                "Unregistered later file.\n", encoding="utf-8"
+            )
+            original_read_bytes = Path.read_bytes
+
+            def read_bytes(path: Path) -> bytes:
+                if path == denied_path:
+                    raise PermissionError(13, "access denied")
+                return original_read_bytes(path)
+
+            with patch.object(Path, "read_bytes", new=read_bytes):
+                evaluation = evaluate_index(workspace)
+
+            self.assertEqual(["src-001", "src-002"], [record["source_id"] for record in evaluation.records])
+            self.assertEqual(
+                [
+                    SourceIssue(
+                        "SOURCE_INDEX_MALFORMED",
+                        "sources/src-001.md",
+                        "src-001 excerpt cannot be read as UTF-8 text: [Errno 13] access denied",
+                    ),
+                    SourceIssue(
+                        "SOURCE_INDEX_MALFORMED",
+                        "sources/src-002.md",
+                        "src-002 sha256 does not match excerpt contents",
+                    ),
+                ],
+                list(evaluation.issues),
+            )
+            self.assertEqual(
+                [
+                    SourceIssue(
+                        "SOURCE_EXCERPT_UNREGISTERED",
+                        "sources/later-orphan.md",
+                        "file in sources/ has no index record",
+                    )
+                ],
+                list(evaluation.warnings),
+            )
+
+    def test_indexed_excerpt_read_disappearance_is_malformed_not_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            disappeared_path = workspace / SOURCES_DIRNAME / "src-001.md"
+            original_read_bytes = Path.read_bytes
+
+            def read_bytes(path: Path) -> bytes:
+                if path == disappeared_path:
+                    raise FileNotFoundError(2, "file disappeared")
+                return original_read_bytes(path)
+
+            with patch.object(Path, "read_bytes", new=read_bytes):
+                evaluation = evaluate_index(workspace)
+
+            self.assertEqual(["src-001"], [record["source_id"] for record in evaluation.records])
+            self.assertEqual(
+                [
+                    SourceIssue(
+                        "SOURCE_INDEX_MALFORMED",
+                        "sources/src-001.md",
+                        "src-001 excerpt cannot be read as UTF-8 text: [Errno 2] file disappeared",
+                    )
+                ],
+                list(evaluation.issues),
+            )
+
+    def test_pre_read_absent_indexed_excerpt_remains_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            (workspace / SOURCES_DIRNAME / "src-001.md").unlink()
+
+            evaluation = evaluate_index(workspace)
+
+            self.assertEqual(
+                [
+                    SourceIssue(
+                        "SOURCE_EXCERPT_MISSING",
+                        "sources/src-001.md",
+                        "src-001 points at a missing excerpt file",
+                    )
+                ],
+                list(evaluation.issues),
+            )
+
     def test_nested_unregistered_excerpt_file_is_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

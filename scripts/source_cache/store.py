@@ -50,6 +50,11 @@ class SourceIndexPlan:
     excerpt_paths: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _ExcerptReadFailure:
+    error: OSError
+
+
 def plan_index_document(index_payload: bytes | None) -> SourceIndexPlan:
     """Pure: parse + validate the index document. No filesystem access.
 
@@ -113,7 +118,7 @@ def plan_index_document(index_payload: bytes | None) -> SourceIndexPlan:
 
 def evaluate_index_documents(
     plan: SourceIndexPlan,
-    excerpt_payloads: tuple[tuple[str, bytes | None], ...],
+    excerpt_payloads: tuple[tuple[str, bytes | None | _ExcerptReadFailure], ...],
     source_files: tuple[str, ...],
 ) -> SourceCacheEvaluation:
     """Pure: run dup/excerpt-hash/unregistered semantics over preloaded bytes.
@@ -124,7 +129,7 @@ def evaluate_index_documents(
     every file under sources/ (recursive), in any order; this function sorts
     them itself for the unregistered warning.
     """
-    payload_by_path: dict[str, bytes | None] = {}
+    payload_by_path: dict[str, bytes | None | _ExcerptReadFailure] = {}
     for path, payload in excerpt_payloads:
         payload_by_path[path] = payload
     planned = set(plan.excerpt_paths)
@@ -174,6 +179,15 @@ def evaluate_index_documents(
             seen_hashes[digest] = source_id
         excerpt_path = record["excerpt_path"]
         payload = payload_by_path[excerpt_path]
+        if isinstance(payload, _ExcerptReadFailure):
+            issues.append(
+                SourceIssue(
+                    "SOURCE_INDEX_MALFORMED",
+                    excerpt_path,
+                    f"{source_id} excerpt cannot be read as UTF-8 text: {payload.error}",
+                )
+            )
+            continue
         if payload is None:
             issues.append(
                 SourceIssue(
@@ -245,12 +259,15 @@ def load_index(workspace: str | Path) -> list[tuple[int, dict]]:
     return entries
 
 
-def _safe_read_bytes(path: Path) -> bytes | None:
+def _safe_read_bytes(path: Path) -> bytes | _ExcerptReadFailure | None:
     """Return file bytes, or None if the path is not a file. Mirrors the
     legacy 'is_file() then read_text()' gating without the UTF-8 decode."""
     if not path.is_file():
         return None
-    return path.read_bytes()
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        return _ExcerptReadFailure(exc)
 
 
 def _list_sources_files(workspace_path: Path) -> tuple[str, ...]:
