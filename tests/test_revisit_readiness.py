@@ -64,7 +64,7 @@ from tests.test_revisit_contract import (  # noqa: E402
     make_terminal_cycle_fixture,
     run_revisit_cycle_cli,
     snapshot_tree,
-    test_semantic_sha256,
+    semantic_sha256,
 )
 
 import revisit_contract  # noqa: E402
@@ -1100,7 +1100,7 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
             cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
             cycle = revisit_contract.load_cycle(workspace, cycle_id)
             mutate(cycle)
-            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
             attach_valid_audit(cycle)
             revisit_contract.persist_cycle(
                 workspace,
@@ -1768,7 +1768,7 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
             cycle["claim_resolutions"][0]["current_evidence_refs"].append(
                 dict(artifact_ref)
             )
-            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
             attach_valid_audit(cycle)
             revisit_contract.persist_cycle(
                 workspace,
@@ -2925,7 +2925,7 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
                     "checked_at": cycle["created_at"],
                 }
             ]
-            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
             attach_valid_audit(cycle)
             revisit_contract.persist_cycle(
                 workspace,
@@ -2985,7 +2985,7 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
                     "checked_at": cycle["created_at"],
                 }
             ]
-            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
             attach_valid_audit(cycle)
             revisit_contract.persist_cycle(
                 workspace,

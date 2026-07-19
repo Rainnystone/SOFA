@@ -1362,7 +1362,7 @@ def make_revisit_revision():
     return revision
 
 
-def test_semantic_sha256(value):
+def semantic_sha256(value):
     payload = json.dumps(
         value,
         ensure_ascii=False,
@@ -1445,7 +1445,7 @@ def make_minimal_cycle(
         "completed_at": None,
         "aborted_at": None,
         "abort_reason": None,
-        "intake_sha256": test_semantic_sha256(intake),
+        "intake_sha256": semantic_sha256(intake),
         "intake": intake,
         "frontier_bindings": [],
         "claim_resolutions": [
@@ -1482,7 +1482,7 @@ def make_task1_skeleton_cycle():
     ] = "decision_support"
     cycle["intake"]["triggers"] = []
     cycle["intake"]["selected_claims"] = []
-    cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+    cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
     cycle["claim_resolutions"] = []
     cycle["audit"] = []
     return cycle
@@ -1540,7 +1540,7 @@ def make_populated_cycle():
             ],
         }
     ]
-    cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+    cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
     cycle["frontier_bindings"] = [
         {
             "frontier_id": "frontier-001",
@@ -1673,8 +1673,8 @@ def attach_valid_audit(cycle):
             "timestamp": cycle["created_at"],
             "command": "start",
             "affected_ids": affected_ids,
-            "pre_state_sha256": test_semantic_sha256(None),
-            "post_state_sha256": test_semantic_sha256(state),
+            "pre_state_sha256": semantic_sha256(None),
+            "post_state_sha256": semantic_sha256(state),
         }
     ]
     return cycle
@@ -1780,7 +1780,7 @@ def make_drifted_task4_cycle():
     cycle["intake"]["framing"]["snapshot"][
         "research_posture"
     ] = "decision_support"
-    cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+    cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
     attach_valid_audit(cycle)
     return cycle
 
@@ -1903,7 +1903,7 @@ class TestRevisitContext(unittest.TestCase):
                 "checked_at": "2026-07-14T12:45:00Z",
             }
             cycle["intake"]["triggers"][0]["evidence_refs"] = [artifact_ref]
-            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
             attach_valid_audit(cycle)
             revisit_contract.cycle_json_path(workspace, cycle_id).write_bytes(
                 revisit_contract.canonical_document_bytes(cycle)
@@ -2261,7 +2261,7 @@ class TestRevisitContext(unittest.TestCase):
             extra_resolution = copy.deepcopy(cycle["claim_resolutions"][0])
             extra_resolution["claim_id"] = extra_claim["claim_id"]
             cycle["claim_resolutions"].append(extra_resolution)
-            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
             attach_valid_audit(cycle)
             revisit_contract.cycle_json_path(workspace, cycle_id).write_bytes(
                 revisit_contract.canonical_document_bytes(cycle)
@@ -6197,7 +6197,7 @@ class TestRevisitClaimBindingAndFreshnessFacts(unittest.TestCase):
                 "reason": "The source has not been rechecked in this cycle.",
             }
         )
-        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
         attach_valid_audit(cycle)
 
         rendered = revisit_contract.render_cycle_markdown(cycle)
@@ -6242,7 +6242,7 @@ class TestRevisitClaimBindingAndFreshnessFacts(unittest.TestCase):
                 "reason": "The source predates the fired trigger.",
             }
         ]
-        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
         attach_valid_audit(cycle)
         return cycle
 
@@ -6303,7 +6303,7 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                 "checked_at": "2026-07-14T10:00:00Z",
             }
         ]
-        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
         attach_valid_audit(cycle)
         revisit_contract.persist_cycle(
             workspace,
@@ -6514,7 +6514,7 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
         cycle = revisit_contract.load_cycle(workspace, cycle_id)
         if reference_field == "trigger":
             cycle["intake"]["triggers"][0]["evidence_refs"] = references
-            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
         else:
             resolution = cycle["claim_resolutions"][0]
             resolution["status"] = resolution_status
@@ -6975,7 +6975,7 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                     cycle["intake"]["framing"]["sha256"] = hashlib.sha256(
                         framing_path.read_bytes()
                     ).hexdigest()
-                    cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                    cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
                     attach_valid_audit(cycle)
                     revisit_contract.persist_cycle(
                         workspace,
@@ -8691,7 +8691,7 @@ class TestRevisitClaimResolutionMutation(unittest.TestCase):
                     "inherited_evidence"
                 ][0]
                 inherited["freshness"] = freshness
-                cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
                 attach_valid_audit(cycle)
                 revisit_contract.persist_cycle(
                     workspace,
@@ -8738,7 +8738,7 @@ class TestRevisitClaimResolutionMutation(unittest.TestCase):
                 "reason": "The source predates the current acceptance check.",
             }
         ]
-        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
         attach_valid_audit(cycle)
         outcome = make_confirmed_resolution_request()
         outcome["current_evidence_refs"][0]["checked_at"] = "2026-07-14T12:00:00Z"
@@ -9545,7 +9545,7 @@ class TestCanonicalPersistedPaths(unittest.TestCase):
 
     @staticmethod
     def _refresh_cycle(cycle):
-        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
         return attach_valid_audit(cycle)
 
     def _strict_load_pointer(self, pointer):
@@ -10589,7 +10589,7 @@ class TestRevisitRender(unittest.TestCase):
         )
         cycle = make_populated_cycle()
         cycle["intake"]["triggers"][0]["statement"] = "Revenue | baseline changed."
-        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
         attach_valid_audit(cycle)
 
         first = render_cycle_markdown(cycle)
@@ -11466,7 +11466,7 @@ class TestCycleSchema(unittest.TestCase):
             with self.subTest(case=label):
                 cycle = make_minimal_cycle()
                 mutate(cycle)
-                cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
                 attach_valid_audit(cycle)
                 expected_cycle = copy.deepcopy(cycle)
                 self.assert_contract_error(
@@ -11583,12 +11583,12 @@ class TestCycleSchema(unittest.TestCase):
             ),
             (
                 "semantic_sha256",
-                test_semantic_sha256(value),
+                semantic_sha256(value),
                 getattr(revisit_contract, "semantic_sha256", lambda _: "")(value),
             ),
             (
                 "intake_sha256",
-                test_semantic_sha256(cycle["intake"]),
+                semantic_sha256(cycle["intake"]),
                 getattr(revisit_contract, "intake_sha256", lambda _: "")(
                     cycle["intake"]
                 ),
@@ -11600,7 +11600,7 @@ class TestCycleSchema(unittest.TestCase):
             ),
             (
                 "cycle_state_sha256",
-                test_semantic_sha256(expected_state),
+                semantic_sha256(expected_state),
                 getattr(revisit_contract, "cycle_state_sha256", lambda _: "")(cycle),
             ),
         )
@@ -11772,7 +11772,7 @@ class TestCycleSchema(unittest.TestCase):
                 )
                 nested_value(cycle, path)["extra"] = "hidden"
                 if path[0] == "intake":
-                    cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                    cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
                 self.assert_contract_error(
                     lambda: revisit_contract.validate_cycle(cycle),
                     rf"{re.escape(error_path)} unknown field.*extra",
@@ -11972,7 +11972,7 @@ class TestCycleSchema(unittest.TestCase):
                 )
                 set_nested_value(cycle, path, replacement)
                 if path[0] == "intake":
-                    cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                    cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
                 self.assert_contract_error(
                     lambda: revisit_contract.validate_cycle(cycle), pattern
                 )
@@ -12041,7 +12041,7 @@ class TestCycleSchema(unittest.TestCase):
             with self.subTest(path=path):
                 cycle = make_populated_cycle()
                 set_nested_value(cycle, path, replacement)
-                cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
                 self.assert_contract_error(
                     lambda: revisit_contract.validate_cycle(cycle), pattern
                 )
@@ -12100,7 +12100,7 @@ class TestCycleSchema(unittest.TestCase):
             with self.subTest(path=path):
                 cycle = make_populated_cycle()
                 set_nested_value(cycle, path, replacement)
-                cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
                 self.assert_contract_error(
                     lambda: revisit_contract.validate_cycle(cycle), pattern
                 )
@@ -12172,7 +12172,7 @@ class TestCycleSchema(unittest.TestCase):
                 cycle = make_populated_cycle()
                 path = ("intake", "selected_claims", 0, *relative_path)
                 set_nested_value(cycle, path, replacement)
-                cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
                 self.assert_contract_error(
                     lambda: revisit_contract.validate_cycle(cycle), pattern
                 )
@@ -12530,7 +12530,7 @@ class TestCycleSchema(unittest.TestCase):
                 )
                 mutate(cycle)
                 if intake_changed:
-                    cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+                    cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
                 self.assert_contract_error(
                     lambda: revisit_contract.validate_cycle(cycle), pattern
                 )
@@ -12596,7 +12596,7 @@ class TestCycleSchema(unittest.TestCase):
                 )
 
         cycle = make_populated_cycle()
-        state_hash = test_semantic_sha256(
+        state_hash = semantic_sha256(
             {key: value for key, value in cycle.items() if key != "audit"}
         )
         cycle["audit"] = [
@@ -12804,7 +12804,7 @@ class TestCycleSchema(unittest.TestCase):
     def test_locked_nullable_values_and_trigger_timestamp_variant_are_valid(self):
         cycle = make_minimal_cycle()
         cycle["intake"]["triggers"][0]["observed_at"] = "2026-07-15T00:30:00Z"
-        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        cycle["intake_sha256"] = semantic_sha256(cycle["intake"])
         attach_valid_audit(cycle)
 
         self.assertIs(cycle, revisit_contract.validate_cycle(cycle))
