@@ -3064,7 +3064,7 @@ class TestInitialAuthorityDriftPropagation(unittest.TestCase):
         drift_path: str,
         prepare_workspace=None,
     ) -> None:
-        for route in ("direct", "profile", "cli"):
+        for route in ("direct", "profile", "final_cli", "check", "cli"):
             with self.subTest(route=route), tempfile.TemporaryDirectory() as temp_dir:
                 workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
                 if prepare_workspace is not None:
@@ -3125,7 +3125,7 @@ class TestInitialAuthorityDriftPropagation(unittest.TestCase):
                             ContractProfile(mode="ticker", target="revisit_report"),
                         )
                         failures = result.failures
-                    else:
+                    elif route == "final_cli":
                         stdout = io.StringIO()
                         stderr = io.StringIO()
                         with (
@@ -3146,13 +3146,42 @@ class TestInitialAuthorityDriftPropagation(unittest.TestCase):
                         self.assertEqual(1, exit_code, error_output)
                         self.assertNotIn("Traceback", output + error_output)
                         failures = json.loads(output)["failures"]
+                    elif route == "check":
+                        outcome = check_revisit_readiness(
+                            workspace,
+                            cycle_id,
+                            timestamp="2026-07-17T00:00:00Z",
+                        )
+                        self.assertEqual(RevisitCheckEffect.BLOCKED, outcome.effect)
+                        failures = outcome.result.failures
+                    else:
+                        stdout = io.StringIO()
+                        stderr = io.StringIO()
+                        with (
+                            mock.patch.object(revisit_cycle_cli.sys, "stdout", stdout),
+                            mock.patch.object(revisit_cycle_cli.sys, "stderr", stderr),
+                        ):
+                            exit_code = revisit_cycle_cli.main(
+                                [str(workspace), "check", cycle_id]
+                            )
+                        output = stdout.getvalue()
+                        error_output = stderr.getvalue()
+                        self.assertEqual(1, exit_code, error_output)
+                        self.assertNotIn("Traceback", output + error_output)
+                        self.assertNotIn("ERROR:", error_output)
+                        self.assertEqual(
+                            ["REVISIT_AUTHORITY_DRIFT"],
+                            _extract_cli_codes(error_output),
+                        )
+                        self.assertIn(f"[{drift_path}]", error_output)
+                        failures = None
 
-                if route == "cli":
+                if route == "final_cli":
                     self.assertEqual(
                         [("REVISIT_AUTHORITY_DRIFT", drift_path)],
                         [(issue["code"], issue["path"]) for issue in failures],
                     )
-                else:
+                elif route != "cli":
                     self.assertEqual(
                         [("REVISIT_AUTHORITY_DRIFT", drift_path)],
                         [(issue.code, issue.path) for issue in failures],

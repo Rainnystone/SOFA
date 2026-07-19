@@ -2028,12 +2028,20 @@ def check_revisit_readiness(
     lexical_workspace = Path(workspace)
     with workspace_transaction(workspace) as locked_workspace:
         session = ObservedReadSession(locked_workspace)
-        prepared = _prepare_revisit_readiness(
-            session,
-            result,
-            cycle_id,
-            lexical_workspace,
-        )
+        try:
+            prepared = _prepare_revisit_readiness(
+                session,
+                result,
+                cycle_id,
+                lexical_workspace,
+            )
+        except AuthorityDriftError as exc:
+            result.fail(
+                code="REVISIT_AUTHORITY_DRIFT",
+                message=str(exc),
+                path=exc.drift.relative_path,
+            )
+            return _make_revisit_check_outcome(result, None)
         closure = prepared.closure
 
         # Recheck the closure once after preparation. Any boundary change is a
