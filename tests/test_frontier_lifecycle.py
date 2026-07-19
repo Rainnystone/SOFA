@@ -3456,6 +3456,46 @@ class TestFrontierLifecycle(unittest.TestCase):
 
                 self.assertEqual(original, registry)
 
+    def test_transition_defaults_new_to_active_at_loop_from_current_loop_count(self):
+        registry = self.module.make_registry("MXL", "ticker")
+        registry = self.module.create_frontier(
+            registry,
+            name="InP substrate supply concentration",
+            proposed_at_loop=1,
+            source="initial",
+        )
+
+        updated = self.module.transition(
+            registry,
+            "F1",
+            "Active",
+            {"F1": 2},
+            mode="ticker",
+            action="start",
+        )
+
+        frontier = self.module.get_frontier(updated, "F1")
+        self.assertEqual(2, frontier["lifecycle"][-1]["at_loop"])
+        self.assertIs(updated, self.module.validate_registry(updated))
+
+    def test_transition_defaults_due_review_at_loop_for_lifecycle_and_decision(self):
+        registry = self.v3_registry()
+
+        updated = self.module.transition(
+            registry,
+            "F1",
+            "Continued",
+            {"F1": 4},
+            mode="ticker",
+            action="review",
+            rationale="review recorded after one extra loop",
+        )
+
+        frontier = self.module.get_frontier(updated, "F1")
+        self.assertEqual(4, frontier["lifecycle"][-1]["at_loop"])
+        self.assertEqual(4, frontier["review_decisions"][-1]["at_loop"])
+        self.assertIs(updated, self.module.validate_registry(updated))
+
     def test_check_review_due_prevents_duplicate_boundary_review(self):
         registry = self.registry()
         self.assertEqual(["F1"], self.module.check_review_due(registry, {"F1": 3, "F2": 2}))

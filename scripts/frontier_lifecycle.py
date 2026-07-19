@@ -1228,6 +1228,8 @@ def transition(
     updated = copy.deepcopy(registry)
     frontier = get_frontier(updated, frontier_id)
     from_status = frontier.get("status")
+    loop_count = int(loop_counts.get(frontier_id, 0))
+    resolved_at_loop = loop_count if at_loop is None else at_loop
 
     _validate_transition_request(
         registry=updated,
@@ -1235,7 +1237,7 @@ def transition(
         frontier_id=frontier_id,
         from_status=from_status,
         to_status=to_status,
-        loop_count=int(loop_counts.get(frontier_id, 0)),
+        loop_count=loop_count,
         mode=resolved_mode,
         action=action,
         retire_category=retire_category,
@@ -1246,13 +1248,15 @@ def transition(
             registry=updated,
             frontier=frontier,
             frontier_id=frontier_id,
-            loop_count=int(loop_counts.get(frontier_id, 0)),
+            loop_count=loop_count,
         )
-        _record_review_decision(frontier, to_status, retire_category, rationale, at_loop)
+        _record_review_decision(
+            frontier, to_status, retire_category, rationale, resolved_at_loop
+        )
 
     frontier["status"] = to_status
     frontier["retire_category"] = retire_category if to_status == "Retired" else None
-    lifecycle_entry = {"to": to_status, "at_loop": at_loop, "ts": ts}
+    lifecycle_entry = {"to": to_status, "at_loop": resolved_at_loop, "ts": ts}
     if rationale:
         lifecycle_entry["rationale"] = rationale
     if to_status == "Retired" and retire_category:
