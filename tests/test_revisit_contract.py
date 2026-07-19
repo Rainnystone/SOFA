@@ -9453,152 +9453,308 @@ class TestPointerSchema(unittest.TestCase):
 
 
 class TestCanonicalPersistedPaths(unittest.TestCase):
-    def test_model_and_store_reject_noncanonical_persisted_paths_without_mutation(
-        self,
-    ):
-        def artifact(path):
-            return {
-                "kind": "artifact",
-                "path": path,
-                "sha256": "a" * 64,
-                "locator": "Evidence locator",
-                "checked_at": "2026-07-15T00:00:00Z",
-            }
+    _ERROR_SUFFIX = "must be a canonical workspace-relative POSIX path"
+    _UNICODE_PATH = "reports/研究/最终.md"
 
-        def intake_request(path):
-            return {
-                "triggers": [
-                    {
-                        "kind": "upgrade",
-                        "statement": "A named milestone changed.",
-                        "observed_at": "2026-07-15",
-                        "evidence_refs": [artifact(path)],
-                    }
-                ],
-                "selected_claims": [
-                    {
-                        "statement": "The prior claim remains relevant.",
-                        "source_ref": {
-                            "path": path,
-                            "sha256": "b" * 64,
-                            "locator": "Claim 1",
-                            "historical_claim_id": None,
-                        },
-                        "importance": "critical",
-                        "selection_reasons": ["trigger_affected"],
-                        "trigger_indexes": [1],
-                        "inherited_grade": "A",
-                        "inherited_confidence": "high",
-                        "inherited_evidence": [],
-                    }
-                ],
-            }
+    @staticmethod
+    def _artifact(path):
+        return {
+            "kind": "artifact",
+            "path": path,
+            "sha256": "a" * 64,
+            "locator": "Evidence locator",
+            "checked_at": "2026-07-15T00:00:00Z",
+        }
 
-        def persisted_cycle(path):
-            cycle = make_minimal_cycle()
-            cycle["intake"]["base_revision"]["report_path"] = path
-            cycle["intake"]["selected_claims"][0]["source_ref"]["path"] = path
-            cycle["intake"]["triggers"][0]["evidence_refs"] = [artifact(path)]
-            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
-            return attach_valid_audit(cycle)
+    def _intake_request(self):
+        return {
+            "triggers": [
+                {
+                    "kind": "upgrade",
+                    "statement": "A named milestone changed.",
+                    "observed_at": "2026-07-15",
+                    "evidence_refs": [
+                        {
+                            "kind": "source",
+                            "source_id": "src-001",
+                            "checked_at": "2026-07-15T00:00:00Z",
+                        }
+                    ],
+                }
+            ],
+            "selected_claims": [
+                {
+                    "statement": "The prior claim remains relevant.",
+                    "source_ref": {
+                        "path": "claims/ledger.md",
+                        "sha256": "b" * 64,
+                        "locator": "Claim 1",
+                        "historical_claim_id": None,
+                    },
+                    "importance": "critical",
+                    "selection_reasons": ["trigger_affected"],
+                    "trigger_indexes": [1],
+                    "inherited_grade": "A",
+                    "inherited_confidence": "high",
+                    "inherited_evidence": [],
+                }
+            ],
+        }
 
-        invalid_paths = (
-            "/reports/final.md",
-            "C:\\reports\\final.md",
-            "\\\\server\\share\\final.md",
-            "reports/../final.md",
-            "reports\\final.md",
-            "reports/./final.md",
-            "reports//final.md",
-            "reports/final.md/",
+    @staticmethod
+    def _refresh_cycle(cycle):
+        cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+        return attach_valid_audit(cycle)
+
+    def _strict_load_pointer(self, pointer):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            path = workspace / revisit_contract.POINTER_FILENAME
+            path.write_bytes(revisit_contract.canonical_document_bytes(pointer))
+            before = path.read_bytes()
+            try:
+                return revisit_contract.load_pointer(workspace)
+            finally:
+                self.assertEqual(before, path.read_bytes())
+
+    def _strict_load_cycle(self, cycle):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            path = workspace / revisit_contract.CYCLES_DIRNAME / "RC-0001.json"
+            path.parent.mkdir()
+            path.write_bytes(revisit_contract.canonical_document_bytes(cycle))
+            before = path.read_bytes()
+            try:
+                return revisit_contract.load_cycle(workspace, "RC-0001")
+            finally:
+                self.assertEqual(before, path.read_bytes())
+
+    def _owner_cases(self):
+        def pointer(path):
+            value = revisit_contract.empty_pointer()
+            value["current_revision"] = make_initial_revision()
+            value["current_revision"]["report_path"] = path
+            return value
+
+        def request_source(path):
+            value = self._intake_request()
+            value["selected_claims"][0]["source_ref"]["path"] = path
+            return value
+
+        def request_trigger(path):
+            value = self._intake_request()
+            value["triggers"][0]["evidence_refs"] = [self._artifact(path)]
+            return value
+
+        def request_inherited(path):
+            value = self._intake_request()
+            value["selected_claims"][0]["inherited_evidence"] = [
+                {
+                    "ref": self._artifact(path),
+                    "freshness": "fresh",
+                    "checked_at": "2026-07-15T00:00:00Z",
+                    "reason": "The evidence was checked after the trigger.",
+                }
+            ]
+            return value
+
+        def cycle_base(path):
+            value = make_minimal_cycle()
+            value["intake"]["base_revision"]["report_path"] = path
+            return self._refresh_cycle(value)
+
+        def cycle_source(path):
+            value = make_minimal_cycle()
+            value["intake"]["selected_claims"][0]["source_ref"]["path"] = path
+            return self._refresh_cycle(value)
+
+        def cycle_trigger(path):
+            value = make_minimal_cycle()
+            value["intake"]["triggers"][0]["evidence_refs"] = [
+                self._artifact(path)
+            ]
+            return self._refresh_cycle(value)
+
+        def cycle_inherited(path):
+            value = make_minimal_cycle()
+            value["intake"]["selected_claims"][0]["inherited_evidence"] = [
+                {
+                    "ref": self._artifact(path),
+                    "freshness": "fresh",
+                    "checked_at": value["created_at"],
+                    "reason": "The inherited evidence remains current.",
+                }
+            ]
+            return self._refresh_cycle(value)
+
+        def cycle_accepted(path):
+            value = make_populated_cycle()
+            value["derived_claims"][0]["accepted_from"]["evidence_refs"][0][
+                "path"
+            ] = path
+            return self._refresh_cycle(value)
+
+        def cycle_current(path):
+            value = make_populated_cycle()
+            value["claim_resolutions"][0]["current_evidence_refs"][0][
+                "path"
+            ] = path
+            return self._refresh_cycle(value)
+
+        def cycle_counter(path):
+            value = make_populated_cycle()
+            resolution = value["claim_resolutions"][0]
+            resolution["status"] = "weakened"
+            resolution["revised_statement"] = "The evidence weakens the prior claim."
+            resolution["counter_evidence_refs"] = [self._artifact(path)]
+            return self._refresh_cycle(value)
+
+        return (
+            (
+                "pointer-validate",
+                "/reports/final.md",
+                "pointer.current_revision.report_path",
+                pointer,
+                revisit_contract.validate_pointer,
+            ),
+            (
+                "pointer-strict-load-drive",
+                "C:/reports/final.md",
+                "pointer.current_revision.report_path",
+                pointer,
+                self._strict_load_pointer,
+            ),
+            (
+                "request-selected-source",
+                "\\\\server\\share\\final.md",
+                "request.selected_claims[0].source_ref.path",
+                request_source,
+                revisit_contract.validate_intake_request,
+            ),
+            (
+                "request-trigger-artifact",
+                "reports\\trigger.md",
+                "request.triggers[0].evidence_refs[0].path",
+                request_trigger,
+                revisit_contract.validate_intake_request,
+            ),
+            (
+                "request-inherited-artifact",
+                "evidence/./inherited.md",
+                "request.selected_claims[0].inherited_evidence[0].ref.path",
+                request_inherited,
+                revisit_contract.validate_intake_request,
+            ),
+            (
+                "cycle-base-validate",
+                "reports/../initial.md",
+                "cycle.intake.base_revision.report_path",
+                cycle_base,
+                revisit_contract.validate_cycle,
+            ),
+            (
+                "cycle-base-strict-load",
+                "reports//initial.md",
+                "cycle.intake.base_revision.report_path",
+                cycle_base,
+                self._strict_load_cycle,
+            ),
+            (
+                "cycle-selected-source-validate",
+                "claims/selected.md/",
+                "cycle.intake.selected_claims[0].source_ref.path",
+                cycle_source,
+                revisit_contract.validate_cycle,
+            ),
+            (
+                "cycle-selected-source-strict-load",
+                "/claims/selected.md",
+                "cycle.intake.selected_claims[0].source_ref.path",
+                cycle_source,
+                self._strict_load_cycle,
+            ),
+            (
+                "cycle-trigger-artifact",
+                "evidence//trigger.md",
+                "cycle.intake.triggers[0].evidence_refs[0].path",
+                cycle_trigger,
+                revisit_contract.validate_cycle,
+            ),
+            (
+                "cycle-inherited-artifact",
+                "evidence/../inherited.md",
+                "cycle.intake.selected_claims[0].inherited_evidence[0].ref.path",
+                cycle_inherited,
+                revisit_contract.validate_cycle,
+            ),
+            (
+                "cycle-accepted-artifact",
+                "C:/evidence/accepted.md",
+                "cycle.derived_claims[0].accepted_from.evidence_refs[0].path",
+                cycle_accepted,
+                revisit_contract.validate_cycle,
+            ),
+            (
+                "cycle-current-artifact",
+                "evidence\\current.md",
+                "cycle.claim_resolutions[0].current_evidence_refs[0].path",
+                cycle_current,
+                revisit_contract.validate_cycle,
+            ),
+            (
+                "cycle-counter-artifact",
+                "//server/share/counter.md",
+                "cycle.claim_resolutions[0].counter_evidence_refs[0].path",
+                cycle_counter,
+                revisit_contract.validate_cycle,
+            ),
         )
-        valid_path = "reports/研究/最终.md"
 
-        for path in invalid_paths:
-            with self.subTest(path=path, owner="pointer"):
-                pointer = revisit_contract.empty_pointer()
-                pointer["current_revision"] = make_initial_revision()
-                pointer["current_revision"]["report_path"] = path
-                original = copy.deepcopy(pointer)
-                with self.assertRaisesRegex(
-                    revisit_contract.RevisitContractError,
-                    "must be a canonical workspace-relative POSIX path",
+    def _assert_rejected(self, case):
+        label, invalid_path, model_path, build, operation = case
+        value = build(invalid_path)
+        original = copy.deepcopy(value)
+        with self.assertRaisesRegex(
+            revisit_contract.RevisitContractError,
+            rf"^{re.escape(model_path)} {self._ERROR_SUFFIX}$",
+        ):
+            operation(value)
+        self.assertEqual(original, value)
+
+    def test_each_persisted_path_owner_rejects_one_invalid_path_independently(self):
+        for case in self._owner_cases():
+            label, invalid_path, _, _, _ = case
+            with self.subTest(owner=label, path=invalid_path):
+                self._assert_rejected(case)
+
+        for case in self._owner_cases():
+            label, _, _, build, operation = case
+            with self.subTest(owner=label, path=self._UNICODE_PATH):
+                value = build(self._UNICODE_PATH)
+                original = copy.deepcopy(value)
+                operation(value)
+                self.assertEqual(original, value)
+
+    def test_each_owner_mutation_makes_its_regression_fail(self):
+        original = revisit_model._require_canonical_workspace_relative_posix_path
+        for case in self._owner_cases():
+            label, _, model_path, _, _ = case
+
+            def bypass_target(value, path, *, target=model_path):
+                if path == target:
+                    return value
+                return original(value, path)
+
+            with self.subTest(owner=label):
+                with mock.patch.object(
+                    revisit_model,
+                    "_require_canonical_workspace_relative_posix_path",
+                    side_effect=bypass_target,
                 ):
-                    revisit_contract.validate_pointer(pointer)
-                self.assertEqual(original, pointer)
-
-            with self.subTest(path=path, owner="intake-request"):
-                request = intake_request(path)
-                original = copy.deepcopy(request)
-                with self.assertRaisesRegex(
-                    revisit_contract.RevisitContractError,
-                    "must be a canonical workspace-relative POSIX path",
-                ):
-                    revisit_contract.validate_intake_request(request)
-                self.assertEqual(original, request)
-
-            with self.subTest(path=path, owner="cycle"):
-                cycle = persisted_cycle(path)
-                original = copy.deepcopy(cycle)
-                with self.assertRaisesRegex(
-                    revisit_contract.RevisitContractError,
-                    "must be a canonical workspace-relative POSIX path",
-                ):
-                    revisit_contract.validate_cycle(cycle)
-                self.assertEqual(original, cycle)
-
-            with self.subTest(path=path, owner="strict-loads"):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    workspace = Path(temp_dir)
-                    pointer = revisit_contract.empty_pointer()
-                    pointer["current_revision"] = make_initial_revision()
-                    pointer["current_revision"]["report_path"] = path
-                    pointer_path = workspace / revisit_contract.POINTER_FILENAME
-                    pointer_path.write_bytes(
-                        revisit_contract.canonical_document_bytes(pointer)
-                    )
-                    pointer_bytes = pointer_path.read_bytes()
                     with self.assertRaisesRegex(
-                        revisit_contract.RevisitContractError,
-                        "must be a canonical workspace-relative POSIX path",
+                        AssertionError, "RevisitContractError not raised"
                     ):
-                        revisit_contract.load_pointer(workspace)
-                    self.assertEqual(pointer_bytes, pointer_path.read_bytes())
-
-                    cycle = persisted_cycle(path)
-                    cycle_path = (
-                        workspace
-                        / revisit_contract.CYCLES_DIRNAME
-                        / "RC-0001.json"
-                    )
-                    cycle_path.parent.mkdir()
-                    cycle_path.write_bytes(
-                        revisit_contract.canonical_document_bytes(cycle)
-                    )
-                    cycle_bytes = cycle_path.read_bytes()
-                    with self.assertRaisesRegex(
-                        revisit_contract.RevisitContractError,
-                        "must be a canonical workspace-relative POSIX path",
-                    ):
-                        revisit_contract.load_cycle(workspace, "RC-0001")
-                    self.assertEqual(cycle_bytes, cycle_path.read_bytes())
-
-        pointer = revisit_contract.empty_pointer()
-        pointer["current_revision"] = make_initial_revision()
-        pointer["current_revision"]["report_path"] = valid_path
-        pointer_original = copy.deepcopy(pointer)
-        self.assertIs(pointer, revisit_contract.validate_pointer(pointer))
-        self.assertEqual(pointer_original, pointer)
-
-        request = intake_request(valid_path)
-        request_original = copy.deepcopy(request)
-        self.assertIs(request, revisit_contract.validate_intake_request(request))
-        self.assertEqual(request_original, request)
-
-        cycle = persisted_cycle(valid_path)
-        cycle_original = copy.deepcopy(cycle)
-        self.assertIs(cycle, revisit_contract.validate_cycle(cycle))
-        self.assertEqual(cycle_original, cycle)
+                        self._assert_rejected(case)
 
 
 class TestRevisitStorePaths(unittest.TestCase):
