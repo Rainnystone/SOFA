@@ -14509,12 +14509,15 @@ class TestTask8Publication(unittest.TestCase):
             )
             before_cycle = revisit_contract.load_cycle(workspace, cycle_id)
             report_bytes = report.read_bytes()
+            resolved_workspace = workspace.resolve()
             cli_store = sys.modules[revisit_cycle_cli.persist_cycle.__module__]
             real_atomic_replace = cli_store._atomic_replace
             destinations = []
 
             def record_replace(path, payload):
-                destinations.append(Path(path).relative_to(workspace).as_posix())
+                destinations.append(
+                    Path(path).relative_to(resolved_workspace).as_posix()
+                )
                 return real_atomic_replace(path, payload)
 
             stdout = io.StringIO()
@@ -14573,13 +14576,10 @@ class TestTask8Publication(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             workspace, cycle_id, _ = self._registered_workspace(root)
-            pointer_path = workspace / revisit_contract.POINTER_FILENAME
-            cycle_path = (
-                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.json"
-            )
-            mirror_path = (
-                workspace / revisit_contract.CYCLES_DIRNAME / f"{cycle_id}.md"
-            )
+            resolved_workspace = workspace.resolve()
+            pointer_path = revisit_contract.pointer_path(workspace)
+            cycle_path = revisit_contract.cycle_json_path(workspace, cycle_id)
+            mirror_path = revisit_contract.cycle_markdown_path(workspace, cycle_id)
             pointer_before = pointer_path.read_bytes()
             before_cycle = revisit_contract.load_cycle(workspace, cycle_id)
             cli_store = sys.modules[revisit_cycle_cli.persist_cycle.__module__]
@@ -14684,7 +14684,7 @@ class TestTask8Publication(unittest.TestCase):
 
             def record_retry(path, payload):
                 retry_destinations.append(
-                    Path(path).relative_to(workspace).as_posix()
+                    Path(path).relative_to(resolved_workspace).as_posix()
                 )
                 return real_atomic_replace(path, payload)
 

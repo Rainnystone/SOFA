@@ -358,12 +358,17 @@ class TestRevisitDispatchAssembly(unittest.TestCase):
                 attach_digest=False,
                 attach_sources=False,
             )
-            normalized = result.dispatch_text.replace(
-                str(workspace), "<WORKSPACE>"
-            ).replace(str(ROOT), "<REPO_ROOT>")
+            normalized = (
+                result.dispatch_text.replace(
+                    result.delivery_abs_path,
+                    f"<WORKSPACE>/{result.delivery_path}",
+                )
+                .replace(str(workspace), "<WORKSPACE>")
+                .replace(str(ROOT), "<REPO_ROOT>")
+            )
 
             self.assertEqual(
-                "ad5a4e939ed7ea7f668f17ac2463fbafa03d976da4163ba4153b5331aea7db81",
+                "d9bb9d27255b5dd979e5c25d02eecb3d91fb930d9135400ef597488526d8a903",
                 hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
             )
             self.assertEqual([], result.attachments)
