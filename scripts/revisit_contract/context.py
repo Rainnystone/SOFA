@@ -53,6 +53,10 @@ def build_revisit_context(
             "challenge_probe"
         )
     cycle = load_cycle(workspace, cycle_id)
+    if cycle["status"] != "active":
+        raise RevisitContractError(
+            f"revisit cycle {cycle_id} is not active: {cycle['status']}"
+        )
     binding = next(
         (
             row

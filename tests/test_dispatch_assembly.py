@@ -19,7 +19,12 @@ from dispatch_assembly import (
     assemble_dispatch,
     primary_input_slot_name,
 )
-from tests.test_revisit_contract import make_task7_context_workspace
+import scripts.revisit_contract as revisit_contract
+from tests.test_revisit_contract import (
+    attach_valid_audit,
+    make_task7_context_workspace,
+    make_terminal_cycle_fixture,
+)
 
 
 PACKET = (
@@ -345,6 +350,55 @@ class TestRevisitDispatchAssembly(unittest.TestCase):
                     revisit_frontier_id=frontier_id,
                     revisit_claim_ids=(f"{cycle_id}-CL-99",),
                 )
+
+    def test_revisit_dispatch_translates_non_active_cycle_context_failures(self):
+        for status in ("ready_for_report", "completed", "aborted"):
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                        Path(temp_dir)
+                    )
+                    active_cycle = revisit_contract.load_cycle(workspace, cycle_id)
+                    if status == "ready_for_report":
+                        non_active_cycle = revisit_contract.mark_ready_for_report(
+                            active_cycle
+                        )
+                        attach_valid_audit(non_active_cycle)
+                    else:
+                        non_active_cycle = make_terminal_cycle_fixture(
+                            active_cycle, status
+                        )
+                    revisit_contract.cycle_json_path(workspace, cycle_id).write_bytes(
+                        revisit_contract.canonical_document_bytes(non_active_cycle)
+                    )
+
+                    for role, slot_values, name_fields in (
+                        (
+                            "scout",
+                            {"frontier_packet": PACKET},
+                            {"loop": "8", "frontier_slug": "qualification"},
+                        ),
+                        (
+                            "challenge",
+                            {"claim_summary": "Current claim and counter-evidence."},
+                            {"loop": "8"},
+                        ),
+                    ):
+                        with self.subTest(role=role):
+                            with self.assertRaisesRegex(
+                                AssemblyError,
+                                rf"revisit context failed: revisit cycle {cycle_id} is not active: {status}",
+                            ):
+                                assemble_dispatch(
+                                    repo_root=ROOT,
+                                    workspace=workspace,
+                                    role=role,
+                                    slot_values=slot_values,
+                                    name_fields=name_fields,
+                                    revisit_cycle_id=cycle_id,
+                                    revisit_frontier_id=frontier_id,
+                                    revisit_claim_ids=(f"{cycle_id}-CL-01",),
+                                )
 
     def test_ordinary_dispatch_snapshot_is_byte_for_byte_unchanged(self):
         with tempfile.TemporaryDirectory() as temp_dir:

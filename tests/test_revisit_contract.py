@@ -1933,6 +1933,40 @@ class TestRevisitContext(unittest.TestCase):
                 context.text,
             )
 
+    def test_context_rejects_non_active_cycle_for_each_dispatch_role(self):
+        for status in ("ready_for_report", "completed", "aborted"):
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                        Path(temp_dir)
+                    )
+                    active_cycle = revisit_contract.load_cycle(workspace, cycle_id)
+                    if status == "ready_for_report":
+                        non_active_cycle = revisit_contract.mark_ready_for_report(
+                            active_cycle
+                        )
+                        attach_valid_audit(non_active_cycle)
+                    else:
+                        non_active_cycle = make_terminal_cycle_fixture(
+                            active_cycle, status
+                        )
+                    revisit_contract.cycle_json_path(workspace, cycle_id).write_bytes(
+                        revisit_contract.canonical_document_bytes(non_active_cycle)
+                    )
+
+                    for role_slug in ("frontier_scout", "challenge_probe"):
+                        with self.subTest(role_slug=role_slug):
+                            with self.assertRaisesRegex(
+                                revisit_contract.RevisitContractError,
+                                rf"revisit cycle {re.escape(cycle_id)} is not active: {status}",
+                            ):
+                                self._build(
+                                    workspace,
+                                    cycle_id,
+                                    frontier_id,
+                                    role_slug=role_slug,
+                                )
+
     def test_scout_context_rejects_excerpt_drift_after_source_evaluation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, cycle_id, frontier_id = make_task7_context_workspace(
