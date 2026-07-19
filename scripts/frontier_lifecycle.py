@@ -6,7 +6,6 @@ import copy
 import html
 import re
 import unicodedata
-from collections import Counter
 from typing import Any
 
 
@@ -597,6 +596,7 @@ def _validate_v3_registry(registry: dict[str, Any]) -> None:
 
         _validate_v3_lifecycle(frontier, frontier_id)
         _validate_v3_review_decisions(frontier, frontier_id)
+        _validate_v3_review_lifecycle_coherence(frontier, frontier_id)
         _validate_v3_evidence_pointers(frontier, frontier_id)
 
         if "layer" not in frontier:
@@ -647,6 +647,14 @@ def _validate_v3_lifecycle(frontier: dict[str, Any], frontier_id: str) -> None:
     allowed = required | optional
 
     previous_ts: str | None = None
+    previous_status: str | None = None
+    allowed_next = {
+        None: frozenset({"New"}),
+        "New": frozenset({"Active", "Retired"}),
+        "Active": frozenset({"Active", "Continued", "Retired"}),
+        "Continued": frozenset({"Active", "Retired"}),
+        "Retired": frozenset(),
+    }
     for position, row in enumerate(lifecycle):
         location = f"frontier {frontier_id}.lifecycle[{position}]"
         if not isinstance(row, dict):
@@ -662,6 +670,13 @@ def _validate_v3_lifecycle(frontier: dict[str, Any], frontier_id: str) -> None:
         to_status = row["to"]
         if to_status not in STATUSES:
             raise LifecycleError(f"{location} has unsupported status: {to_status}")
+        if to_status not in allowed_next[previous_status]:
+            previous_label = "BEGIN" if previous_status is None else previous_status
+            raise LifecycleError(
+                f"{location} has no matching lifecycle transition in writer grammar: "
+                f"{previous_label} -> {to_status}"
+            )
+        previous_status = to_status
         # Lifecycle at_loop is a non-negative strict int. Writers seed it from
         # the loop count, which is 0 before any loop is bound (e.g. an early
         # retire with no ledger loops), so 0 is an accepted writer-produced
@@ -761,7 +776,7 @@ def _validate_v3_review_decisions(frontier: dict[str, Any], frontier_id: str) ->
         previous_at_loop = at_loop
 
         decision = row["decision"]
-        if decision not in STATUSES:
+        if decision not in {"Continued", "Retired"}:
             raise LifecycleError(f"{location}.decision has unsupported status: {decision}")
 
         retire_category = row["retire_category"]
@@ -801,35 +816,52 @@ def _validate_v3_review_decisions(frontier: dict[str, Any], frontier_id: str) ->
             f"len(review_decisions)={len(review_decisions)}"
         )
 
-    _validate_v3_review_lifecycle_coherence(frontier, frontier_id)
-
 
 def _validate_v3_review_lifecycle_coherence(
     frontier: dict[str, Any], frontier_id: str
 ) -> None:
-    """Each review consumes a distinct matching lifecycle transition occurrence.
-
-    The transition has the same ``(to, at_loop)`` as the review's
-    ``(decision, at_loop)``. Matching remains history-wide, so a later legal
-    reactivation may follow the consumed transition.
-    """
+    """Pair reviews to distinct writer-produced transitions in history order."""
     review_decisions = frontier.get("review_decisions") or []
     lifecycle = frontier.get("lifecycle") or []
-    if not review_decisions:
-        return
-
-    transitions = Counter((row.get("to"), row.get("at_loop")) for row in lifecycle)
+    next_lifecycle_index = 0
+    matched_indexes: set[int] = set()
     for position, row in enumerate(review_decisions):
         decision = row.get("decision")
         at_loop = row.get("at_loop")
-        transition = (decision, at_loop)
-        if transitions[transition] == 0:
+        matched_index = next(
+            (
+                index
+                for index in range(next_lifecycle_index, len(lifecycle))
+                if lifecycle[index].get("to") == decision
+                and lifecycle[index].get("at_loop") == at_loop
+            ),
+            None,
+        )
+        if matched_index is None:
             location = f"frontier {frontier_id}.review_decisions[{position}]"
             raise LifecycleError(
                 f"{location} decision={decision} at_loop={at_loop} has no matching "
                 "lifecycle transition"
             )
-        transitions[transition] -= 1
+        predecessor = (
+            lifecycle[matched_index - 1].get("to")
+            if matched_index > 0
+            else None
+        )
+        if predecessor != "Active":
+            location = f"frontier {frontier_id}.review_decisions[{position}]"
+            raise LifecycleError(
+                f"{location} must match a transition from Active"
+            )
+        matched_indexes.add(matched_index)
+        next_lifecycle_index = matched_index + 1
+
+    for index, row in enumerate(lifecycle):
+        if row.get("to") == "Continued" and index not in matched_indexes:
+            raise LifecycleError(
+                f"frontier {frontier_id}.lifecycle[{index}] Continued transition "
+                "must have exactly one matching review decision"
+            )
 
 
 def _validate_v3_evidence_pointers(frontier: dict[str, Any], frontier_id: str) -> None:

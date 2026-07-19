@@ -1151,6 +1151,124 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
                         tuple(path.read_bytes() for path in authority_paths),
                     )
 
+    def _assert_writer_impossible_registry_across_routes(
+        self,
+        *,
+        history_kind: str,
+        target_bound: bool,
+    ) -> None:
+        for route in ("direct", "profile", "cli"):
+            with self.subTest(
+                history_kind=history_kind,
+                target="bound" if target_bound else "unbound",
+                route=route,
+            ), tempfile.TemporaryDirectory() as temp_dir:
+                workspace, cycle_id = make_task6_ready_workspace(Path(temp_dir))
+                registry_path = workspace / "frontier_registry.json"
+                registry = json.loads(registry_path.read_text(encoding="utf-8"))
+                registry["layer_labels"] = [
+                    "End demand",
+                    "System or platform",
+                    "Component or module",
+                    "Material or process",
+                    "Constrained input or equipment",
+                    "Geography or regulation",
+                ]
+                target = {
+                    "id": "F2",
+                    "name": "Writer-impossible sibling",
+                    "proposed_at_loop": 1,
+                    "source": "initial",
+                    "source_frontier": None,
+                    "status": "Active",
+                    "review_count": 0,
+                    "max_reviews": 3,
+                    "retire_category": None,
+                    "lifecycle": [
+                        {"to": "New", "at_loop": 1, "ts": None},
+                        {"to": "Active", "at_loop": 1, "ts": None},
+                    ],
+                    "review_decisions": [],
+                    "evidence_pointers": [],
+                    "layer": 0 if target_bound else None,
+                    "parent_frontier": None,
+                }
+                if history_kind == "decision":
+                    target["review_count"] = 1
+                    target["review_decisions"] = [
+                        {
+                            "review_number": 1,
+                            "at_loop": 1,
+                            "decision": "Active",
+                            "retire_category": None,
+                            "rationale_short": None,
+                            "portfolio_actions": [],
+                        }
+                    ]
+                elif history_kind == "transition":
+                    target["lifecycle"] = [
+                        {"to": "New", "at_loop": 1, "ts": None},
+                        {"to": "Active", "at_loop": 1, "ts": None},
+                        {"to": "New", "at_loop": 1, "ts": None},
+                        {"to": "Active", "at_loop": 1, "ts": None},
+                    ]
+                else:
+                    self.fail(f"unsupported history kind: {history_kind}")
+                registry["frontiers"].append(target)
+                registry_path.write_text(
+                    json.dumps(registry, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                prior_tree = snapshot_tree(workspace)
+
+                if route == "direct":
+                    result = evaluate_revisit_readiness(workspace, cycle_id)
+                    actual = [(issue.code, issue.path) for issue in result.failures]
+                elif route == "profile":
+                    result = evaluate_workspace(
+                        workspace,
+                        ContractProfile(mode="ticker", target="revisit_report"),
+                    )
+                    actual = [(issue.code, issue.path) for issue in result.failures]
+                else:
+                    completed = run_revisit_cycle_cli(
+                        workspace,
+                        "check",
+                        cycle_id,
+                    )
+                    self.assertEqual(1, completed.returncode, completed.stderr)
+                    self.assertNotIn("Traceback", completed.stderr)
+                    self.assertEqual(
+                        ["REVISIT_FRONTIER_REGISTRY_MALFORMED"],
+                        _extract_cli_codes(completed.stderr),
+                    )
+                    self.assertIn("[frontier_registry.json]", completed.stderr)
+                    actual = [
+                        (
+                            "REVISIT_FRONTIER_REGISTRY_MALFORMED",
+                            "frontier_registry.json",
+                        )
+                    ]
+
+                self.assertEqual(
+                    [
+                        (
+                            "REVISIT_FRONTIER_REGISTRY_MALFORMED",
+                            "frontier_registry.json",
+                        )
+                    ],
+                    actual,
+                )
+                self.assertEqual(prior_tree, snapshot_tree(workspace))
+
+    def test_writer_impossible_registry_history_is_stable_across_routes(self):
+        for history_kind in ("decision", "transition"):
+            for target_bound in (True, False):
+                self._assert_writer_impossible_registry_across_routes(
+                    history_kind=history_kind,
+                    target_bound=target_bound,
+                )
+
     def _assert_bad_plan_before_read(self, plan, expected_fragment: str) -> None:
         reads: list[tuple[str, str]] = []
         real_init = readiness_mod.ObservedReadSession.__init__
