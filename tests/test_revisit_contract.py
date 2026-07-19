@@ -3379,7 +3379,10 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                 lambda request: request["triggers"].append(
                     copy.deepcopy(request["triggers"][0])
                 ),
-                r"request trigger index 2 is not referenced by any selected claim",
+                (
+                    r"REVISIT_TRIGGER_ORPHANED: request trigger index 2 "
+                    r"is not referenced by any selected claim"
+                ),
             ),
             (
                 "trigger index out of range",
@@ -6954,7 +6957,7 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
 
                 self.assertFalse(result.passed)
                 self.assertIn(
-                    "REVISIT_CYCLE_MALFORMED",
+                    "REVISIT_INTAKE_DRIFT",
                     [issue.code for issue in result.failures],
                 )
 
@@ -6981,7 +6984,7 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
 
                 self.assertFalse(result.passed)
                 self.assertIn(
-                    "REVISIT_CYCLE_MALFORMED",
+                    "REVISIT_INTAKE_DRIFT",
                     [issue.code for issue in result.failures],
                 )
 
@@ -7022,6 +7025,11 @@ class TestRevisitPreReportEvaluation(unittest.TestCase):
                         expected,
                         [issue.code for issue in result.failures],
                     )
+                    if case in {"malformed", "base_drift"}:
+                        self.assertNotIn(
+                            "REVISIT_INTAKE_DRIFT",
+                            [issue.code for issue in result.failures],
+                        )
 
     def test_evaluator_reports_binding_and_each_live_floor_category(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -10258,7 +10266,14 @@ class TestRevisitWorkspaceTransaction(unittest.TestCase):
             results = self.finish_children(children)
             self.assertEqual([0, 2], sorted(result[0] for result in results))
             self.assertEqual(1, sum("REVISIT CYCLE STARTED" in row[1] for row in results))
-            self.assertEqual(1, sum("cycle conflict: RC-0001 is active" in row[2] for row in results))
+            self.assertEqual(
+                1,
+                sum(
+                    "REVISIT_CYCLE_CONFLICT: cycle conflict: RC-0001 is active"
+                    in row[2]
+                    for row in results
+                ),
+            )
             self.assertEqual(("RC-0001",), revisit_contract.list_cycle_ids(workspace))
             self.assertEqual("active", revisit_contract.load_cycle(workspace, "RC-0001")["status"])
             self.assertEqual(
@@ -10350,7 +10365,10 @@ class TestRevisitWorkspaceTransaction(unittest.TestCase):
                 self.assertEqual("active", second["status"])
             else:
                 self.assertEqual(("RC-0001",), revisit_contract.list_cycle_ids(workspace))
-                self.assertIn("cycle conflict: RC-0001 is active", start_result[2])
+                self.assertIn(
+                    "REVISIT_CYCLE_CONFLICT: cycle conflict: RC-0001 is active",
+                    start_result[2],
+                )
 
     def test_two_real_process_initial_registrations_preserve_one_winning_pointer(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -11403,7 +11421,11 @@ class TestCycleSchema(unittest.TestCase):
             (
                 "orphan trigger",
                 orphan_trigger,
-                "every intake trigger must be referenced",
+                (
+                    "REVISIT_TRIGGER_ORPHANED: "
+                    r"cycle.intake.triggers\[1\].trigger_id "
+                    "RC-0001-TRG-02 is not referenced by any selected claim"
+                ),
             ),
         )
         for label, mutate, pattern in cases:
@@ -11412,9 +11434,11 @@ class TestCycleSchema(unittest.TestCase):
                 mutate(cycle)
                 cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
                 attach_valid_audit(cycle)
+                expected_cycle = copy.deepcopy(cycle)
                 self.assert_contract_error(
                     lambda: revisit_contract.validate_cycle(cycle), pattern
                 )
+                self.assertEqual(expected_cycle, cycle)
     def test_task4_resolution_and_start_audit_coverage_are_canonical(self):
         resolution_cases = (
             (
@@ -11649,11 +11673,18 @@ class TestCycleSchema(unittest.TestCase):
 
     def test_cycle_rejects_intake_hash_mismatch(self):
         cycle = make_minimal_cycle()
+        original = copy.deepcopy(cycle)
         cycle["intake_sha256"] = "0" * 64
         self.assert_contract_error(
             lambda: revisit_contract.validate_cycle(cycle),
-            "cycle.intake_sha256 does not match immutable intake",
+            (
+                "REVISIT_INTAKE_DRIFT: cycle.intake_sha256 "
+                "does not match immutable intake"
+            ),
         )
+        expected = copy.deepcopy(original)
+        expected["intake_sha256"] = "0" * 64
+        self.assertEqual(expected, cycle)
 
     def test_every_nested_object_rejects_unknown_fields(self):
         cases = (
@@ -14291,6 +14322,80 @@ class TestTask8Publication(unittest.TestCase):
                 "2026-07-15T00:33:00Z",
             )
 
+    def test_publication_preconditions_keep_the_exact_stable_code(self):
+        cycle = self._registered_model_cycle()
+        pointer = revisit_contract.empty_pointer()
+        pointer["current_revision"] = {
+            **cycle["intake"]["base_revision"],
+            "cycle_id": None,
+            "validated_at": "2026-07-15T00:00:00Z",
+            "revision_of": None,
+        }
+        history = revisit_contract.evaluate_history(pointer, [cycle])
+
+        cases = []
+        missing_candidate = copy.deepcopy(cycle)
+        missing_candidate["report_candidate"] = None
+        cases.append((missing_candidate, pointer, history, "report candidate is missing"))
+
+        conflicting_ready_pointer = copy.deepcopy(pointer)
+        conflicting_ready_pointer["current_revision"]["report_sha256"] = "0" * 64
+        cases.append(
+            (
+                cycle,
+                conflicting_ready_pointer,
+                history,
+                "current revision differs from cycle base",
+            )
+        )
+
+        active = copy.deepcopy(cycle)
+        active["status"] = "active"
+        cases.append((active, pointer, history, "publish requires a ready or completed cycle"))
+
+        proposed = revisit_contract.complete_cycle(
+            cycle,
+            "2026-07-15T00:33:00Z",
+        )
+        completed = revisit_model.with_audit(
+            cycle,
+            proposed,
+            "publish",
+            ["RC-0001", "REV-0002"],
+            "2026-07-15T00:33:00Z",
+        )
+        completed_history = revisit_contract.evaluate_history(pointer, [completed])
+        cases.append(
+            (
+                completed,
+                conflicting_ready_pointer,
+                completed_history,
+                "current revision conflicts with completed candidate",
+            )
+        )
+        cases.append(
+            (
+                completed,
+                pointer,
+                dataclasses.replace(
+                    completed_history,
+                    completed_unpublished_cycle_ids=(),
+                ),
+                "completed cycle is not the sole unpublished candidate",
+            )
+        )
+
+        for tested_cycle, tested_pointer, tested_history, detail in cases:
+            with self.subTest(detail=detail), self.assertRaisesRegex(
+                revisit_cycle_cli.RevisitContractError,
+                rf"^REVISIT_PUBLICATION_FAILED: {re.escape(detail)}$",
+            ):
+                revisit_cycle_cli._publication_state(
+                    tested_pointer,
+                    tested_cycle,
+                    tested_history,
+                )
+
     def test_validate_cycle_rejects_completed_without_report_candidate(self):
         previous = self._registered_model_cycle()
         proposed = revisit_contract.complete_cycle(
@@ -14514,7 +14619,10 @@ class TestTask8Publication(unittest.TestCase):
                 )
 
             self.assertEqual(2, failed)
-            self.assertIn("simulated pointer replace failure", first_stderr.getvalue())
+            self.assertIn(
+                "REVISIT_PUBLICATION_FAILED: simulated pointer replace failure",
+                first_stderr.getvalue(),
+            )
             self.assertEqual(pointer_before, pointer_path.read_bytes())
             completed = revisit_contract.load_cycle(workspace, cycle_id)
             self.assertEqual("completed", completed["status"])
@@ -14541,7 +14649,13 @@ class TestTask8Publication(unittest.TestCase):
                 str(root / "revisit-request.json"),
             )
             self.assertEqual(2, blocked_start.returncode)
-            self.assertIn("completed-unpublished", blocked_start.stderr)
+            self.assertIn(
+                (
+                    "REVISIT_CYCLE_CONFLICT: cycle conflict: RC-0001 "
+                    "is completed-unpublished"
+                ),
+                blocked_start.stderr,
+            )
             self.assertFalse(
                 (
                     workspace
@@ -14549,6 +14663,22 @@ class TestTask8Publication(unittest.TestCase):
                     / "RC-0002.json"
                 ).exists()
             )
+            before_blocked_start = snapshot_tree(root)
+            repeated_blocked_start = run_revisit_cycle_cli(
+                workspace,
+                "start",
+                "--intake-file",
+                str(root / "revisit-request.json"),
+            )
+            self.assertEqual(2, repeated_blocked_start.returncode)
+            self.assertIn(
+                (
+                    "REVISIT_CYCLE_CONFLICT: cycle conflict: RC-0001 "
+                    "is completed-unpublished"
+                ),
+                repeated_blocked_start.stderr,
+            )
+            self.assertEqual(before_blocked_start, snapshot_tree(root))
 
             retry_destinations = []
 
@@ -14893,7 +15023,8 @@ class TestTask8Publication(unittest.TestCase):
                 )
 
             self.assertNotEqual(0, repeated)
-            self.assertIn("REVISIT_CYCLE_MALFORMED", stderr.getvalue())
+            self.assertIn("REVISIT_INTAKE_DRIFT", stderr.getvalue())
+            self.assertNotIn("REVISIT_CYCLE_MALFORMED", stderr.getvalue())
             self.assertIn("cycle.intake.framing", stderr.getvalue())
             self.assertNotIn("ALREADY PUBLISHED", stdout.getvalue())
             self.assertEqual(before, snapshot_tree(workspace))
@@ -16400,7 +16531,10 @@ class TestTask9CoverageClosure(unittest.TestCase):
 
             self.assertEqual(2, return_code)
             self.assertNotIn("REVISIT CYCLE STARTED", stdout)
-            self.assertIn("cycle conflict: RC-0001 is active", stderr)
+            self.assertIn(
+                "REVISIT_CYCLE_CONFLICT: cycle conflict: RC-0001 is active",
+                stderr,
+            )
             self.assertEqual(authority_bytes["pointer"], pointer_path.read_bytes())
             self.assertEqual(authority_bytes["cycle_json"], cycle_json.read_bytes())
             self.assertEqual(

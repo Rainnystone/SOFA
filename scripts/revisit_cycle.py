@@ -706,11 +706,12 @@ def _command_start_in_transaction(args: argparse.Namespace, workspace: Path) -> 
     if history.nonterminal_cycle_ids:
         cycle = cycles_by_id[history.nonterminal_cycle_ids[0]]
         raise RevisitContractError(
+            "REVISIT_CYCLE_CONFLICT: "
             f"cycle conflict: {cycle['cycle_id']} is {cycle['status']}"
         )
     if history.completed_unpublished_cycle_ids:
         raise RevisitContractError(
-            "cycle conflict: "
+            "REVISIT_CYCLE_CONFLICT: cycle conflict: "
             f"{history.completed_unpublished_cycle_ids[0]} "
             "is completed-unpublished"
         )
@@ -1426,13 +1427,18 @@ def _persist_published_pointer(
         cycle,
         validated_at,
     )
-    persist_pointer(
-        workspace,
-        updated_pointer,
-        expected_sha256=expected_pointer_sha256,
-        authority_snapshots=authority_snapshots,
-        generation_closure=generation_closure,
-    )
+    try:
+        persist_pointer(
+            workspace,
+            updated_pointer,
+            expected_sha256=expected_pointer_sha256,
+            authority_snapshots=authority_snapshots,
+            generation_closure=generation_closure,
+        )
+    except OSError as exc:
+        raise RevisitContractError(
+            f"REVISIT_PUBLICATION_FAILED: {exc}"
+        ) from exc
 
 
 def command_publish(args: argparse.Namespace) -> int:

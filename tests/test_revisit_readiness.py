@@ -1034,6 +1034,7 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
         *,
         expected_codes: list[str],
         expected_paths: list[str] | None = None,
+        expected_evidence: list[str] | None = None,
     ) -> None:
         """Run one malformed workspace independently through all public routes.
 
@@ -1087,7 +1088,72 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
                             expected_paths,
                             [issue.path for issue in result.failures],
                         )
+                    if expected_evidence is not None:
+                        self.assertEqual(
+                            expected_evidence,
+                            [issue.evidence for issue in result.failures],
+                        )
                     self.assertEqual(prior_tree, snapshot_tree(workspace))
+
+    def test_immutable_intake_authority_drift_is_exact_across_public_routes(self):
+        def persist_changed_cycle(workspace, cycle_id, mutate):
+            cycle_path = workspace / "revisit_cycles" / f"{cycle_id}.json"
+            cycle = revisit_contract.load_cycle(workspace, cycle_id)
+            mutate(cycle)
+            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            attach_valid_audit(cycle)
+            revisit_contract.persist_cycle(
+                workspace,
+                cycle,
+                expected_sha256=revisit_contract.sha256_file(cycle_path),
+            )
+
+        def framing_hash_drift(workspace, _cycle_id):
+            framing_path = workspace / "framing_contract.json"
+            framing_path.write_bytes(framing_path.read_bytes() + b"\n")
+
+        def framing_snapshot_drift(workspace, cycle_id):
+            persist_changed_cycle(
+                workspace,
+                cycle_id,
+                lambda cycle: cycle["intake"]["framing"]["snapshot"].__setitem__(
+                    "time_horizon",
+                    "12-18 months",
+                ),
+            )
+
+        def selected_source_hash_drift(workspace, _cycle_id):
+            source_path = workspace / "claim_ledger.md"
+            source_path.write_bytes(source_path.read_bytes() + b"source drift\n")
+
+        cases = (
+            (
+                "framing hash",
+                framing_hash_drift,
+                "cycle.intake.framing",
+                "framing_contract.json",
+            ),
+            (
+                "framing snapshot",
+                framing_snapshot_drift,
+                "cycle.intake.framing",
+                "framing_contract.json",
+            ),
+            (
+                "selected source hash",
+                selected_source_hash_drift,
+                "cycle.intake.selected_claims[0].source_ref",
+                "RC-0001-CL-01",
+            ),
+        )
+        for label, mutate, expected_path, expected_evidence in cases:
+            with self.subTest(case=label):
+                self._assert_public_route_codes(
+                    mutate,
+                    expected_codes=["REVISIT_INTAKE_DRIFT"],
+                    expected_paths=[expected_path],
+                    expected_evidence=[expected_evidence],
+                )
 
     def _assert_public_route_codes_pair_preserving(
         self,

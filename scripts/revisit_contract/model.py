@@ -1496,7 +1496,9 @@ def validate_intake_request(raw: Any) -> dict[str, Any]:
     for trigger_index in range(1, len(triggers) + 1):
         if trigger_index not in referenced_trigger_indexes:
             raise RevisitContractError(
-                f"request trigger index {trigger_index} is not referenced by any selected claim"
+                "REVISIT_TRIGGER_ORPHANED: "
+                f"request trigger index {trigger_index} "
+                "is not referenced by any selected claim"
             )
     return request
 
@@ -1742,7 +1744,13 @@ def _validate_intake(value: Any, cycle_id: str) -> None:
             "claim IDs must be exact sequential request-order IDs"
         )
     if referenced_trigger_ids != known_trigger_ids:
-        raise RevisitContractError("every intake trigger must be referenced")
+        for trigger_index, trigger_id in enumerate(expected_trigger_ids):
+            if trigger_id not in referenced_trigger_ids:
+                raise RevisitContractError(
+                    "REVISIT_TRIGGER_ORPHANED: "
+                    f"cycle.intake.triggers[{trigger_index}].trigger_id "
+                    f"{trigger_id} is not referenced by any selected claim"
+                )
 
 
 def _validate_bindings(raw: dict[str, Any]) -> None:
@@ -2431,7 +2439,8 @@ def validate_cycle(raw: Any) -> dict[str, Any]:
     _require_sha256(raw["intake_sha256"], "cycle.intake_sha256")
     if raw["intake_sha256"] != intake_sha256(raw["intake"]):
         raise RevisitContractError(
-            "cycle.intake_sha256 does not match immutable intake"
+            "REVISIT_INTAKE_DRIFT: cycle.intake_sha256 "
+            "does not match immutable intake"
         )
     _validate_bindings(raw)
     _validate_claims(raw)

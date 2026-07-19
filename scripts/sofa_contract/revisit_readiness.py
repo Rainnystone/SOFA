@@ -428,10 +428,6 @@ def _check_intake_authorities_from_facts(
             raise RevisitContractError(
                 f"required authority is missing: {framing_path}"
             )
-        if sha256_bytes(framing_payload) != framing["sha256"]:
-            raise RevisitContractError(
-                "framing contract bytes do not match registered sha256"
-            )
         raw_contract = json.loads(framing_payload.decode("utf-8"))
         contract = normalize_contract(raw_contract)
         evaluation = evaluate_contract(contract, state_mode="ticker")
@@ -457,10 +453,6 @@ def _check_intake_authorities_from_facts(
             "report_language": contract["report_language"],
             "budget_appetite": contract["budget_appetite"],
         }
-        if snapshot != framing["snapshot"]:
-            raise RevisitContractError(
-                "live framing contract snapshot differs from immutable intake"
-            )
     except (
         OSError,
         UnicodeDecodeError,
@@ -473,24 +465,44 @@ def _check_intake_authorities_from_facts(
             message=str(exc),
             path="cycle.intake.framing",
         )
+    else:
+        if sha256_bytes(framing_payload) != framing["sha256"]:
+            result.fail(
+                code="REVISIT_INTAKE_DRIFT",
+                message="framing contract bytes do not match registered sha256",
+                path="cycle.intake.framing",
+                evidence=framing_path,
+            )
+        elif snapshot != framing["snapshot"]:
+            result.fail(
+                code="REVISIT_INTAKE_DRIFT",
+                message=(
+                    "live framing contract snapshot differs from immutable intake"
+                ),
+                path="cycle.intake.framing",
+                evidence=framing_path,
+            )
 
     for claim_index, claim in enumerate(cycle["intake"]["selected_claims"]):
         source_ref = claim["source_ref"]
         source_path = source_ref["path"]
         source_payload = payload_by_path.get(source_path)
-        try:
-            if source_payload is None:
-                raise RevisitContractError(
-                    f"required authority is missing: {source_path}"
-                )
-            if sha256_bytes(source_payload) != source_ref["sha256"]:
-                raise RevisitContractError(
-                    "selected claim source bytes do not match registered sha256"
-                )
-        except RevisitContractError as exc:
+        if source_payload is None:
             result.fail(
-                code="REVISIT_CYCLE_MALFORMED",
-                message=str(exc),
+                code="REVISIT_INTAKE_DRIFT",
+                message=f"required authority is missing: {source_path}",
+                path=(
+                    f"cycle.intake.selected_claims[{claim_index}].source_ref"
+                ),
+                evidence=claim["claim_id"],
+            )
+        elif sha256_bytes(source_payload) != source_ref["sha256"]:
+            result.fail(
+                code="REVISIT_INTAKE_DRIFT",
+                message=(
+                    "selected claim source bytes do not match registered "
+                    f"sha256: {source_path}"
+                ),
                 path=(
                     f"cycle.intake.selected_claims[{claim_index}].source_ref"
                 ),
