@@ -2775,7 +2775,7 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
             self.assertEqual("artifacts/proof.md", drift_issue.path)
 
     @unittest.skipUnless(CAN_SYMLINK, "requires symbolic links")
-    def test_workspace_alias_absolute_artifact_is_ready_across_routes(self):
+    def test_workspace_alias_canonical_artifact_is_ready_across_routes(self):
         def make_alias_workspace(root: Path) -> tuple[Path, Path, str]:
             workspace, cycle_id = make_task6_ready_workspace(root)
             artifact = workspace / "artifacts" / "proof.md"
@@ -2789,9 +2789,9 @@ class TestReadOnlyReadinessParity(unittest.TestCase):
             cycle["intake"]["triggers"][0]["evidence_refs"] = [
                 {
                     "kind": "artifact",
-                    "path": str(alias / "artifacts" / "proof.md"),
+                    "path": "artifacts/proof.md",
                     "sha256": hashlib.sha256(payload).hexdigest(),
-                    "locator": "Workspace alias absolute artifact proof",
+                    "locator": "Workspace alias artifact proof",
                     "checked_at": cycle["created_at"],
                 }
             ]

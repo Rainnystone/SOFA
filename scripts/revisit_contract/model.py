@@ -273,6 +273,20 @@ def _require_non_empty_text(value: Any, path: str) -> str:
     return value
 
 
+def _require_canonical_workspace_relative_posix_path(value: Any, path: str) -> str:
+    value = _require_non_empty_text(value, path)
+    if (
+        value.startswith("/")
+        or "\\" in value
+        or re.match(r"^[A-Za-z]:", value) is not None
+        or any(component in {"", ".", ".."} for component in value.split("/"))
+    ):
+        raise RevisitContractError(
+            f"{path} must be a canonical workspace-relative POSIX path"
+        )
+    return value
+
+
 def _require_nullable_text(value: Any, path: str) -> str | None:
     if value is None:
         return None
@@ -357,7 +371,9 @@ def _validate_revision(raw: Any, path: str) -> None:
         and raw["revision_id"] != "REV-0001"
     ):
         raise RevisitContractError("initial registration revision_id must be REV-0001")
-    _require_non_empty_text(raw["report_path"], f"{path}.report_path")
+    _require_canonical_workspace_relative_posix_path(
+        raw["report_path"], f"{path}.report_path"
+    )
     _require_sha256(raw["report_sha256"], f"{path}.report_sha256")
     if raw["action_class"] not in ACTION_CLASSES:
         raise RevisitContractError(f"{path}.action_class is unsupported")
@@ -1357,7 +1373,9 @@ def validate_evidence_ref(ref: Any, path: str) -> dict[str, Any]:
         _require_source_id(raw["source_id"], f"{path}.source_id")
     elif kind == "artifact":
         _require_exact_keys(raw, set(ARTIFACT_EVIDENCE_KEYS), path)
-        _require_non_empty_text(raw["path"], f"{path}.path")
+        _require_canonical_workspace_relative_posix_path(
+            raw["path"], f"{path}.path"
+        )
         _require_sha256(raw["sha256"], f"{path}.sha256")
         _require_non_empty_text(raw["locator"], f"{path}.locator")
     else:
@@ -1410,7 +1428,9 @@ def validate_intake_request(raw: Any) -> dict[str, Any]:
         source_path = f"{claim_path}.source_ref"
         source = _require_object(claim["source_ref"], source_path)
         _require_exact_keys(source, _CLAIM_SOURCE_REF_KEYS, source_path)
-        _require_non_empty_text(source["path"], f"{source_path}.path")
+        _require_canonical_workspace_relative_posix_path(
+            source["path"], f"{source_path}.path"
+        )
         _require_sha256(source["sha256"], f"{source_path}.sha256")
         _require_non_empty_text(source["locator"], f"{source_path}.locator")
         _require_nullable_text(
@@ -1504,7 +1524,9 @@ def _validate_intake(value: Any, cycle_id: str) -> None:
         base_path,
     )
     _require_revision_id(base["revision_id"], f"{base_path}.revision_id")
-    _require_non_empty_text(base["report_path"], f"{base_path}.report_path")
+    _require_canonical_workspace_relative_posix_path(
+        base["report_path"], f"{base_path}.report_path"
+    )
     _require_sha256(base["report_sha256"], f"{base_path}.report_sha256")
     if base["action_class"] not in ACTION_CLASSES:
         raise RevisitContractError(f"{base_path}.action_class is unsupported")
@@ -1646,7 +1668,9 @@ def _validate_intake(value: Any, cycle_id: str) -> None:
             {"path", "sha256", "locator", "historical_claim_id"},
             source_path,
         )
-        _require_non_empty_text(source["path"], f"{source_path}.path")
+        _require_canonical_workspace_relative_posix_path(
+            source["path"], f"{source_path}.path"
+        )
         _require_sha256(source["sha256"], f"{source_path}.sha256")
         _require_non_empty_text(source["locator"], f"{source_path}.locator")
         _require_nullable_text(
@@ -2060,7 +2084,9 @@ def _validate_rerun_artifact(
     kind = _require_non_empty_text(artifact["kind"], f"{path}.kind")
     if kind not in RERUN_KINDS:
         raise RevisitContractError("rerun artifact kind is unsupported")
-    artifact_path = _require_non_empty_text(artifact["path"], f"{path}.path")
+    artifact_path = _require_canonical_workspace_relative_posix_path(
+        artifact["path"], f"{path}.path"
+    )
     cycle_id = raw["cycle_id"]
 
     if kind == "bridge":
@@ -2255,7 +2281,7 @@ def _validate_report_candidate(raw: dict[str, Any]) -> None:
         raise RevisitContractError(
             "report candidate revision_of must equal the base revision ID"
         )
-    report_path = _require_non_empty_text(
+    report_path = _require_canonical_workspace_relative_posix_path(
         candidate["report_path"], f"{path}.report_path"
     )
     basename_pattern = re.compile(

@@ -3225,7 +3225,7 @@ class TestRevisitCycleStartCli(unittest.TestCase):
                     self.assertEqual(2, result.returncode, result.stderr)
                     self.assertRegex(
                         result.stderr,
-                        r"absolute workspace path is forbidden|forbidden '\.\.'|path escapes workspace",
+                        r"canonical workspace-relative POSIX path|absolute workspace path is forbidden|forbidden '\.\.'|path escapes workspace",
                     )
                     self.assertEqual(before, snapshot_tree(workspace))
 
@@ -9450,6 +9450,155 @@ class TestPointerSchema(unittest.TestCase):
             ),
             getattr(revisit_contract, "ACTION_CLASSES", None),
         )
+
+
+class TestCanonicalPersistedPaths(unittest.TestCase):
+    def test_model_and_store_reject_noncanonical_persisted_paths_without_mutation(
+        self,
+    ):
+        def artifact(path):
+            return {
+                "kind": "artifact",
+                "path": path,
+                "sha256": "a" * 64,
+                "locator": "Evidence locator",
+                "checked_at": "2026-07-15T00:00:00Z",
+            }
+
+        def intake_request(path):
+            return {
+                "triggers": [
+                    {
+                        "kind": "upgrade",
+                        "statement": "A named milestone changed.",
+                        "observed_at": "2026-07-15",
+                        "evidence_refs": [artifact(path)],
+                    }
+                ],
+                "selected_claims": [
+                    {
+                        "statement": "The prior claim remains relevant.",
+                        "source_ref": {
+                            "path": path,
+                            "sha256": "b" * 64,
+                            "locator": "Claim 1",
+                            "historical_claim_id": None,
+                        },
+                        "importance": "critical",
+                        "selection_reasons": ["trigger_affected"],
+                        "trigger_indexes": [1],
+                        "inherited_grade": "A",
+                        "inherited_confidence": "high",
+                        "inherited_evidence": [],
+                    }
+                ],
+            }
+
+        def persisted_cycle(path):
+            cycle = make_minimal_cycle()
+            cycle["intake"]["base_revision"]["report_path"] = path
+            cycle["intake"]["selected_claims"][0]["source_ref"]["path"] = path
+            cycle["intake"]["triggers"][0]["evidence_refs"] = [artifact(path)]
+            cycle["intake_sha256"] = test_semantic_sha256(cycle["intake"])
+            return attach_valid_audit(cycle)
+
+        invalid_paths = (
+            "/reports/final.md",
+            "C:\\reports\\final.md",
+            "\\\\server\\share\\final.md",
+            "reports/../final.md",
+            "reports\\final.md",
+            "reports/./final.md",
+            "reports//final.md",
+            "reports/final.md/",
+        )
+        valid_path = "reports/研究/最终.md"
+
+        for path in invalid_paths:
+            with self.subTest(path=path, owner="pointer"):
+                pointer = revisit_contract.empty_pointer()
+                pointer["current_revision"] = make_initial_revision()
+                pointer["current_revision"]["report_path"] = path
+                original = copy.deepcopy(pointer)
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    "must be a canonical workspace-relative POSIX path",
+                ):
+                    revisit_contract.validate_pointer(pointer)
+                self.assertEqual(original, pointer)
+
+            with self.subTest(path=path, owner="intake-request"):
+                request = intake_request(path)
+                original = copy.deepcopy(request)
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    "must be a canonical workspace-relative POSIX path",
+                ):
+                    revisit_contract.validate_intake_request(request)
+                self.assertEqual(original, request)
+
+            with self.subTest(path=path, owner="cycle"):
+                cycle = persisted_cycle(path)
+                original = copy.deepcopy(cycle)
+                with self.assertRaisesRegex(
+                    revisit_contract.RevisitContractError,
+                    "must be a canonical workspace-relative POSIX path",
+                ):
+                    revisit_contract.validate_cycle(cycle)
+                self.assertEqual(original, cycle)
+
+            with self.subTest(path=path, owner="strict-loads"):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace = Path(temp_dir)
+                    pointer = revisit_contract.empty_pointer()
+                    pointer["current_revision"] = make_initial_revision()
+                    pointer["current_revision"]["report_path"] = path
+                    pointer_path = workspace / revisit_contract.POINTER_FILENAME
+                    pointer_path.write_bytes(
+                        revisit_contract.canonical_document_bytes(pointer)
+                    )
+                    pointer_bytes = pointer_path.read_bytes()
+                    with self.assertRaisesRegex(
+                        revisit_contract.RevisitContractError,
+                        "must be a canonical workspace-relative POSIX path",
+                    ):
+                        revisit_contract.load_pointer(workspace)
+                    self.assertEqual(pointer_bytes, pointer_path.read_bytes())
+
+                    cycle = persisted_cycle(path)
+                    cycle_path = (
+                        workspace
+                        / revisit_contract.CYCLES_DIRNAME
+                        / "RC-0001.json"
+                    )
+                    cycle_path.parent.mkdir()
+                    cycle_path.write_bytes(
+                        revisit_contract.canonical_document_bytes(cycle)
+                    )
+                    cycle_bytes = cycle_path.read_bytes()
+                    with self.assertRaisesRegex(
+                        revisit_contract.RevisitContractError,
+                        "must be a canonical workspace-relative POSIX path",
+                    ):
+                        revisit_contract.load_cycle(workspace, "RC-0001")
+                    self.assertEqual(cycle_bytes, cycle_path.read_bytes())
+
+        pointer = revisit_contract.empty_pointer()
+        pointer["current_revision"] = make_initial_revision()
+        pointer["current_revision"]["report_path"] = valid_path
+        pointer_original = copy.deepcopy(pointer)
+        self.assertIs(pointer, revisit_contract.validate_pointer(pointer))
+        self.assertEqual(pointer_original, pointer)
+
+        request = intake_request(valid_path)
+        request_original = copy.deepcopy(request)
+        self.assertIs(request, revisit_contract.validate_intake_request(request))
+        self.assertEqual(request_original, request)
+
+        cycle = persisted_cycle(valid_path)
+        cycle_original = copy.deepcopy(cycle)
+        self.assertIs(cycle, revisit_contract.validate_cycle(cycle))
+        self.assertEqual(cycle_original, cycle)
 
 
 class TestRevisitStorePaths(unittest.TestCase):
