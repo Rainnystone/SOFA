@@ -340,6 +340,55 @@ TEST_PATH_LITERAL_ALLOWLIST = {
         "reason": "f-string representative worker output path fragment",
         "expected_count": 1,
     },
+    (
+        "tests/test_revisit_contract.py",
+        "/" + "reports/final.md",
+    ): {
+        "reason": "Packet A pointer validate POSIX-absolute rejection owner",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_contract.py",
+        "C:" + "/" + "reports/final.md",
+    ): {
+        "reason": "Packet A pointer strict-load Windows-drive rejection owner",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_contract.py",
+        "\\" * 2 + "server\\share\\final.md",
+    ): {
+        "reason": "Packet A request selected-source UNC rejection owner",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_contract.py",
+        "reports/" + ".." + "/" + "initial.md",
+    ): {
+        "reason": "Packet A cycle base raw-parent rejection owner",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_contract.py",
+        "/" + "claims/selected.md",
+    ): {
+        "reason": "Packet A cycle selected-source strict-load POSIX-absolute rejection owner",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_contract.py",
+        "evidence/" + ".." + "/" + "inherited.md",
+    ): {
+        "reason": "Packet A cycle inherited-artifact raw-parent rejection owner",
+        "expected_count": 1,
+    },
+    (
+        "tests/test_revisit_contract.py",
+        "C:" + "/" + "evidence/accepted.md",
+    ): {
+        "reason": "Packet A cycle accepted-artifact Windows-drive rejection owner",
+        "expected_count": 1,
+    },
 }
 
 
@@ -611,8 +660,8 @@ class TestSofaStructure(unittest.TestCase):
         unexpected, stale = classify(occurrences, allowlist)
         self.assertEqual({}, unexpected)
         self.assertEqual({}, stale)
-        self.assertEqual(26, sum(entry["expected_count"] for entry in allowlist.values()))
-        self.assertEqual(26, sum(len(records) for records in occurrences.values()))
+        self.assertEqual(33, sum(entry["expected_count"] for entry in allowlist.values()))
+        self.assertEqual(33, sum(len(records) for records in occurrences.values()))
         self.assertEqual(
             [],
             [key for key, entry in allowlist.items() if not entry["reason"].strip()],
