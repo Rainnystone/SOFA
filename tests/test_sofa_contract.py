@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import subprocess
@@ -15,6 +16,7 @@ from sofa_contract import ContractIssue, ContractProfile, ContractResult, evalua
 from sofa_contract.workspace import iter_jsonl_records, read_json_file, read_text_file
 from capability_policy import RESULT_STATUS_COMPLETED, RESULT_STATUS_DEGRADED, STAGE0_LOOP_ID
 from sofa_contract import evaluate as evaluate_module
+import revisit_contract
 
 
 class TestContractResultModel(unittest.TestCase):
@@ -279,6 +281,7 @@ class TestWorkspaceStateAndReportContract(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            write_initial_report_pointer(workspace, reports / "final.md")
 
             result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="final_report"))
 
@@ -372,6 +375,7 @@ class TestWorkspaceStateAndReportContract(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            write_initial_report_pointer(workspace, reports / "appendix.md")
 
             result = evaluate_workspace(workspace, ContractProfile(mode="ticker", target="final_report"))
 
@@ -414,6 +418,7 @@ def write_completed_loop_workspace(workspace: Path):
         ),
         encoding="utf-8",
     )
+    write_initial_report_pointer(workspace, reports / "final.md")
 
 
 class TestSearchAndDispatchContract(unittest.TestCase):
@@ -1512,6 +1517,664 @@ def write_dossier_ready_workspace(workspace: Path) -> None:
         "".join(json.dumps(record) + "\n" for record in dispatch_records),
         encoding="utf-8",
     )
+
+
+def write_complete_ticker_report(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        (
+            "\n".join(
+                [
+                    "# Final Report",
+                    "Conclusion: research status is Watch with Trigger.",
+                    "Confidence: medium.",
+                    "Time horizon: 12 months.",
+                    "Top supporting evidence: evidence_ledger.md#loop-1.",
+                    "Strongest counter evidence: customer qualification risk.",
+                    "Evidence map: evidence_ledger.md.",
+                    "Financial bridge: revenue bridge is constrained by qualification timing.",
+                    "Catalyst clock: next filing and customer update.",
+                    "Red-team results: unresolved substitution risk.",
+                    "Invalidation triggers: lost customer qualification.",
+                    "Watch protocol: monitor customer updates.",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+
+
+def write_initial_report_pointer(workspace: Path, report: Path) -> None:
+    relative = report.relative_to(workspace).as_posix()
+    (workspace / "revisit_contract.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mode": "ticker",
+                "current_revision": {
+                    "revision_id": "REV-0001",
+                    "cycle_id": None,
+                    "report_path": relative,
+                    "report_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+                    "action_class": "Watch with Trigger",
+                    "validated_at": "2026-07-15T00:00:00Z",
+                    "revision_of": None,
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_revisit_report_pointer(
+    workspace: Path,
+    report: Path,
+    *,
+    action_class: str = "Watch with Trigger",
+) -> dict:
+    revision = {
+        "revision_id": "REV-0002",
+        "cycle_id": "RC-0001",
+        "report_path": report.relative_to(workspace).as_posix(),
+        "report_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+        "action_class": action_class,
+        "validated_at": "2026-07-15T01:00:00Z",
+        "revision_of": "REV-0001",
+    }
+    (workspace / "revisit_contract.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mode": "ticker",
+                "current_revision": revision,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return revision
+
+
+def write_matching_completed_cycle(
+    workspace: Path,
+    revision: dict,
+    *,
+    action_class: str = "Watch with Trigger",
+    status: str = "completed",
+    wrong_metadata: bool = False,
+) -> None:
+    import copy
+
+    from revisit_contract.model import with_audit
+
+    created_at = "2026-07-15T00:30:00Z"
+    source_ref = {
+        "kind": "source",
+        "source_id": "src-001",
+        "checked_at": created_at,
+    }
+    cycle = revisit_contract.create_cycle(
+        cycle_id="RC-0001",
+        candidate_revision_id=revision["revision_id"],
+        base_revision={
+            "revision_id": "REV-0001",
+            "cycle_id": None,
+            "report_path": "reports/initial.md",
+            "report_sha256": "a" * 64,
+            "action_class": "Watch with Trigger",
+            "validated_at": "2026-07-15T00:00:00Z",
+            "revision_of": None,
+        },
+        framing_sha256="b" * 64,
+        framing_snapshot={
+            "subject_resolution": {},
+            "research_posture": "revisit",
+            "time_horizon": "long_term",
+            "market_scope": "global",
+            "risk_appetite": "moderate",
+            "output_expectation": "ticker_dive",
+            "report_language": "en",
+            "budget_appetite": "standard",
+        },
+        frontier_registry_sha256="c" * 64,
+        max_existing_loop_number=0,
+        request={
+            "triggers": [
+                {
+                    "kind": "upgrade",
+                    "statement": "A report candidate is ready for lineage review.",
+                    "observed_at": "2026-07-15",
+                    "evidence_refs": [source_ref],
+                }
+            ],
+            "selected_claims": [
+                {
+                    "statement": "The candidate preserves the selected claim.",
+                    "source_ref": {
+                        "path": "reports/initial.md",
+                        "sha256": "a" * 64,
+                        "locator": "Selected claim",
+                        "historical_claim_id": None,
+                    },
+                    "importance": "critical",
+                    "selection_reasons": ["trigger_affected"],
+                    "trigger_indexes": [1],
+                    "inherited_grade": None,
+                    "inherited_confidence": None,
+                    "inherited_evidence": [],
+                }
+            ],
+        },
+        timestamp=created_at,
+    )
+
+    proposed = copy.deepcopy(cycle)
+    proposed["frontier_bindings"] = [
+        {
+            "frontier_id": "F1",
+            "action": "added",
+            "claim_ids": ["RC-0001-CL-01"],
+            "expected_evidence": "Current source evidence",
+            "baseline_loop_count": 0,
+            "baseline_review_count": 0,
+            "registry_sha256": "c" * 64,
+            "bound_at": "2026-07-15T00:35:00Z",
+        }
+    ]
+    cycle = with_audit(
+        cycle,
+        proposed,
+        "bind-frontier",
+        ["F1", "RC-0001-CL-01"],
+        "2026-07-15T00:35:00Z",
+    )
+
+    proposed = revisit_contract.resolve_claim(
+        cycle,
+        "RC-0001-CL-01",
+        {
+            "status": "confirmed",
+            "revised_statement": None,
+            "current_evidence_refs": [source_ref],
+            "counter_evidence_refs": [],
+            "current_grade": "B",
+            "current_confidence": "medium",
+            "bound_frontier_ids": ["F1"],
+            "rationale": "Current evidence confirms the selected claim.",
+            "missing_proof": None,
+            "attempted_loop_ids": [],
+            "attempted_search_refs": [],
+            "verdict_impact": None,
+            "split_child_ids": [],
+        },
+    )
+    cycle = with_audit(
+        cycle,
+        proposed,
+        "resolve-claim",
+        ["RC-0001-CL-01"],
+        "2026-07-15T00:40:00Z",
+    )
+
+    proposed = revisit_contract.assess_decision(
+        cycle,
+        {
+            "new_action_class": action_class,
+            "financial_bridge_affected": False,
+            "financial_bridge_rationale": (
+                "The accepted claim does not change the modeled financial bridge."
+            ),
+            "risk_class_changed": False,
+            "risk_class_rationale": (
+                "The accepted claim does not change the selected risk class."
+            ),
+            "supporting_claim_ids": ["RC-0001-CL-01"],
+            "verdict_rationale": "The cycle supports the candidate report.",
+            "blocked_claim_ids": [],
+        },
+    )
+    cycle = with_audit(
+        cycle,
+        proposed,
+        "assess-decision",
+        ["RC-0001"],
+        "2026-07-15T00:50:00Z",
+    )
+
+    proposed = revisit_contract.mark_ready_for_report(cycle)
+    cycle = with_audit(
+        cycle,
+        proposed,
+        "check",
+        ["RC-0001"],
+        "2026-07-15T00:55:00Z",
+    )
+
+    report = workspace / revision["report_path"]
+    metadata = revisit_contract.render_report_metadata(cycle)
+    if wrong_metadata:
+        metadata = metadata.replace(
+            "| Change class | evidence_or_claim_only |",
+            "| Change class | action_class_change |",
+            1,
+        )
+    report.write_bytes(
+        report.read_bytes()
+        + metadata.encode("utf-8")
+        + (
+            "\n## Trigger Delta\nObserved trigger validated.\n"
+            "## Claim Delta\nSelected claim confirmed.\n"
+            "## Evidence Freshness Delta\nCurrent evidence checked.\n"
+            "## Frontier Delta\nThree new loops reviewed.\n"
+            "## Financial/Red-Team Delta\nNo mechanical rerun required.\n"
+            "## Unresolved or Blocked Gaps\nNone.\n"
+        ).encode("utf-8")
+    )
+    revision["report_sha256"] = hashlib.sha256(report.read_bytes()).hexdigest()
+    (workspace / "revisit_contract.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mode": "ticker",
+                "current_revision": revision,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    candidate = {
+        "revision_id": revision["revision_id"],
+        "revision_of": revision["revision_of"],
+        "report_path": revision["report_path"],
+        "report_sha256": revision["report_sha256"],
+        "registered_at": "2026-07-15T00:58:00Z",
+    }
+    proposed = revisit_contract.register_report_candidate(cycle, candidate)
+    cycle = with_audit(
+        cycle,
+        proposed,
+        "register-report",
+        [revision["revision_id"]],
+        "2026-07-15T00:58:00Z",
+    )
+    if status == "completed":
+        proposed = copy.deepcopy(cycle)
+        proposed["status"] = "completed"
+        proposed["completed_at"] = "2026-07-15T00:59:00Z"
+        cycle = with_audit(
+            cycle,
+            proposed,
+            "publish",
+            ["RC-0001", revision["revision_id"]],
+            "2026-07-15T00:59:00Z",
+        )
+    elif status != "ready_for_report":
+        raise AssertionError(f"unsupported test cycle status: {status}")
+    revisit_contract.persist_cycle(workspace, cycle, expected_sha256=None)
+
+
+class TestTickerCurrentReportPointer(unittest.TestCase):
+    def test_specific_ticker_report_evaluator_preserves_section_requirements(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            report = workspace / "reports" / "incomplete.md"
+            write_complete_ticker_report(report)
+            report.write_text(
+                report.read_text(encoding="utf-8").replace(
+                    "Watch protocol: monitor customer updates.\n",
+                    "",
+                ),
+                encoding="utf-8",
+            )
+            evaluator = getattr(
+                evaluate_module,
+                "evaluate_specific_ticker_report",
+                None,
+            )
+
+            self.assertTrue(callable(evaluator), "specific ticker report evaluator is missing")
+            result = evaluator(workspace, "reports/incomplete.md")
+            self.assertIn(
+                "FINAL_REPORT_MISSING_WATCH_PROTOCOL",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_complete_unregistered_ticker_report_fails_final_report_readiness(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            write_complete_ticker_report(workspace / "reports" / "final.md")
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "CURRENT_REPORT_UNREGISTERED",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_unregistered_pointer_retains_generic_missing_authority_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertEqual(
+                {"CURRENT_REPORT_UNREGISTERED", "FINAL_REPORT_MISSING"},
+                {
+                    issue.code
+                    for issue in result.failures
+                    if issue.code
+                    in {"CURRENT_REPORT_UNREGISTERED", "FINAL_REPORT_MISSING"}
+                },
+            )
+
+    def test_registered_incomplete_report_cannot_be_masked_by_another_complete_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            registered = workspace / "reports" / "registered.md"
+            write_complete_ticker_report(registered)
+            registered.write_text(
+                registered.read_text(encoding="utf-8").replace(
+                    "Watch protocol: monitor customer updates.\n",
+                    "",
+                ),
+                encoding="utf-8",
+            )
+            write_complete_ticker_report(workspace / "reports" / "mask.md")
+            write_initial_report_pointer(workspace, registered)
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "FINAL_REPORT_MISSING_WATCH_PROTOCOL",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_registered_report_hash_drift_cannot_be_masked_by_another_complete_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            registered = workspace / "reports" / "registered.md"
+            write_complete_ticker_report(registered)
+            write_initial_report_pointer(workspace, registered)
+            registered.write_bytes(registered.read_bytes() + b"hash drift\n")
+            write_complete_ticker_report(workspace / "reports" / "mask.md")
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "CURRENT_REPORT_HASH_DRIFT",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_malformed_pointer_cannot_be_masked_by_complete_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            write_complete_ticker_report(workspace / "reports" / "final.md")
+            (workspace / "revisit_contract.json").write_bytes(
+                b'{"schema_version": 1, invalid json'
+            )
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "CURRENT_REPORT_INVALID",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_unsafe_pointer_report_path_cannot_be_masked_by_complete_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            report = workspace / "reports" / "final.md"
+            write_complete_ticker_report(report)
+            write_initial_report_pointer(workspace, report)
+            pointer = json.loads(
+                (workspace / "revisit_contract.json").read_text(encoding="utf-8")
+            )
+            pointer["current_revision"]["report_path"] = "/".join(
+                ("reports", "..", "outside.md")
+            )
+            (workspace / "revisit_contract.json").write_text(
+                json.dumps(pointer, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "CURRENT_REPORT_INVALID",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_future_revision_requires_matching_completed_cycle_authority(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            report = workspace / "reports" / "revision_REV-0002.md"
+            write_complete_ticker_report(report)
+            write_revisit_report_pointer(workspace, report)
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "CURRENT_REPORT_CYCLE_INVALID",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_future_revision_rejects_candidate_action_lineage_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            report = workspace / "reports" / "revision_REV-0002.md"
+            write_complete_ticker_report(report)
+            revision = write_revisit_report_pointer(
+                workspace,
+                report,
+                action_class="Reject",
+            )
+            write_matching_completed_cycle(workspace, revision)
+            write_complete_ticker_report(workspace / "reports" / "mask.md")
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "CURRENT_REPORT_LINEAGE_MISMATCH",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_future_revision_rejects_non_completed_cycle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            report = workspace / "reports" / "revision_REV-0002.md"
+            write_complete_ticker_report(report)
+            revision = write_revisit_report_pointer(workspace, report)
+            write_matching_completed_cycle(
+                workspace,
+                revision,
+                status="ready_for_report",
+            )
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "CURRENT_REPORT_CYCLE_INVALID",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_future_revision_with_exact_completed_cycle_candidate_passes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            report = workspace / "reports" / "revision_REV-0002.md"
+            write_complete_ticker_report(report)
+            revision = write_revisit_report_pointer(workspace, report)
+            write_matching_completed_cycle(workspace, revision)
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertTrue(result.passed, [issue.display() for issue in result.failures])
+
+    def test_future_revision_requires_its_completed_cycle_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            report = workspace / "reports" / "revision_REV-0002.md"
+            write_complete_ticker_report(report)
+            revision = write_revisit_report_pointer(workspace, report)
+            write_matching_completed_cycle(
+                workspace,
+                revision,
+                wrong_metadata=True,
+            )
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "REVISIT_REPORT_METADATA_MISMATCH",
+                [issue.code for issue in result.failures],
+            )
+
+    def test_specific_evaluator_requires_exactly_one_expected_metadata_block(self):
+        metadata = (
+            "<!-- sofa:revisit-revision:start -->\n"
+            "## Revisit Revision Metadata\n"
+            "revision: REV-0002\n"
+            "<!-- sofa:revisit-revision:end -->"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            report = workspace / "reports" / "revision_REV-0002.md"
+            write_complete_ticker_report(report)
+            report.write_bytes(
+                report.read_bytes()
+                + (metadata + "\n").encode("utf-8")
+                + (
+                    "## Trigger Delta\n"
+                    "## Claim Delta\n"
+                    "## Evidence Freshness Delta\n"
+                    "## Frontier Delta\n"
+                    "## Financial/Red-Team Delta\n"
+                    "## Unresolved or Blocked Gaps\nNone.\n"
+                ).encode("utf-8")
+            )
+
+            exact = evaluate_module.evaluate_specific_ticker_report(
+                workspace,
+                "reports/revision_REV-0002.md",
+                expected_metadata=metadata,
+            )
+            self.assertTrue(exact.passed, [issue.display() for issue in exact.failures])
+
+            exact_payload = report.read_bytes()
+            marker_start = "<!-- sofa:revisit-revision:start -->"
+            marker_end = "<!-- sofa:revisit-revision:end -->"
+            rogue_metadata = (
+                f"{marker_start}\n"
+                "## Revisit Revision Metadata\n"
+                "revision: REV-9999\n"
+                f"{marker_end}\n"
+            ).encode("utf-8")
+            malformed_cases = (
+                ("duplicate-exact", exact_payload + (metadata + "\n").encode("utf-8")),
+                ("additional-managed-block", exact_payload + rogue_metadata),
+                ("orphan-start", exact_payload + (marker_start + "\n").encode("utf-8")),
+                ("orphan-end", exact_payload + (marker_end + "\n").encode("utf-8")),
+                (
+                    "out-of-order",
+                    exact_payload.replace(
+                        (metadata + "\n").encode("utf-8"),
+                        (
+                            f"{marker_end}\n"
+                            "## Revisit Revision Metadata\n"
+                            "revision: REV-0002\n"
+                            f"{marker_start}\n"
+                        ).encode("utf-8"),
+                        1,
+                    ),
+                ),
+            )
+            for label, payload in malformed_cases:
+                with self.subTest(label=label):
+                    report.write_bytes(payload)
+                    duplicated = evaluate_module.evaluate_specific_ticker_report(
+                        workspace,
+                        "reports/revision_REV-0002.md",
+                        expected_metadata=metadata,
+                    )
+                    self.assertIn(
+                        "REVISIT_REPORT_METADATA_MISMATCH",
+                        [issue.code for issue in duplicated.failures],
+                    )
+
+    def test_empty_ticker_pointer_fails_final_report_readiness(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_dossier_ready_workspace(workspace)
+            write_complete_ticker_report(workspace / "reports" / "final.md")
+            (workspace / "revisit_contract.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "mode": "ticker",
+                        "current_revision": None,
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = evaluate_workspace(
+                workspace,
+                ContractProfile(mode="ticker", target="final_report"),
+            )
+
+            self.assertIn(
+                "CURRENT_REPORT_UNREGISTERED",
+                [issue.code for issue in result.failures],
+            )
 
 
 class TestDossierValidatorContractIntegration(unittest.TestCase):

@@ -594,6 +594,11 @@ def _validate_v3_registry(registry: dict[str, Any]) -> None:
             if field in frontier and not isinstance(frontier[field], list):
                 raise LifecycleError(f"frontier {frontier_id}.{field} must be a list")
 
+        _validate_v3_lifecycle(frontier, frontier_id)
+        _validate_v3_review_decisions(frontier, frontier_id)
+        _validate_v3_review_lifecycle_coherence(frontier, frontier_id)
+        _validate_v3_evidence_pointers(frontier, frontier_id)
+
         if "layer" not in frontier:
             raise LifecycleError(f"frontier {frontier_id}.layer is required")
         layer = frontier["layer"]
@@ -613,6 +618,351 @@ def _validate_v3_registry(registry: dict[str, Any]) -> None:
     for frontier_id, frontier in frontier_by_id.items():
         _validate_source_provenance(frontier, frontier_id, frontier_by_id)
         _validate_parent_relationship(frontier, frontier_id, frontier_by_id)
+
+
+def _validate_v3_lifecycle(frontier: dict[str, Any], frontier_id: str) -> None:
+    """Strictly validate every lifecycle row of a v3 frontier.
+
+    Each present row must be a dict with exactly {to, at_loop, ts} plus an
+    optional non-empty ``rationale`` and an optional ``retire_category``
+    (only valid when ``to == "Retired"``). ``to`` must be a STATUSES member,
+    ``at_loop`` a non-negative strict int (writers seed it from the loop
+    count, which is 0 before any loop is bound), ``ts`` either ``None`` or a
+    non-empty str.
+
+    Timestamp monotonicity rule (documented): a ``None`` ts is treated as
+    unorderable (writers may seed several rows with ``ts=None`` before real
+    timestamps exist). Monotonicity is enforced only over the subsequence of
+    non-null ts values, compared as strings (lexicographic, which matches
+    ISO-8601 UTC ordering for the writer-produced format) and required to be
+    non-decreasing. This keeps ordering well-defined without sorting while
+    accepting the writer's ``ts=None`` seeding shape.
+    """
+    lifecycle = frontier.get("lifecycle")
+    if lifecycle is None:
+        return
+
+    required = {"to", "at_loop", "ts"}
+    optional = {"rationale", "retire_category"}
+    allowed = required | optional
+
+    previous_ts: str | None = None
+    previous_status: str | None = None
+    allowed_next = {
+        None: frozenset({"New"}),
+        "New": frozenset({"Active", "Retired"}),
+        "Active": frozenset({"Active", "Continued", "Retired"}),
+        "Continued": frozenset({"Active", "Retired"}),
+        "Retired": frozenset(),
+    }
+    for position, row in enumerate(lifecycle):
+        location = f"frontier {frontier_id}.lifecycle[{position}]"
+        if not isinstance(row, dict):
+            raise LifecycleError(f"{location} must be an object")
+        keys = set(row)
+        missing = required - keys
+        if missing:
+            raise LifecycleError(f"{location} missing required field: {sorted(missing)[0]}")
+        unknown = keys - allowed
+        if unknown:
+            raise LifecycleError(f"{location} has unknown field: {sorted(unknown)[0]}")
+
+        to_status = row["to"]
+        if to_status not in STATUSES:
+            raise LifecycleError(f"{location} has unsupported status: {to_status}")
+        if to_status not in allowed_next[previous_status]:
+            previous_label = "BEGIN" if previous_status is None else previous_status
+            raise LifecycleError(
+                f"{location} has no matching lifecycle transition in writer grammar: "
+                f"{previous_label} -> {to_status}"
+            )
+        previous_status = to_status
+        # Lifecycle at_loop is a non-negative strict int. Writers seed it from
+        # the loop count, which is 0 before any loop is bound (e.g. an early
+        # retire with no ledger loops), so 0 is an accepted writer-produced
+        # value; negative, bool, float, and string values are rejected.
+        _require_strict_int(row["at_loop"], f"{location}.at_loop", minimum=0)
+
+        ts = row["ts"]
+        if ts is not None and (not isinstance(ts, str) or not ts):
+            raise LifecycleError(f"{location}.ts must be null or a non-empty string")
+
+        if "rationale" in row:
+            rationale = row["rationale"]
+            if not isinstance(rationale, str) or not rationale:
+                raise LifecycleError(f"{location}.rationale must be a non-empty string")
+
+        if "retire_category" in row:
+            retire_category = row["retire_category"]
+            if to_status != "Retired":
+                raise LifecycleError(
+                    f"{location}.retire_category is only valid when to=='Retired'"
+                )
+            if (
+                not isinstance(retire_category, str)
+                or retire_category not in VALID_RETIRE_CATEGORIES
+            ):
+                raise LifecycleError(
+                    f"{location}.retire_category has unsupported category: {retire_category}"
+                )
+
+        # Timestamp monotonicity: compare only non-null ts values in row order.
+        if ts is not None:
+            if previous_ts is not None and ts < previous_ts:
+                raise LifecycleError(
+                    f"{location}.ts must be non-decreasing across lifecycle rows"
+                )
+            previous_ts = ts
+
+    if lifecycle:
+        final_to = lifecycle[-1].get("to")
+        persisted_status = frontier.get("status")
+        if final_to != persisted_status:
+            raise LifecycleError(
+                f"frontier {frontier_id} status {persisted_status!r} must equal "
+                f"final lifecycle to {final_to!r}"
+            )
+
+
+def _validate_v3_review_decisions(frontier: dict[str, Any], frontier_id: str) -> None:
+    """Strictly validate every review decision row and its portfolio actions."""
+    review_decisions = frontier.get("review_decisions")
+    if review_decisions is None:
+        return
+
+    required = {
+        "review_number",
+        "at_loop",
+        "decision",
+        "retire_category",
+        "rationale_short",
+        "portfolio_actions",
+    }
+    max_reviews = frontier.get("max_reviews")
+    previous_review_number = 0
+    previous_at_loop: int | None = None
+
+    for position, row in enumerate(review_decisions):
+        location = f"frontier {frontier_id}.review_decisions[{position}]"
+        if not isinstance(row, dict):
+            raise LifecycleError(f"{location} must be an object")
+        keys = set(row)
+        missing = required - keys
+        if missing:
+            raise LifecycleError(f"{location} missing required field: {sorted(missing)[0]}")
+        unknown = keys - required
+        if unknown:
+            raise LifecycleError(f"{location} has unknown field: {sorted(unknown)[0]}")
+
+        review_number = _require_strict_int(
+            row["review_number"], f"{location}.review_number", minimum=1
+        )
+        if review_number != previous_review_number + 1:
+            raise LifecycleError(
+                f"{location}.review_number must be strictly increasing from 1"
+            )
+        previous_review_number = review_number
+
+        if max_reviews is not None and review_number > int(max_reviews):
+            raise LifecycleError(
+                f"{location}.review_number {review_number} exceeds max_reviews {max_reviews}"
+            )
+
+        at_loop = _require_strict_int(row["at_loop"], f"{location}.at_loop", minimum=1)
+        if previous_at_loop is not None and at_loop < previous_at_loop:
+            raise LifecycleError(
+                f"{location}.at_loop must be non-decreasing across review rows"
+            )
+        previous_at_loop = at_loop
+
+        decision = row["decision"]
+        if decision not in {"Continued", "Retired"}:
+            raise LifecycleError(f"{location}.decision has unsupported status: {decision}")
+
+        retire_category = row["retire_category"]
+        if decision == "Retired":
+            if (
+                not isinstance(retire_category, str)
+                or retire_category not in REVIEW_RETIRE_CATEGORIES
+            ):
+                raise LifecycleError(
+                    f"{location}.retire_category has unsupported review category: {retire_category}"
+                )
+        elif retire_category is not None:
+            raise LifecycleError(
+                f"{location}.retire_category must be null unless decision=='Retired'"
+            )
+
+        rationale_short = row["rationale_short"]
+        if rationale_short is not None and (
+            not isinstance(rationale_short, str) or not rationale_short
+        ):
+            raise LifecycleError(
+                f"{location}.rationale_short must be null or a non-empty string"
+            )
+
+        portfolio_actions = row["portfolio_actions"]
+        if not isinstance(portfolio_actions, list):
+            raise LifecycleError(f"{location}.portfolio_actions must be a list")
+        for action_index, action in enumerate(portfolio_actions):
+            _validate_v3_portfolio_action(
+                action, f"{location}.portfolio_actions[{action_index}]"
+            )
+
+    review_count = frontier.get("review_count")
+    if review_count is not None and int(review_count) != len(review_decisions):
+        raise LifecycleError(
+            f"frontier {frontier_id} review_count {review_count} must equal "
+            f"len(review_decisions)={len(review_decisions)}"
+        )
+
+
+def _validate_v3_review_lifecycle_coherence(
+    frontier: dict[str, Any], frontier_id: str
+) -> None:
+    """Pair reviews to distinct writer-produced transitions in history order."""
+    review_decisions = frontier.get("review_decisions") or []
+    lifecycle = frontier.get("lifecycle") or []
+    next_lifecycle_index = 0
+    matched_indexes: set[int] = set()
+    for position, row in enumerate(review_decisions):
+        decision = row.get("decision")
+        at_loop = row.get("at_loop")
+        matched_index = next(
+            (
+                index
+                for index in range(next_lifecycle_index, len(lifecycle))
+                if lifecycle[index].get("to") == decision
+                and lifecycle[index].get("at_loop") == at_loop
+            ),
+            None,
+        )
+        if matched_index is None:
+            location = f"frontier {frontier_id}.review_decisions[{position}]"
+            raise LifecycleError(
+                f"{location} decision={decision} at_loop={at_loop} has no matching "
+                "lifecycle transition"
+            )
+        predecessor = (
+            lifecycle[matched_index - 1].get("to")
+            if matched_index > 0
+            else None
+        )
+        if predecessor != "Active":
+            location = f"frontier {frontier_id}.review_decisions[{position}]"
+            raise LifecycleError(
+                f"{location} must match a transition from Active"
+            )
+        matched_indexes.add(matched_index)
+        next_lifecycle_index = matched_index + 1
+
+    for index, row in enumerate(lifecycle):
+        if row.get("to") == "Continued" and index not in matched_indexes:
+            raise LifecycleError(
+                f"frontier {frontier_id}.lifecycle[{index}] Continued transition "
+                "must have exactly one matching review decision"
+            )
+
+
+def _validate_v3_evidence_pointers(frontier: dict[str, Any], frontier_id: str) -> None:
+    """Strictly validate every evidence pointer row: {claim, evidence_id}."""
+    evidence_pointers = frontier.get("evidence_pointers")
+    if evidence_pointers is None:
+        return
+
+    required = {"claim", "evidence_id"}
+    for position, row in enumerate(evidence_pointers):
+        location = f"frontier {frontier_id}.evidence_pointers[{position}]"
+        if not isinstance(row, dict):
+            raise LifecycleError(f"{location} must be an object")
+        keys = set(row)
+        missing = required - keys
+        if missing:
+            raise LifecycleError(f"{location} missing required field: {sorted(missing)[0]}")
+        unknown = keys - required
+        if unknown:
+            raise LifecycleError(f"{location} has unknown field: {sorted(unknown)[0]}")
+        for field in required:
+            value = row[field]
+            if not isinstance(value, str) or not value:
+                raise LifecycleError(
+                    f"{location}.{field} must be a non-empty string"
+                )
+            if any(ch in value for ch in ("\n", "\r", "\u2028", "\u2029")):
+                raise LifecycleError(f"{location}.{field} must be single-line")
+
+
+def _validate_v3_portfolio_action(action: Any, location: str) -> None:
+    """Strictly validate a single portfolio action row by its action type."""
+    if not isinstance(action, dict):
+        raise LifecycleError(f"{location} must be an object")
+    if "action" not in action:
+        raise LifecycleError(f"{location} missing required field: action")
+    action_type = action["action"]
+
+    if action_type == "add":
+        required = {"action", "frontier", "source", "source_frontier", "reason"}
+        _require_action_keys(action, required, location)
+        _require_frontier_id_value(action["frontier"], f"{location}.frontier")
+        source = action["source"]
+        if not isinstance(source, str) or source not in PERSISTED_FRONTIER_SOURCES:
+            raise LifecycleError(f"{location}.source has unsupported source: {source}")
+        source_frontier = action["source_frontier"]
+        if source_frontier is not None:
+            _require_frontier_id_value(
+                source_frontier, f"{location}.source_frontier"
+            )
+        _require_nonempty_str(action["reason"], f"{location}.reason")
+        return
+
+    if action_type == "retire":
+        required = {"action", "frontier", "category", "reason"}
+        _require_action_keys(action, required, location)
+        _require_frontier_id_value(action["frontier"], f"{location}.frontier")
+        category = action["category"]
+        if not isinstance(category, str) or category not in VALID_RETIRE_CATEGORIES:
+            raise LifecycleError(f"{location}.category has unsupported category: {category}")
+        _require_nonempty_str(action["reason"], f"{location}.reason")
+        return
+
+    if action_type == "reprioritize":
+        required = {"action", "frontier", "priority", "reason"}
+        _require_action_keys(action, required, location)
+        _require_frontier_id_value(action["frontier"], f"{location}.frontier")
+        _require_nonempty_str(action["priority"], f"{location}.priority")
+        _require_nonempty_str(action["reason"], f"{location}.reason")
+        return
+
+    if action_type == "reject":
+        required = {"action", "candidate", "reason"}
+        _require_action_keys(action, required, location)
+        _require_nonempty_str(action["candidate"], f"{location}.candidate")
+        _require_nonempty_str(action["reason"], f"{location}.reason")
+        return
+
+    raise LifecycleError(f"{location}.action has unsupported action: {action_type}")
+
+
+def _require_action_keys(
+    action: dict[str, Any], required: set[str], location: str
+) -> None:
+    keys = set(action)
+    missing = required - keys
+    if missing:
+        raise LifecycleError(f"{location} missing required field: {sorted(missing)[0]}")
+    unknown = keys - required
+    if unknown:
+        raise LifecycleError(f"{location} has unknown field: {sorted(unknown)[0]}")
+
+
+def _require_frontier_id_value(value: Any, field: str) -> None:
+    if not isinstance(value, str) or FRONTIER_ID_RE.fullmatch(value) is None:
+        raise LifecycleError(f"{field} must be a stable frontier ID")
+
+
+def _require_nonempty_str(value: Any, field: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise LifecycleError(f"{field} must be a non-empty string")
 
 
 def _validate_persisted_layer_labels(layer_labels: list[Any]) -> None:
@@ -878,6 +1228,8 @@ def transition(
     updated = copy.deepcopy(registry)
     frontier = get_frontier(updated, frontier_id)
     from_status = frontier.get("status")
+    loop_count = int(loop_counts.get(frontier_id, 0))
+    resolved_at_loop = loop_count if at_loop is None else at_loop
 
     _validate_transition_request(
         registry=updated,
@@ -885,7 +1237,7 @@ def transition(
         frontier_id=frontier_id,
         from_status=from_status,
         to_status=to_status,
-        loop_count=int(loop_counts.get(frontier_id, 0)),
+        loop_count=loop_count,
         mode=resolved_mode,
         action=action,
         retire_category=retire_category,
@@ -896,13 +1248,15 @@ def transition(
             registry=updated,
             frontier=frontier,
             frontier_id=frontier_id,
-            loop_count=int(loop_counts.get(frontier_id, 0)),
+            loop_count=loop_count,
         )
-        _record_review_decision(frontier, to_status, retire_category, rationale, at_loop)
+        _record_review_decision(
+            frontier, to_status, retire_category, rationale, resolved_at_loop
+        )
 
     frontier["status"] = to_status
     frontier["retire_category"] = retire_category if to_status == "Retired" else None
-    lifecycle_entry = {"to": to_status, "at_loop": at_loop, "ts": ts}
+    lifecycle_entry = {"to": to_status, "at_loop": resolved_at_loop, "ts": ts}
     if rationale:
         lifecycle_entry["rationale"] = rationale
     if to_status == "Retired" and retire_category:

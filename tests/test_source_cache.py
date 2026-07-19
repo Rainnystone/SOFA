@@ -18,6 +18,8 @@ from source_cache import (  # noqa: E402
     SOURCE_INDEX_FILENAME,
     SOURCES_DIRNAME,
     SourceCacheError,
+    SourceCacheEvaluation,
+    SourceIssue,
     add_source,
     evaluate_index,
     excerpt_sha256,
@@ -271,6 +273,106 @@ class EvaluateIndexTests(unittest.TestCase):
             self.assertIn("sha256", " ".join(issue.message for issue in evaluation.issues))
             self.assertEqual(frozenset(), registered_source_ids(workspace))
 
+    def test_indexed_excerpt_permission_error_is_malformed_and_later_record_is_evaluated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            add_fixture_source(
+                workspace,
+                url="https://www.sec.gov/acme-10k-risk",
+                title="FY2025 10-K — Risk Factors",
+                excerpt_text="Risk factors: single-source substrate dependency.\n",
+            )
+            denied_path = workspace / SOURCES_DIRNAME / "src-001.md"
+            (workspace / SOURCES_DIRNAME / "src-002.md").write_text(
+                "Edited after indexing.\n", encoding="utf-8"
+            )
+            (workspace / SOURCES_DIRNAME / "later-orphan.md").write_text(
+                "Unregistered later file.\n", encoding="utf-8"
+            )
+            original_read_bytes = Path.read_bytes
+
+            def read_bytes(path: Path) -> bytes:
+                if path == denied_path:
+                    raise PermissionError(13, "access denied")
+                return original_read_bytes(path)
+
+            with patch.object(Path, "read_bytes", new=read_bytes):
+                evaluation = evaluate_index(workspace)
+
+            self.assertEqual(["src-001", "src-002"], [record["source_id"] for record in evaluation.records])
+            self.assertEqual(
+                [
+                    SourceIssue(
+                        "SOURCE_INDEX_MALFORMED",
+                        "sources/src-001.md",
+                        "src-001 excerpt cannot be read as UTF-8 text: [Errno 13] access denied",
+                    ),
+                    SourceIssue(
+                        "SOURCE_INDEX_MALFORMED",
+                        "sources/src-002.md",
+                        "src-002 sha256 does not match excerpt contents",
+                    ),
+                ],
+                list(evaluation.issues),
+            )
+            self.assertEqual(
+                [
+                    SourceIssue(
+                        "SOURCE_EXCERPT_UNREGISTERED",
+                        "sources/later-orphan.md",
+                        "file in sources/ has no index record",
+                    )
+                ],
+                list(evaluation.warnings),
+            )
+
+    def test_indexed_excerpt_read_disappearance_is_malformed_not_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            disappeared_path = workspace / SOURCES_DIRNAME / "src-001.md"
+            original_read_bytes = Path.read_bytes
+
+            def read_bytes(path: Path) -> bytes:
+                if path == disappeared_path:
+                    raise FileNotFoundError(2, "file disappeared")
+                return original_read_bytes(path)
+
+            with patch.object(Path, "read_bytes", new=read_bytes):
+                evaluation = evaluate_index(workspace)
+
+            self.assertEqual(["src-001"], [record["source_id"] for record in evaluation.records])
+            self.assertEqual(
+                [
+                    SourceIssue(
+                        "SOURCE_INDEX_MALFORMED",
+                        "sources/src-001.md",
+                        "src-001 excerpt cannot be read as UTF-8 text: [Errno 2] file disappeared",
+                    )
+                ],
+                list(evaluation.issues),
+            )
+
+    def test_pre_read_absent_indexed_excerpt_remains_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            (workspace / SOURCES_DIRNAME / "src-001.md").unlink()
+
+            evaluation = evaluate_index(workspace)
+
+            self.assertEqual(
+                [
+                    SourceIssue(
+                        "SOURCE_EXCERPT_MISSING",
+                        "sources/src-001.md",
+                        "src-001 points at a missing excerpt file",
+                    )
+                ],
+                list(evaluation.issues),
+            )
+
     def test_nested_unregistered_excerpt_file_is_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -287,6 +389,266 @@ class EvaluateIndexTests(unittest.TestCase):
             self.assertIn(
                 ("SOURCE_EXCERPT_UNREGISTERED", "sources/nested/orphan.md"),
                 warnings,
+            )
+
+
+class DocumentAdapterParityTests(unittest.TestCase):
+    """Task 6.3: evaluate_index(workspace) must be byte-identical to the pure
+    document path (plan_index_document + evaluate_index_documents) over the
+    SAME on-disk workspace, for every grounded case. Asserts full equality of
+    records/issues/warnings, not just codes.
+    """
+
+    def _document_evaluation(self, workspace: Path) -> "SourceCacheEvaluation":
+        # Reconstruct exactly what evaluate_index(workspace) does, but routed
+        # through the pure document functions: read index bytes once (with the
+        # adapter's OSError short-circuit), plan, read each planned excerpt
+        # bytes once, list sources/ files once, then evaluate.
+        index_file = workspace / SOURCE_INDEX_FILENAME
+        index_payload: "bytes | None" = None
+        if index_file.exists():
+            try:
+                index_payload = index_file.read_bytes()
+            except OSError as exc:
+                error = SourceCacheError(
+                    f"cannot read {SOURCE_INDEX_FILENAME} as UTF-8 text: {exc}"
+                )
+                issue = SourceIssue(
+                    "SOURCE_INDEX_MALFORMED", SOURCE_INDEX_FILENAME, str(error)
+                )
+                return SourceCacheEvaluation((), (issue,), ())
+        plan = source_cache_store.plan_index_document(index_payload)
+        excerpt_payloads = tuple(
+            (p, (workspace / p).read_bytes())
+            if (workspace / p).is_file()
+            else (p, None)
+            for p in plan.excerpt_paths
+        )
+        sources_dir = workspace / SOURCES_DIRNAME
+        source_files = (
+            tuple(
+                sorted(
+                    str(p.relative_to(workspace).as_posix())
+                    for p in sources_dir.rglob("*")
+                    if p.is_file()
+                )
+            )
+            if sources_dir.is_dir()
+            else ()
+        )
+        return source_cache_store.evaluate_index_documents(
+            plan, excerpt_payloads, source_files
+        )
+
+    def _assert_parity(self, workspace: Path) -> None:
+        filesystem = evaluate_index(workspace)
+        document = self._document_evaluation(workspace)
+        self.assertEqual(
+            filesystem,
+            document,
+            "filesystem evaluate_index must match the pure document path",
+        )
+
+    def test_absent_index_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._assert_parity(Path(tmp))
+
+    def test_empty_index_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / SOURCE_INDEX_FILENAME).write_text("", encoding="utf-8")
+            self._assert_parity(workspace)
+
+    def test_valid_single_record_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            self._assert_parity(workspace)
+
+    def test_malformed_utf8_index_bytes_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / SOURCE_INDEX_FILENAME).write_bytes(b"\x80\x81\n")
+            self._assert_parity(workspace)
+
+    def test_malformed_jsonl_line_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / SOURCE_INDEX_FILENAME).write_text("not json\n", encoding="utf-8")
+            self._assert_parity(workspace)
+
+    def test_index_as_directory_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / SOURCE_INDEX_FILENAME).mkdir()
+            self._assert_parity(workspace)
+
+    def test_duplicate_source_id_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            index = workspace / SOURCE_INDEX_FILENAME
+            first = json.loads(index.read_text(encoding="utf-8").splitlines()[0])
+            dup = dict(first, url="https://other.example.com/x")
+            index.write_text(
+                "\n".join(json.dumps(r, ensure_ascii=False) for r in (first, dup)) + "\n",
+                encoding="utf-8",
+            )
+            self._assert_parity(workspace)
+
+    def test_missing_excerpt_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            record = {
+                "source_id": "src-001",
+                "url": "https://example.com",
+                "title": "Missing excerpt",
+                "retrieved": "2026-07-08",
+                "grade": "B",
+                "excerpt_path": "sources/src-001.md",
+                "sha256": "0" * 64,
+            }
+            (workspace / SOURCE_INDEX_FILENAME).write_text(
+                json.dumps(record) + "\n", encoding="utf-8"
+            )
+            self._assert_parity(workspace)
+
+    def test_hash_mismatch_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            (workspace / SOURCES_DIRNAME / "src-001.md").write_text(
+                "Edited in place.\n", encoding="utf-8"
+            )
+            self._assert_parity(workspace)
+
+    def test_unregistered_top_level_file_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            (workspace / SOURCES_DIRNAME / "stray.md").write_text("stray\n", encoding="utf-8")
+            self._assert_parity(workspace)
+
+    def test_nested_unregistered_file_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            orphan = workspace / SOURCES_DIRNAME / "nested" / "orphan.md"
+            orphan.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_text("stray nested excerpt\n", encoding="utf-8")
+            self._assert_parity(workspace)
+
+    def test_duplicate_sha256_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            index = workspace / SOURCE_INDEX_FILENAME
+            first = json.loads(index.read_text(encoding="utf-8").splitlines()[0])
+            (workspace / SOURCES_DIRNAME / "src-002.md").write_text(EXCERPT, encoding="utf-8")
+            dup = dict(
+                first,
+                source_id="src-002",
+                excerpt_path="sources/src-002.md",
+            )
+            index.write_text(
+                "\n".join(json.dumps(r, ensure_ascii=False) for r in (first, dup)) + "\n",
+                encoding="utf-8",
+            )
+            self._assert_parity(workspace)
+
+    def test_non_utf8_excerpt_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            (workspace / SOURCES_DIRNAME / "src-001.md").write_bytes(b"\x80\x81\xff")
+            self._assert_parity(workspace)
+
+    def test_plan_tracks_both_valid_excerpt_paths_in_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)  # src-001
+            add_fixture_source(
+                workspace,
+                url="https://example.com/other",
+                title="Other source",
+                excerpt_text="A second distinct excerpt.\n",
+            )  # src-002
+            index_file = workspace / SOURCE_INDEX_FILENAME
+            plan = source_cache_store.plan_index_document(index_file.read_bytes())
+            self.assertEqual(
+                ("sources/src-001.md", "sources/src-002.md"),
+                plan.excerpt_paths,
+            )
+
+    def test_invalid_record_issues_never_become_excerpt_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            add_fixture_source(workspace)
+            index = workspace / SOURCE_INDEX_FILENAME
+            valid = json.loads(index.read_text(encoding="utf-8").splitlines()[0])
+            invalid = dict(valid, source_id="src-002", grade="Z", sha256="1" * 64)
+            index.write_text(
+                json.dumps(valid, ensure_ascii=False) + "\n"
+                + json.dumps(invalid, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            plan = source_cache_store.plan_index_document(index.read_bytes())
+            # The invalid (bad grade) record contributes an issue but its
+            # excerpt_path must NOT appear in the planned excerpt_paths.
+            self.assertIn("sources/src-001.md", plan.excerpt_paths)
+            self.assertNotIn("sources/src-002.md", plan.excerpt_paths)
+            self.assertTrue(
+                any(issue.code == "SOURCE_INDEX_MALFORMED" for issue in plan.issues)
+            )
+
+    def test_none_payload_yields_empty_plan(self):
+        plan = source_cache_store.plan_index_document(None)
+        self.assertEqual((), plan.entries)
+        self.assertEqual((), plan.issues)
+        self.assertEqual((), plan.excerpt_paths)
+
+    def test_empty_payload_yields_empty_plan(self):
+        plan = source_cache_store.plan_index_document(b"")
+        self.assertEqual((), plan.entries)
+        self.assertEqual((), plan.issues)
+        self.assertEqual((), plan.excerpt_paths)
+
+    def test_malformed_payload_yields_single_bare_filename_issue(self):
+        plan = source_cache_store.plan_index_document(b"\x80\x81\n")
+        self.assertEqual((), plan.entries)
+        self.assertEqual((), plan.excerpt_paths)
+        self.assertEqual(1, len(plan.issues))
+        issue = plan.issues[0]
+        self.assertEqual("SOURCE_INDEX_MALFORMED", issue.code)
+        # Bare filename, no line number.
+        self.assertEqual(SOURCE_INDEX_FILENAME, issue.location)
+
+    def test_excerpt_payload_mismatch_raises_programming_error(self):
+        # Planned path with NO payload supplied -> SourceCacheError (not a
+        # workspace issue, a programming/config error).
+        plan = source_cache_store.SourceIndexPlan(
+            entries=((1, {"excerpt_path": "sources/src-001.md"}),),
+            issues=(),
+            excerpt_paths=("sources/src-001.md",),
+        )
+        with self.assertRaises(SourceCacheError):
+            source_cache_store.evaluate_index_documents(
+                plan,
+                excerpt_payloads=(),
+                source_files=(),
+            )
+
+    def test_unplanned_excerpt_payload_raises_programming_error(self):
+        plan = source_cache_store.SourceIndexPlan(
+            entries=(),
+            issues=(),
+            excerpt_paths=(),
+        )
+        with self.assertRaises(SourceCacheError):
+            source_cache_store.evaluate_index_documents(
+                plan,
+                excerpt_payloads=(("sources/src-001.md", b"x"),),
+                source_files=(),
             )
 
 

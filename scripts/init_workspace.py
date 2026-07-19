@@ -43,6 +43,11 @@ try:
 except ImportError:
     from scripts.framing_contract import empty_contract, render_contract_markdown
 
+try:
+    from revisit_contract import empty_pointer, persist_pointer
+except ImportError:
+    from scripts.revisit_contract import empty_pointer, persist_pointer
+
 
 def _artifact_path(workspace_path: str, artifact: ArtifactSpec) -> str:
     if artifact.path == ".":
@@ -75,11 +80,25 @@ def _managed_block_markdown(contract, block_name: str, content: str = "") -> str
 def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> None:
     # Normalize workspace path
     workspace_path = os.path.normpath(workspace_path)
+    legacy_initialized = any(
+        os.path.exists(os.path.join(workspace_path, filename))
+        for filename in (
+            "state.json",
+            "research_workflow.md",
+            "frontier_registry.json",
+        )
+    )
     created = []
     updated = []
     skipped_existing = []
     contract = artifact_contract_for_mode(mode)
     mode = contract.mode
+    pointer_path = os.path.join(workspace_path, "revisit_contract.json")
+    exclude_legacy_revisit_scaffold = (
+        mode == "ticker"
+        and legacy_initialized
+        and not os.path.exists(pointer_path)
+    )
 
     registry_path = os.path.join(workspace_path, "frontier_registry.json")
     workflow_path = os.path.join(workspace_path, "research_workflow.md")
@@ -124,7 +143,14 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
         )
 
     # Create directory structure (common)
-    _create_directories(workspace_path, contract.directory_specs, created, skipped_existing)
+    directory_specs = contract.directory_specs
+    if exclude_legacy_revisit_scaffold:
+        directory_specs = tuple(
+            artifact
+            for artifact in directory_specs
+            if artifact.path != "revisit_cycles"
+        )
+    _create_directories(workspace_path, directory_specs, created, skipped_existing)
 
     # Create research_workflow.md
     if not workflow_exists:
@@ -230,6 +256,8 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
         skipped_existing.append("search_log.md")
 
     for ledger_name in contract.machine_ledgers:
+        if exclude_legacy_revisit_scaffold and ledger_name == "revisit_contract.json":
+            continue
         if ledger_name in {"state.json", "frontier_registry.json"}:
             continue
         ledger_path = os.path.join(workspace_path, ledger_name)
@@ -240,6 +268,12 @@ def create_workspace(ticker_or_theme: str, workspace_path: str, mode: str) -> No
             with open(ledger_path, "w", encoding="utf-8") as f:
                 json.dump(framing_contract_doc, f, indent=2, ensure_ascii=False)
                 f.write("\n")
+        elif ledger_name == "revisit_contract.json":
+            persist_pointer(
+                workspace_path,
+                empty_pointer(),
+                expected_sha256=None,
+            )
         else:
             with open(ledger_path, "w", encoding="utf-8"):
                 pass

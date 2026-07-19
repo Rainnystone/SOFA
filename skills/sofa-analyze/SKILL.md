@@ -129,6 +129,12 @@ python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_N stage_N+1
 
 Write a final report and watch protocol. For Ticker Dive and Ultra Dive, action-class language is allowed only after the financial bridge and formal red-team both complete. For Sector Hunt, the deliverable is a map and ranked queue, not an action-class conclusion.
 
+### Ticker Watch Revisit
+
+Only a completed Ticker workspace plus an explicit fired trigger or revisit request may route to `scripts/revisit_cycle.py`. A legacy current report first crosses the one-time explicit `register-current` adoption boundary. There is no trigger auto-detection, scheduler, or Watch Protocol prose parsing, and there is no Sector revisit.
+
+The main thread owns structured intake, claim acceptance, frontier lifecycle commands, revisit lifecycle commands, and publication. Run the `sofa_contract` checks only through `revisit_cycle.py check`; never hand-edit revisit JSON or its Markdown mirror. Use the CLI `status` output and deterministic cycle mirror to determine the next legal action.
+
 Recommended report guidance:
 
 - [final-report.md](references/final-report.md)

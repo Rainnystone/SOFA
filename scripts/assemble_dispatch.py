@@ -3,9 +3,9 @@
 
 Deterministic composition only: fills declared slots in the curated prompt
 template, computes the canonical delivery path, screens the input against
-role forbidden-input tripwires, and attaches the prior-query digest when
-available. Read-only: never writes workspace files, never appends to
-dispatch_log.jsonl, never dispatches.
+role forbidden-input tripwires, and attaches either explicit role-safe revisit
+context or the ordinary machine-trace context. Read-only: never writes
+workspace files, never appends to dispatch_log.jsonl, never dispatches.
 """
 
 from __future__ import annotations
@@ -46,9 +46,25 @@ def main(argv=None) -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--no-digest", action="store_true")
     parser.add_argument("--no-sources", action="store_true", dest="no_sources")
+    parser.add_argument("--revisit-cycle", default=None)
+    parser.add_argument("--frontier", default=None)
+    parser.add_argument("--claim", action="append", default=[])
     args = parser.parse_args(argv)
 
     try:
+        revisit_requested = any(
+            (
+                args.revisit_cycle is not None,
+                args.frontier is not None,
+                bool(args.claim),
+            )
+        )
+        if revisit_requested and (
+            not args.revisit_cycle or not args.frontier or not args.claim
+        ):
+            raise AssemblyError(
+                "revisit dispatch requires cycle, frontier, and at least one claim"
+            )
         with open(args.packet_file, "r", encoding="utf-8") as handle:
             input_text = handle.read()
         name_fields = {
@@ -66,6 +82,9 @@ def main(argv=None) -> int:
             attach_digest=not args.no_digest,
             attach_sources=not args.no_sources,
             out_path=args.out,
+            revisit_cycle_id=args.revisit_cycle,
+            revisit_frontier_id=args.frontier,
+            revisit_claim_ids=tuple(args.claim),
         )
     except (AssemblyError, OSError, ValueError) as exc:
         print(f"ASSEMBLY ERROR: {exc}", file=sys.stderr)

@@ -29,6 +29,9 @@ class TestWorkspaceArtifactContract(unittest.TestCase):
         self.assertIn("dispatch_log.jsonl", contract.machine_ledgers)
         self.assertIn("scouts", contract.common_directories)
         self.assertIn("maps", contract.common_directories)
+        self.assertIn("revisit_cycles", contract.mode_directories)
+        self.assertIn("revisit_contract.json", contract.mode_artifacts)
+        self.assertIn("revisit_contract.json", contract.machine_ledgers)
         self.assertNotIn("coverage", contract.mode_directories)
         self.assertNotIn("maps/dependency_ladder.md", contract.mode_artifacts)
         self.assertNotIn("coverage", contract.all_scaffold_paths())
@@ -43,6 +46,9 @@ class TestWorkspaceArtifactContract(unittest.TestCase):
         self.assertIn("maps/dependency_ladder.md", contract.all_scaffold_paths())
         self.assertIn("coverage/", contract.created_artifact_labels())
         self.assertIn("maps/dependency_ladder.md", contract.created_artifact_labels())
+        self.assertNotIn("revisit_cycles", contract.mode_directories)
+        self.assertNotIn("revisit_contract.json", contract.mode_artifacts)
+        self.assertNotIn("revisit_contract.json", contract.machine_ledgers)
 
     def test_dependency_ladder_is_main_thread_artifact_not_worker_output(self):
         contract = artifact_contract_for_mode("sector")

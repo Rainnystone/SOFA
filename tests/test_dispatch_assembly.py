@@ -1,10 +1,12 @@
 import hashlib
+import inspect
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +18,12 @@ from dispatch_assembly import (
     AssemblyError,
     assemble_dispatch,
     primary_input_slot_name,
+)
+import scripts.revisit_contract as revisit_contract
+from tests.test_revisit_contract import (
+    attach_valid_audit,
+    make_task7_context_workspace,
+    make_terminal_cycle_fixture,
 )
 
 
@@ -126,6 +134,307 @@ class TestScoutAssembly(unittest.TestCase):
                     name_fields={"loop": "7", "frontier_slug": "../escape"},
                     attach_digest=False,
                 )
+
+
+class TestRevisitDispatchAssembly(unittest.TestCase):
+    def test_revisit_scout_replaces_ordinary_context_attachments(self):
+        self.assertIn(
+            "revisit_cycle_id",
+            inspect.signature(assemble_dispatch).parameters,
+            "assemble_dispatch must expose explicit revisit parameters",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            ordinary = assemble_dispatch(
+                repo_root=ROOT,
+                workspace=workspace,
+                role="scout",
+                slot_values={"frontier_packet": PACKET},
+                name_fields={"loop": "8", "frontier_slug": "qualification"},
+                attach_digest=False,
+                attach_sources=False,
+            )
+            with (
+                mock.patch(
+                    "dispatch_assembly.assemble.build_prior_query_digest",
+                    side_effect=AssertionError("ordinary digest must not be read"),
+                ),
+                mock.patch(
+                    "dispatch_assembly.assemble.render_source_bibliography",
+                    side_effect=AssertionError("ordinary sources must not be read"),
+                ),
+            ):
+                revisit = assemble_dispatch(
+                    repo_root=ROOT,
+                    workspace=workspace,
+                    role="scout",
+                    slot_values={"frontier_packet": PACKET},
+                    name_fields={"loop": "8", "frontier_slug": "qualification"},
+                    revisit_cycle_id=cycle_id,
+                    revisit_frontier_id=frontier_id,
+                    revisit_claim_ids=(f"{cycle_id}-CL-01",),
+                )
+
+            self.assertEqual(["revisit_context"], revisit.attachments)
+            self.assertEqual(1, revisit.dispatch_text.count("### Revisit Context"))
+            self.assertNotIn("### Prior Search Trace", revisit.dispatch_text)
+            self.assertNotIn("### Prior Source Index", revisit.dispatch_text)
+            self.assertNotIn("prior_query_digest", revisit.attachments)
+            self.assertNotIn("source_bibliography", revisit.attachments)
+            self.assertEqual(ordinary.prompt_template, revisit.prompt_template)
+            self.assertEqual(ordinary.delivery_path, revisit.delivery_path)
+
+    def test_revisit_challenge_uses_the_same_replacement_context_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            result = assemble_dispatch(
+                repo_root=ROOT,
+                workspace=workspace,
+                role="challenge",
+                slot_values={
+                    "claim_summary": (
+                        "Accepted current-loop claim summary and unresolved "
+                        "counter-evidence question."
+                    )
+                },
+                name_fields={"loop": "8"},
+                revisit_cycle_id=cycle_id,
+                revisit_frontier_id=frontier_id,
+                revisit_claim_ids=(f"{cycle_id}-CL-01",),
+            )
+
+            self.assertEqual("challenge_probe", result.role_slug)
+            self.assertEqual(["revisit_context"], result.attachments)
+            self.assertIn(cycle_id, result.dispatch_text)
+            self.assertIn(frontier_id, result.dispatch_text)
+            self.assertNotIn("### Prior Search Trace", result.dispatch_text)
+            self.assertNotIn("### Prior Source Index", result.dispatch_text)
+            self.assertNotIn("LEAKED_SCOUT_OUTPUT", result.dispatch_text)
+
+    def test_revisit_suggested_fields_include_exact_trace_only_for_revisit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            ordinary = assemble_dispatch(
+                repo_root=ROOT,
+                workspace=workspace,
+                role="scout",
+                slot_values={"frontier_packet": PACKET},
+                name_fields={"loop": "8", "frontier_slug": "qualification"},
+                attach_digest=False,
+                attach_sources=False,
+            )
+            revisit = assemble_dispatch(
+                repo_root=ROOT,
+                workspace=workspace,
+                role="scout",
+                slot_values={"frontier_packet": PACKET},
+                name_fields={"loop": "8", "frontier_slug": "qualification"},
+                revisit_cycle_id=cycle_id,
+                revisit_frontier_id=frontier_id,
+                revisit_claim_ids=(f"{cycle_id}-CL-01",),
+            )
+
+            self.assertNotIn("revisit_cycle_id", ordinary.suggested_record_fields)
+            self.assertNotIn("frontier_id", ordinary.suggested_record_fields)
+            self.assertNotIn("claim_ids", ordinary.suggested_record_fields)
+            self.assertIn(
+                "revisit_cycle_id",
+                revisit.suggested_record_fields,
+                "revisit dispatch must expose cycle trace fields",
+            )
+            self.assertEqual(
+                cycle_id,
+                revisit.suggested_record_fields["revisit_cycle_id"],
+            )
+            self.assertEqual(
+                frontier_id,
+                revisit.suggested_record_fields["frontier_id"],
+            )
+            self.assertEqual(
+                [f"{cycle_id}-CL-01"],
+                revisit.suggested_record_fields["claim_ids"],
+            )
+
+    def test_revisit_parameters_are_all_or_none_and_require_loop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            common = {
+                "repo_root": ROOT,
+                "workspace": workspace,
+                "role": "scout",
+                "slot_values": {"frontier_packet": PACKET},
+                "name_fields": {"loop": "8", "frontier_slug": "qualification"},
+                "attach_digest": False,
+                "attach_sources": False,
+            }
+            partials = (
+                {"revisit_cycle_id": cycle_id},
+                {
+                    "revisit_cycle_id": cycle_id,
+                    "revisit_frontier_id": frontier_id,
+                },
+                {"revisit_claim_ids": (f"{cycle_id}-CL-01",)},
+            )
+            for partial in partials:
+                with self.subTest(partial=partial):
+                    with self.assertRaisesRegex(
+                        AssemblyError, r"cycle, frontier, and at least one claim"
+                    ):
+                        assemble_dispatch(**common, **partial)
+
+            without_loop = dict(common)
+            without_loop["name_fields"] = {"frontier_slug": "qualification"}
+            with self.assertRaisesRegex(AssemblyError, r"requires --loop"):
+                assemble_dispatch(
+                    **without_loop,
+                    revisit_cycle_id=cycle_id,
+                    revisit_frontier_id=frontier_id,
+                    revisit_claim_ids=(f"{cycle_id}-CL-01",),
+                )
+
+    def test_revisit_context_is_screened_for_isolated_roles(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+            records = [
+                json.loads(line)
+                for line in (workspace / "search_log.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            records[0]["query"] = "F2 target price and market cap"
+            (workspace / "search_log.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                AssemblyError, r"DISPATCH_INPUT_MARKET_DATA|revisit_context"
+            ):
+                assemble_dispatch(
+                    repo_root=ROOT,
+                    workspace=workspace,
+                    role="scout",
+                    slot_values={"frontier_packet": PACKET},
+                    name_fields={"loop": "8", "frontier_slug": "qualification"},
+                    revisit_cycle_id=cycle_id,
+                    revisit_frontier_id=frontier_id,
+                    revisit_claim_ids=(f"{cycle_id}-CL-01",),
+                )
+
+    def test_revisit_dispatch_rejects_an_unrelated_claim(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                Path(temp_dir)
+            )
+
+            with self.assertRaisesRegex(
+                AssemblyError, r"revisit context failed|unknown revisit claim"
+            ):
+                assemble_dispatch(
+                    repo_root=ROOT,
+                    workspace=workspace,
+                    role="scout",
+                    slot_values={"frontier_packet": PACKET},
+                    name_fields={"loop": "8", "frontier_slug": "qualification"},
+                    revisit_cycle_id=cycle_id,
+                    revisit_frontier_id=frontier_id,
+                    revisit_claim_ids=(f"{cycle_id}-CL-99",),
+                )
+
+    def test_revisit_dispatch_translates_non_active_cycle_context_failures(self):
+        for status in ("ready_for_report", "completed", "aborted"):
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    workspace, cycle_id, frontier_id = make_task7_context_workspace(
+                        Path(temp_dir)
+                    )
+                    active_cycle = revisit_contract.load_cycle(workspace, cycle_id)
+                    if status == "ready_for_report":
+                        non_active_cycle = revisit_contract.mark_ready_for_report(
+                            active_cycle
+                        )
+                        attach_valid_audit(non_active_cycle)
+                    else:
+                        non_active_cycle = make_terminal_cycle_fixture(
+                            active_cycle, status
+                        )
+                    revisit_contract.cycle_json_path(workspace, cycle_id).write_bytes(
+                        revisit_contract.canonical_document_bytes(non_active_cycle)
+                    )
+
+                    for role, slot_values, name_fields in (
+                        (
+                            "scout",
+                            {"frontier_packet": PACKET},
+                            {"loop": "8", "frontier_slug": "qualification"},
+                        ),
+                        (
+                            "challenge",
+                            {"claim_summary": "Current claim and counter-evidence."},
+                            {"loop": "8"},
+                        ),
+                    ):
+                        with self.subTest(role=role):
+                            with self.assertRaisesRegex(
+                                AssemblyError,
+                                rf"revisit context failed: revisit cycle {cycle_id} is not active: {status}",
+                            ):
+                                assemble_dispatch(
+                                    repo_root=ROOT,
+                                    workspace=workspace,
+                                    role=role,
+                                    slot_values=slot_values,
+                                    name_fields=name_fields,
+                                    revisit_cycle_id=cycle_id,
+                                    revisit_frontier_id=frontier_id,
+                                    revisit_claim_ids=(f"{cycle_id}-CL-01",),
+                                )
+
+    def test_ordinary_dispatch_snapshot_is_byte_for_byte_unchanged(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = make_workspace(Path(temp_dir))
+            result = assemble_dispatch(
+                repo_root=ROOT,
+                workspace=workspace,
+                role="scout",
+                slot_values={"frontier_packet": PACKET},
+                name_fields={"loop": "7", "frontier_slug": "substrate_supply"},
+                attach_digest=False,
+                attach_sources=False,
+            )
+            normalized = (
+                result.dispatch_text.replace(
+                    result.delivery_abs_path,
+                    f"<WORKSPACE>/{result.delivery_path}",
+                )
+                .replace(str(workspace), "<WORKSPACE>")
+                .replace(str(ROOT), "<REPO_ROOT>")
+            )
+
+            self.assertEqual(
+                "d9bb9d27255b5dd979e5c25d02eecb3d91fb930d9135400ef597488526d8a903",
+                hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+            )
+            self.assertEqual([], result.attachments)
+            self.assertEqual(
+                {
+                    "role": "frontier_scout",
+                    "delivery_path": "scouts/loop7_substrate_supply.md",
+                    "loop_id": "loop_7",
+                    "incomplete_fields": ["dispatch_id", "mechanism", "status"],
+                },
+                result.suggested_record_fields,
+            )
 
 
 class TestScreening(unittest.TestCase):
@@ -610,6 +919,69 @@ class TestAssembleDispatchCli(unittest.TestCase):
             ["dispatch_id", "mechanism", "status"], suggested["incomplete_fields"]
         )
         self.assertIn("Frontier Packet", payload["dispatch_text"])
+
+    def test_revisit_cli_forwards_mandatory_context_with_no_ordinary_attachments(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(base)
+            packet_path = self._write_packet(base)
+            result = run_cli(
+                "--workspace", str(workspace),
+                "--role", "scout",
+                "--packet-file", str(packet_path),
+                "--loop", "8",
+                "--frontier-slug", "qualification",
+                "--revisit-cycle", cycle_id,
+                "--frontier", frontier_id,
+                "--claim", f"{cycle_id}-CL-01",
+                "--no-digest",
+                "--no-sources",
+                "--json",
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(["revisit_context"], payload["attachments"])
+        self.assertIn("### Revisit Context", payload["dispatch_text"])
+        self.assertNotIn("### Prior Search Trace", payload["dispatch_text"])
+        self.assertNotIn("### Prior Source Index", payload["dispatch_text"])
+        self.assertEqual(
+            cycle_id,
+            payload["suggested_record_fields"]["revisit_cycle_id"],
+        )
+
+    def test_revisit_cli_arguments_are_all_or_none(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            workspace, cycle_id, frontier_id = make_task7_context_workspace(base)
+            packet_path = self._write_packet(base)
+            common = (
+                "--workspace", str(workspace),
+                "--role", "scout",
+                "--packet-file", str(packet_path),
+                "--loop", "8",
+                "--frontier-slug", "qualification",
+                "--no-digest",
+                "--no-sources",
+            )
+            partials = (
+                ("--revisit-cycle", cycle_id),
+                ("--frontier", frontier_id),
+                ("--claim", f"{cycle_id}-CL-01"),
+                (
+                    "--revisit-cycle", cycle_id,
+                    "--frontier", frontier_id,
+                ),
+            )
+            results = [run_cli(*common, *partial) for partial in partials]
+
+        for result in results:
+            with self.subTest(stderr=result.stderr):
+                self.assertEqual(1, result.returncode)
+                self.assertIn(
+                    "revisit dispatch requires cycle, frontier, and at least one claim",
+                    result.stderr,
+                )
 
     def test_json_payload_has_documented_field_set_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:

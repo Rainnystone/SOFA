@@ -146,6 +146,7 @@ class TestFrontierLifecycle(unittest.TestCase):
             frontier["parent_frontier"] = parent
             frontier["status"] = status
             frontier["retire_category"] = retire_category
+            self._sync_lifecycle_to_status(frontier)
         frontier_by_id["F6"]["source"] = "discovery"
         frontier_by_id["F6"]["source_frontier"] = "F10"
         registry["frontiers"] = [
@@ -154,6 +155,38 @@ class TestFrontierLifecycle(unittest.TestCase):
         ]
         self.module.validate_registry(registry)
         return registry
+
+    @staticmethod
+    def _sync_lifecycle_to_status(frontier):
+        """Canonicalize a frontier fixture's lifecycle so its final ``to``
+        matches ``frontier["status"]``. Used only to keep existing positive
+        fixtures coherent after they mutate status for unrelated tests."""
+        status = frontier["status"]
+        retire_category = frontier.get("retire_category")
+        proposed_at_loop = frontier.get("proposed_at_loop", 1)
+        lifecycle = [{"to": "New", "at_loop": proposed_at_loop, "ts": None}]
+        if status == "Active":
+            lifecycle.append({"to": "Active", "at_loop": proposed_at_loop, "ts": None})
+        elif status == "Continued":
+            lifecycle.append({"to": "Active", "at_loop": proposed_at_loop, "ts": None})
+            lifecycle.append({"to": "Continued", "at_loop": proposed_at_loop, "ts": None})
+            frontier["review_count"] = 1
+            frontier["review_decisions"] = [
+                {
+                    "review_number": 1,
+                    "at_loop": proposed_at_loop,
+                    "decision": "Continued",
+                    "retire_category": None,
+                    "rationale_short": None,
+                    "portfolio_actions": [],
+                }
+            ]
+        elif status == "Retired":
+            row = {"to": "Retired", "at_loop": proposed_at_loop, "ts": None}
+            if retire_category:
+                row["retire_category"] = retire_category
+            lifecycle.append(row)
+        frontier["lifecycle"] = lifecycle
 
     def test_validate_registry_rejects_unknown_mixed_and_malformed_v3(self):
         valid = self.v3_registry()
@@ -485,6 +518,7 @@ class TestFrontierLifecycle(unittest.TestCase):
             retired = self.v3_registry()
             retired["frontiers"][0]["status"] = "Retired"
             retired["frontiers"][0]["retire_category"] = category
+            self._sync_lifecycle_to_status(retired["frontiers"][0])
             original = copy.deepcopy(retired)
             with self.subTest(valid_retire_category=category):
                 self.assertIs(retired, self.module.validate_registry(retired))
@@ -565,6 +599,7 @@ class TestFrontierLifecycle(unittest.TestCase):
         later_source["status"] = "Retired"
         later_source["retire_category"] = "blocked"
         later_source["layer"] = 5
+        self._sync_lifecycle_to_status(later_source)
         validate_success("forward_retired_unrelated_source", forward_source)
 
         unbound = registry_with_frontiers(2)
@@ -625,6 +660,7 @@ class TestFrontierLifecycle(unittest.TestCase):
         later_parent["layer"] = 1
         later_parent["status"] = "Retired"
         later_parent["retire_category"] = "blocked"
+        self._sync_lifecycle_to_status(later_parent)
         validate_success(
             "forward_retired_parent_with_layer_skip",
             forward_retired_parent,
@@ -685,13 +721,900 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertIs(registry, validated)
         self.assertEqual(original, registry)
 
+    # ------------------------------------------------------------------
+    # Task 6.2: strict nested-member validation (lifecycle / review /
+    # evidence / portfolio actions). Every malformed nested member must be
+    # rejected on ANY frontier (bound or unbound); a valid sibling must not
+    # mask it; the input registry must never be mutated; only clean
+    # LifecycleError may be raised.
+    # ------------------------------------------------------------------
+
+    def _two_frontier_v3_registry(self):
+        """Return a configured v3 registry with two unbound New frontiers."""
+        registry = self.configured_v3_registry(frontier_count=2)
+        # configured_v3_registry leaves every frontier unbound (layer=None);
+        # mirror the spec's canonical RED by making index 0 bound and
+        # index 1 unbound so both code paths are exercised.
+        registry["frontiers"][0]["layer"] = 0
+        registry["frontiers"][0]["parent_frontier"] = None
+        registry["frontiers"][1]["layer"] = None
+        registry["frontiers"][1]["parent_frontier"] = None
+        return registry
+
+    def _canonical_lifecycle_row(self, **overrides):
+        row = {"to": "Active", "at_loop": 1, "ts": "2026-01-01T00:00:00Z"}
+        row.update(overrides)
+        return row
+
+    def _canonical_review_row(self, **overrides):
+        row = {
+            "review_number": 1,
+            "at_loop": 3,
+            "decision": "Continued",
+            "retire_category": None,
+            "rationale_short": "looks good",
+            "portfolio_actions": [],
+        }
+        row.update(overrides)
+        return row
+
+    def _canonical_evidence_row(self, **overrides):
+        row = {"claim": "InP concentration", "evidence_id": "E-17"}
+        row.update(overrides)
+        return row
+
+    def _assert_v3_history_rejected_without_mutation(self, registry):
+        original = copy.deepcopy(registry)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+        self.assertEqual(original, registry)
+
+    def test_v3_nested_member_validation_cannot_be_masked_by_a_valid_sibling(self):
+        for field in ("lifecycle", "review_decisions", "evidence_pointers"):
+            for malformed_index in (0, 1):
+                with self.subTest(field=field, malformed_index=malformed_index):
+                    registry = self.configured_v3_registry(frontier_count=2)
+                    registry["frontiers"][0]["layer"] = 0
+                    registry["frontiers"][0]["parent_frontier"] = None
+                    registry["frontiers"][1]["layer"] = None
+                    registry["frontiers"][1]["parent_frontier"] = None
+                    registry["frontiers"][0][field] = []
+                    registry["frontiers"][1][field] = []
+                    registry["frontiers"][malformed_index][field] = [{"bogus": True}]
+                    original = copy.deepcopy(registry)
+                    with self.assertRaises(self.module.LifecycleError):
+                        self.module.validate_registry(registry)
+                    self.assertEqual(original, registry)
+
+    def test_v3_lifecycle_member_strict_shape_rejections(self):
+        cases = {
+            "scalar_member": "not-a-dict",
+            "missing_to_field": {"at_loop": 1, "ts": None},
+            "missing_at_loop_field": {"to": "Active", "ts": None},
+            "missing_ts_field": {"to": "Active", "at_loop": 1},
+            "unknown_extra_key": {
+                "to": "Active",
+                "at_loop": 1,
+                "ts": None,
+                "extra": True,
+            },
+            "unsupported_status": {"to": "Archived", "at_loop": 1, "ts": None},
+            "at_loop_not_int": {"to": "Active", "at_loop": "1", "ts": None},
+            "at_loop_bool": {"to": "Active", "at_loop": True, "ts": None},
+            "at_loop_negative": {"to": "Active", "at_loop": -1, "ts": None},
+            "at_loop_float": {"to": "Active", "at_loop": 1.0, "ts": None},
+            "ts_not_str_or_none": {"to": "Active", "at_loop": 1, "ts": 5},
+            "ts_empty_string": {"to": "Active", "at_loop": 1, "ts": ""},
+            "rationale_empty_string": {
+                "to": "Active",
+                "at_loop": 1,
+                "ts": None,
+                "rationale": "",
+            },
+            "rationale_wrong_type": {
+                "to": "Active",
+                "at_loop": 1,
+                "ts": None,
+                "rationale": 7,
+            },
+            "retire_category_on_non_retired": {
+                "to": "Active",
+                "at_loop": 1,
+                "ts": None,
+                "retire_category": "blocked",
+            },
+            "retire_category_unknown_vocab": {
+                "to": "Retired",
+                "at_loop": 1,
+                "ts": None,
+                "retire_category": "mystery",
+            },
+        }
+        for name, malformed_row in cases.items():
+            for malformed_index in (0, 1):
+                with self.subTest(case=name, malformed_index=malformed_index):
+                    registry = self._two_frontier_v3_registry()
+                    for frontier in registry["frontiers"]:
+                        frontier["lifecycle"] = [
+                            self._canonical_lifecycle_row(
+                                to="New",
+                                at_loop=frontier["proposed_at_loop"],
+                                ts=None,
+                            )
+                        ]
+                    registry["frontiers"][malformed_index]["lifecycle"].append(
+                        malformed_row
+                    )
+                    original = copy.deepcopy(registry)
+                    with self.assertRaises(self.module.LifecycleError):
+                        self.module.validate_registry(registry)
+                    self.assertEqual(original, registry)
+
+    def test_v3_lifecycle_timestamp_monotonicity(self):
+        # Rule: when there is more than one lifecycle row, every ts must be a
+        # non-null string and the ts values must be non-decreasing (compared as
+        # strings). A None ts is only permitted for a single-row lifecycle.
+        registry = self._two_frontier_v3_registry()
+        registry["frontiers"][0]["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts="2026-06-22T00:00:00Z"),
+            self._canonical_lifecycle_row(
+                to="Active", at_loop=1, ts="2026-06-20T00:00:00Z"
+            ),
+        ]
+        registry["frontiers"][0]["status"] = "Active"
+        original = copy.deepcopy(registry)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+        self.assertEqual(original, registry)
+
+    def test_v3_lifecycle_none_ts_is_unorderable_and_accepted_among_nulls(self):
+        # Documented rule: a None ts is unorderable; monotonicity is enforced
+        # only over the subsequence of non-null ts values. So multiple None-ts
+        # rows are accepted (writer seeding shape), but a later non-null ts
+        # that decreases relative to an earlier non-null ts is rejected.
+        registry = self._two_frontier_v3_registry()
+        registry["frontiers"][0]["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Active", at_loop=1, ts=None),
+        ]
+        registry["frontiers"][0]["status"] = "Active"
+        original_accepted = copy.deepcopy(registry)
+        result = self.module.validate_registry(registry)
+        self.assertIs(registry, result)
+        self.assertEqual(original_accepted, registry)
+
+        # A decreasing non-null ts pair must still be rejected.
+        registry["frontiers"][0]["lifecycle"] = [
+            self._canonical_lifecycle_row(
+                to="New", at_loop=1, ts="2026-06-22T00:00:00Z"
+            ),
+            self._canonical_lifecycle_row(
+                to="Active", at_loop=1, ts="2026-06-20T00:00:00Z"
+            ),
+        ]
+        registry["frontiers"][0]["status"] = "Active"
+        original_rejected = copy.deepcopy(registry)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+        self.assertEqual(original_rejected, registry)
+
+    def test_v3_final_lifecycle_to_must_equal_persisted_status(self):
+        registry = self._two_frontier_v3_registry()
+        registry["frontiers"][0]["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts="2026-06-22T00:00:00Z"),
+            self._canonical_lifecycle_row(
+                to="Continued", at_loop=3, ts="2026-06-24T00:00:00Z"
+            ),
+        ]
+        # persisted status disagrees with final lifecycle to ("Continued")
+        registry["frontiers"][0]["status"] = "Active"
+        original = copy.deepcopy(registry)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+        self.assertEqual(original, registry)
+
+    def test_v3_review_member_strict_shape_rejections(self):
+        base = self._canonical_review_row()
+        cases = {
+            "scalar_member": "not-a-dict",
+            "missing_review_number": {k: v for k, v in base.items() if k != "review_number"},
+            "missing_decision": {k: v for k, v in base.items() if k != "decision"},
+            "missing_portfolio_actions": {
+                k: v for k, v in base.items() if k != "portfolio_actions"
+            },
+            "unknown_extra_key": {**base, "extra": True},
+            "review_number_not_int": {**base, "review_number": "1"},
+            "review_number_bool": {**base, "review_number": True},
+            "review_number_below_one": {**base, "review_number": 0},
+            "at_loop_not_int": {**base, "at_loop": "3"},
+            "at_loop_below_one": {**base, "at_loop": 0},
+            "unsupported_decision": {**base, "decision": "Paused"},
+            "retire_category_set_when_not_retired": {
+                **base,
+                "decision": "Continued",
+                "retire_category": "answered_out",
+            },
+            "retire_category_unknown_vocab_when_retired": {
+                **base,
+                "decision": "Retired",
+                "retire_category": "mystery",
+            },
+            "rationale_short_empty_string": {**base, "rationale_short": ""},
+            "rationale_short_wrong_type": {**base, "rationale_short": 9},
+            "portfolio_actions_not_list": {**base, "portfolio_actions": "x"},
+        }
+        for name, malformed_row in cases.items():
+            for malformed_index in (0, 1):
+                with self.subTest(case=name, malformed_index=malformed_index):
+                    registry = self._two_frontier_v3_registry()
+                    for frontier in registry["frontiers"]:
+                        frontier["review_decisions"] = []
+                        frontier["review_count"] = 0
+                    registry["frontiers"][malformed_index]["review_decisions"].append(
+                        malformed_row
+                    )
+                    original = copy.deepcopy(registry)
+                    with self.assertRaises(self.module.LifecycleError):
+                        self.module.validate_registry(registry)
+                    self.assertEqual(original, registry)
+
+    def test_v3_review_number_must_be_strictly_increasing_from_one(self):
+        registry = self._two_frontier_v3_registry()
+        for frontier in registry["frontiers"]:
+            frontier["review_decisions"] = []
+            frontier["review_count"] = 2
+        registry["frontiers"][0]["review_decisions"] = [
+            self._canonical_review_row(review_number=1, at_loop=3),
+            self._canonical_review_row(review_number=2, at_loop=3),
+        ]
+        # sibling with a nonsequential review_number (skips 1)
+        registry["frontiers"][1]["review_decisions"] = [
+            self._canonical_review_row(review_number=2, at_loop=3),
+        ]
+        registry["frontiers"][1]["review_count"] = 1
+        original = copy.deepcopy(registry)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+        self.assertEqual(original, registry)
+
+    def test_v3_review_at_loop_must_be_nondecreasing(self):
+        registry = self._two_frontier_v3_registry()
+        for frontier in registry["frontiers"]:
+            frontier["review_decisions"] = []
+            frontier["review_count"] = 2
+        registry["frontiers"][0]["review_decisions"] = [
+            self._canonical_review_row(review_number=1, at_loop=6),
+            self._canonical_review_row(review_number=2, at_loop=3),  # decreases
+        ]
+        original = copy.deepcopy(registry)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+        self.assertEqual(original, registry)
+
+    def test_v3_review_count_must_equal_len_review_decisions(self):
+        registry = self._two_frontier_v3_registry()
+        for frontier in registry["frontiers"]:
+            frontier["review_decisions"] = []
+            frontier["review_count"] = 0
+        registry["frontiers"][0]["review_decisions"] = [
+            self._canonical_review_row(review_number=1, at_loop=3),
+        ]
+        # review_count disagrees with the actual number of rows
+        registry["frontiers"][0]["review_count"] = 2
+        original = copy.deepcopy(registry)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+        self.assertEqual(original, registry)
+
+    def test_v3_review_decision_vocabulary_is_writer_derived_bound_and_unbound(self):
+        for malformed_index in (0, 1):
+            for decision in ("New", "Active"):
+                with self.subTest(
+                    target="bound" if malformed_index == 0 else "unbound",
+                    decision=decision,
+                ):
+                    registry = self._two_frontier_v3_registry()
+                    frontier = registry["frontiers"][malformed_index]
+                    at_loop = frontier["proposed_at_loop"]
+                    if decision == "Active":
+                        frontier["status"] = "Active"
+                        frontier["lifecycle"].append(
+                            self._canonical_lifecycle_row(
+                                to="Active",
+                                at_loop=at_loop,
+                                ts=None,
+                            )
+                        )
+                    frontier["review_count"] = 1
+                    frontier["review_decisions"] = [
+                        self._canonical_review_row(
+                            review_number=1,
+                            at_loop=at_loop,
+                            decision=decision,
+                        )
+                    ]
+                    self._assert_v3_history_rejected_without_mutation(registry)
+
+    def test_v3_lifecycle_sequence_is_writer_derived_bound_and_unbound(self):
+        cases = {
+            "reentry_to_new": ("Active", ("New", "Active", "New", "Active")),
+            "first_row_active": ("Active", ("Active",)),
+            "post_retired_active": (
+                "Active",
+                ("New", "Active", "Retired", "Active"),
+            ),
+            "new_to_continued": ("Continued", ("New", "Continued")),
+        }
+        for malformed_index in (0, 1):
+            for label, (status, sequence) in cases.items():
+                with self.subTest(
+                    target="bound" if malformed_index == 0 else "unbound",
+                    case=label,
+                ):
+                    registry = self._two_frontier_v3_registry()
+                    frontier = registry["frontiers"][malformed_index]
+                    at_loop = frontier["proposed_at_loop"]
+                    frontier["status"] = status
+                    frontier["lifecycle"] = []
+                    for to_status in sequence:
+                        row = self._canonical_lifecycle_row(
+                            to=to_status,
+                            at_loop=at_loop,
+                            ts=None,
+                        )
+                        if to_status == "Retired":
+                            row["retire_category"] = "blocked"
+                        frontier["lifecycle"].append(row)
+                    self._assert_v3_history_rejected_without_mutation(registry)
+
+    def test_v3_review_decision_must_match_a_lifecycle_transition(self):
+        registry = self._two_frontier_v3_registry()
+        for frontier in registry["frontiers"]:
+            frontier["review_decisions"] = []
+            frontier["review_count"] = 1
+        # frontier 0 has a lifecycle that ends in Continued at loop 3 ...
+        registry["frontiers"][0]["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts="2026-06-22T00:00:00Z"),
+            self._canonical_lifecycle_row(
+                to="Active", at_loop=1, ts="2026-06-22T00:00:00Z"
+            ),
+            self._canonical_lifecycle_row(
+                to="Continued", at_loop=3, ts="2026-06-24T00:00:00Z"
+            ),
+        ]
+        registry["frontiers"][0]["status"] = "Continued"
+        # ... but the review row claims a Continued decision at a loop that
+        # has no matching lifecycle transition.
+        registry["frontiers"][0]["review_decisions"] = [
+            self._canonical_review_row(review_number=1, at_loop=9, decision="Continued"),
+        ]
+        original = copy.deepcopy(registry)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+        self.assertEqual(original, registry)
+
+    def test_v3_review_decisions_require_nonempty_lifecycle_history(self):
+        for lifecycle_state in ("missing", "empty"):
+            with self.subTest(lifecycle_state=lifecycle_state):
+                registry = self._two_frontier_v3_registry()
+                frontier = registry["frontiers"][0]
+                frontier["status"] = "Continued"
+                frontier["review_count"] = 1
+                frontier["review_decisions"] = [
+                    self._canonical_review_row(
+                        review_number=1,
+                        at_loop=3,
+                        decision="Continued",
+                    )
+                ]
+                if lifecycle_state == "missing":
+                    frontier.pop("lifecycle")
+                else:
+                    frontier["lifecycle"] = []
+                original = copy.deepcopy(registry)
+
+                with self.assertRaises(self.module.LifecycleError):
+                    self.module.validate_registry(registry)
+
+                self.assertEqual(original, registry)
+
+    def test_v3_review_decisions_cannot_share_one_matching_transition(self):
+        registry = self._two_frontier_v3_registry()
+        frontier = registry["frontiers"][0]
+        frontier["status"] = "Continued"
+        frontier["review_count"] = 2
+        frontier["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Active", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Continued", at_loop=3, ts=None),
+        ]
+        frontier["review_decisions"] = [
+            self._canonical_review_row(
+                review_number=1,
+                at_loop=3,
+                decision="Continued",
+            ),
+            self._canonical_review_row(
+                review_number=2,
+                at_loop=3,
+                decision="Continued",
+            ),
+        ]
+        original = copy.deepcopy(registry)
+
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+
+        self.assertEqual(original, registry)
+
+    def test_v3_consecutive_continued_transitions_are_writer_impossible(self):
+        registry = self._two_frontier_v3_registry()
+        frontier = registry["frontiers"][0]
+        frontier["status"] = "Continued"
+        frontier["review_count"] = 2
+        frontier["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Active", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Continued", at_loop=3, ts=None),
+            self._canonical_lifecycle_row(to="Continued", at_loop=3, ts=None),
+        ]
+        frontier["review_decisions"] = [
+            self._canonical_review_row(
+                review_number=1,
+                at_loop=3,
+                decision="Continued",
+            ),
+            self._canonical_review_row(
+                review_number=2,
+                at_loop=3,
+                decision="Continued",
+            ),
+        ]
+        self._assert_v3_history_rejected_without_mutation(registry)
+
+    def test_v3_continued_transition_requires_one_review_bound_and_unbound(self):
+        for malformed_index in (0, 1):
+            for review_state in ("missing", "empty"):
+                with self.subTest(
+                    target="bound" if malformed_index == 0 else "unbound",
+                    review_state=review_state,
+                ):
+                    registry = self._two_frontier_v3_registry()
+                    frontier = registry["frontiers"][malformed_index]
+                    at_loop = frontier["proposed_at_loop"]
+                    frontier["status"] = "Continued"
+                    frontier["lifecycle"] = [
+                        self._canonical_lifecycle_row(to="New", at_loop=at_loop, ts=None),
+                        self._canonical_lifecycle_row(to="Active", at_loop=at_loop, ts=None),
+                        self._canonical_lifecycle_row(
+                            to="Continued",
+                            at_loop=at_loop,
+                            ts=None,
+                        ),
+                    ]
+                    frontier["review_count"] = 0
+                    if review_state == "missing":
+                        frontier.pop("review_decisions")
+                    else:
+                        frontier["review_decisions"] = []
+                    self._assert_v3_history_rejected_without_mutation(registry)
+
+    def test_v3_retired_review_requires_active_predecessor(self):
+        registry = self._two_frontier_v3_registry()
+        frontier = registry["frontiers"][0]
+        at_loop = frontier["proposed_at_loop"]
+        frontier["status"] = "Retired"
+        frontier["retire_category"] = "superseded"
+        frontier["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=at_loop, ts=None),
+            self._canonical_lifecycle_row(
+                to="Retired",
+                at_loop=at_loop,
+                ts=None,
+                retire_category="superseded",
+            ),
+        ]
+
+        standalone = copy.deepcopy(registry)
+        standalone_original = copy.deepcopy(standalone)
+        result = self.module.validate_registry(standalone)
+        self.assertIs(standalone, result)
+        self.assertEqual(standalone_original, standalone)
+
+        frontier["review_count"] = 1
+        frontier["review_decisions"] = [
+            self._canonical_review_row(
+                review_number=1,
+                at_loop=at_loop,
+                decision="Retired",
+                retire_category="superseded",
+            )
+        ]
+        self._assert_v3_history_rejected_without_mutation(registry)
+
+    def test_v3_review_pairing_follows_lifecycle_order(self):
+        registry = self._two_frontier_v3_registry()
+        frontier = registry["frontiers"][0]
+        frontier["status"] = "Retired"
+        frontier["retire_category"] = "superseded"
+        frontier["review_count"] = 2
+        frontier["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Active", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(to="Continued", at_loop=3, ts=None),
+            self._canonical_lifecycle_row(to="Active", at_loop=3, ts=None),
+            self._canonical_lifecycle_row(
+                to="Retired",
+                at_loop=3,
+                ts=None,
+                retire_category="superseded",
+            ),
+        ]
+        frontier["review_decisions"] = [
+            self._canonical_review_row(
+                review_number=1,
+                at_loop=3,
+                decision="Retired",
+                retire_category="superseded",
+            ),
+            self._canonical_review_row(
+                review_number=2,
+                at_loop=3,
+                decision="Continued",
+            ),
+        ]
+        self._assert_v3_history_rejected_without_mutation(registry)
+
+    def test_v3_writer_history_validates_without_mutating_input(self):
+        def assert_valid_unchanged(registry):
+            original = copy.deepcopy(registry)
+            result = self.module.validate_registry(registry)
+            self.assertIs(registry, result)
+            self.assertEqual(original, registry)
+
+        registry = self.module.create_frontier(
+            self.module.make_registry("MXL", "ticker"),
+            name="Writer history",
+            proposed_at_loop=1,
+            source="initial",
+        )
+        assert_valid_unchanged(registry)
+        registry = self.module.transition(
+            registry,
+            "F1",
+            "Active",
+            {"F1": 0},
+            mode="ticker",
+            action="start",
+            at_loop=1,
+            ts="2026-06-22T00:00:00Z",
+        )
+        assert_valid_unchanged(registry)
+        registry = self.module.transition(
+            registry,
+            "F1",
+            "Active",
+            {"F1": 1},
+            mode="ticker",
+            action="noop",
+            at_loop=1,
+            ts="2026-06-23T00:00:00Z",
+        )
+        assert_valid_unchanged(registry)
+        registry = self.module.transition(
+            registry,
+            "F1",
+            "Continued",
+            {"F1": 3},
+            mode="ticker",
+            action="review",
+            rationale="first review",
+            at_loop=3,
+            ts="2026-06-24T00:00:00Z",
+        )
+        assert_valid_unchanged(registry)
+        registry = self.module.transition(
+            registry,
+            "F1",
+            "Active",
+            {"F1": 3},
+            mode="ticker",
+            action="reactivate",
+            at_loop=4,
+            ts="2026-06-25T00:00:00Z",
+        )
+        assert_valid_unchanged(registry)
+        registry = self.module.transition(
+            registry,
+            "F1",
+            "Continued",
+            {"F1": 6},
+            mode="ticker",
+            action="review",
+            rationale="second review",
+            at_loop=6,
+            ts="2026-06-27T00:00:00Z",
+        )
+        assert_valid_unchanged(registry)
+
+        standalone_retire = self.module.create_frontier(
+            self.module.make_registry("MXL", "ticker"),
+            name="Standalone retire",
+            proposed_at_loop=1,
+            source="initial",
+        )
+        standalone_retire = self.module.transition(
+            standalone_retire,
+            "F1",
+            "Retired",
+            {"F1": 0},
+            mode="ticker",
+            action="retire",
+            retire_category="blocked",
+            at_loop=0,
+            ts="2026-06-22T00:00:00Z",
+        )
+        assert_valid_unchanged(standalone_retire)
+
+        review_retire = self.v3_registry()
+        review_retire = self.module.transition(
+            review_retire,
+            "F1",
+            "Retired",
+            {"F1": 3},
+            mode="ticker",
+            action="review",
+            retire_category="superseded",
+            at_loop=3,
+            ts="2026-06-24T00:00:00Z",
+        )
+        assert_valid_unchanged(review_retire)
+
+    def test_v3_max_reviews_bound_enforced_on_review_rows(self):
+        registry = self._two_frontier_v3_registry()
+        for frontier in registry["frontiers"]:
+            frontier["review_decisions"] = []
+            frontier["review_count"] = 1
+            frontier["max_reviews"] = 1
+        registry["frontiers"][0]["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts="2026-06-22T00:00:00Z"),
+            self._canonical_lifecycle_row(
+                to="Active", at_loop=1, ts="2026-06-22T00:00:00Z"
+            ),
+            self._canonical_lifecycle_row(
+                to="Continued", at_loop=3, ts="2026-06-24T00:00:00Z"
+            ),
+        ]
+        registry["frontiers"][0]["status"] = "Continued"
+        registry["frontiers"][0]["review_decisions"] = [
+            # review_number 2 exceeds max_reviews=1
+            self._canonical_review_row(review_number=2, at_loop=3, decision="Continued"),
+        ]
+        registry["frontiers"][0]["review_count"] = 2
+        original = copy.deepcopy(registry)
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.validate_registry(registry)
+        self.assertEqual(original, registry)
+
+    def test_v3_portfolio_action_strict_shape_rejections(self):
+        add_action = {
+            "action": "add",
+            "frontier": "F9",
+            "source": "discovery",
+            "source_frontier": "F1",
+            "reason": "new evidence",
+        }
+        retire_action = {
+            "action": "retire",
+            "frontier": "F2",
+            "category": "blocked",
+            "reason": "done",
+        }
+        reprioritize_action = {
+            "action": "reprioritize",
+            "frontier": "F3",
+            "priority": "high",
+            "reason": "reorder",
+        }
+        reject_action = {
+            "action": "reject",
+            "candidate": "F4",
+            "reason": "no fit",
+        }
+        cases = {
+            "unknown_action": {"action": "promote", "frontier": "F1", "reason": "x"},
+            "missing_action_key": {"frontier": "F1", "reason": "x"},
+            "add_missing_reason": {
+                "action": "add",
+                "frontier": "F9",
+                "source": "discovery",
+                "source_frontier": "F1",
+            },
+            "add_extra_key": {**add_action, "extra": True},
+            "add_bad_source_vocab": {**add_action, "source": "rumour"},
+            "add_bad_frontier_shape": {**add_action, "frontier": "f9"},
+            "add_empty_reason": {**add_action, "reason": ""},
+            "retire_missing_category": {
+                "action": "retire",
+                "frontier": "F2",
+                "reason": "done",
+            },
+            "retire_bad_category_vocab": {**retire_action, "category": "mystery"},
+            "reprioritize_missing_priority": {
+                "action": "reprioritize",
+                "frontier": "F3",
+                "reason": "reorder",
+            },
+            "reprioritize_empty_priority": {**reprioritize_action, "priority": ""},
+            "reject_missing_candidate": {
+                "action": "reject",
+                "reason": "no fit",
+            },
+            "reject_empty_reason": {**reject_action, "reason": ""},
+        }
+        for name, malformed_action in cases.items():
+            for malformed_index in (0, 1):
+                with self.subTest(case=name, malformed_index=malformed_index):
+                    registry = self._two_frontier_v3_registry()
+                    for frontier in registry["frontiers"]:
+                        frontier["review_decisions"] = []
+                        frontier["review_count"] = 0
+                    registry["frontiers"][malformed_index]["review_decisions"] = [
+                        self._canonical_review_row(
+                            review_number=1, at_loop=3, decision="Continued"
+                        )
+                    ]
+                    registry["frontiers"][malformed_index]["review_count"] = 1
+                    registry["frontiers"][malformed_index]["review_decisions"][0][
+                        "portfolio_actions"
+                    ] = [malformed_action]
+                    original = copy.deepcopy(registry)
+                    with self.assertRaises(self.module.LifecycleError):
+                        self.module.validate_registry(registry)
+                    self.assertEqual(original, registry)
+
+    def test_v3_evidence_member_strict_shape_rejections(self):
+        cases = {
+            "scalar_member": "not-a-dict",
+            "missing_claim": {"evidence_id": "E-17"},
+            "missing_evidence_id": {"claim": "InP concentration"},
+            "unknown_extra_key": {
+                "claim": "InP concentration",
+                "evidence_id": "E-17",
+                "extra": True,
+            },
+            "claim_empty_string": {"claim": "", "evidence_id": "E-17"},
+            "claim_wrong_type": {"claim": 5, "evidence_id": "E-17"},
+            "evidence_id_empty_string": {"claim": "InP concentration", "evidence_id": ""},
+            "claim_multiline": {
+                "claim": "line one\nline two",
+                "evidence_id": "E-17",
+            },
+            "evidence_id_multiline": {
+                "claim": "InP concentration",
+                "evidence_id": "E-17\nE-18",
+            },
+        }
+        for name, malformed_row in cases.items():
+            for malformed_index in (0, 1):
+                with self.subTest(case=name, malformed_index=malformed_index):
+                    registry = self._two_frontier_v3_registry()
+                    registry["frontiers"][0]["evidence_pointers"] = []
+                    registry["frontiers"][1]["evidence_pointers"] = []
+                    registry["frontiers"][malformed_index]["evidence_pointers"].append(
+                        malformed_row
+                    )
+                    original = copy.deepcopy(registry)
+                    with self.assertRaises(self.module.LifecycleError):
+                        self.module.validate_registry(registry)
+                    self.assertEqual(original, registry)
+
+    def test_v3_canonical_writer_shapes_still_validate(self):
+        # The exact shapes the existing writers produce MUST still validate.
+        registry = self._two_frontier_v3_registry()
+        registry["frontiers"][0]["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(
+                to="Active", at_loop=1, ts="2026-06-22T00:00:00Z"
+            ),
+        ]
+        registry["frontiers"][0]["status"] = "Active"
+        registry["frontiers"][0]["retire_category"] = None
+        registry["frontiers"][1]["lifecycle"] = [
+            self._canonical_lifecycle_row(to="New", at_loop=1, ts=None),
+            self._canonical_lifecycle_row(
+                to="Active", at_loop=1, ts="2026-06-22T00:00:00Z"
+            ),
+            self._canonical_lifecycle_row(
+                to="Continued", at_loop=3, ts="2026-06-24T00:00:00Z"
+            ),
+            self._canonical_lifecycle_row(
+                to="Retired",
+                at_loop=6,
+                ts="2026-06-27T00:00:00Z",
+                retire_category="blocked",
+            ),
+        ]
+        registry["frontiers"][1]["status"] = "Retired"
+        registry["frontiers"][1]["retire_category"] = "blocked"
+        registry["frontiers"][1]["review_count"] = 1
+        registry["frontiers"][1]["review_decisions"] = [
+            self._canonical_review_row(
+                review_number=1,
+                at_loop=3,
+                decision="Continued",
+                retire_category=None,
+                rationale_short=None,
+                portfolio_actions=[
+                    {
+                        "action": "add",
+                        "frontier": "F9",
+                        "source": "discovery",
+                        "source_frontier": "F2",
+                        "reason": "spinoff",
+                    },
+                    {
+                        "action": "retire",
+                        "frontier": "F2",
+                        "category": "blocked",
+                        "reason": "exhausted",
+                    },
+                    {
+                        "action": "reprioritize",
+                        "frontier": "F2",
+                        "priority": "watch",
+                        "reason": "demote",
+                    },
+                    {
+                        "action": "reject",
+                        "candidate": "F10",
+                        "reason": "out of scope",
+                    },
+                ],
+            )
+        ]
+        registry["frontiers"][1]["evidence_pointers"] = [
+            self._canonical_evidence_row(),
+        ]
+        original = copy.deepcopy(registry)
+        result = self.module.validate_registry(registry)
+        self.assertIs(registry, result)
+        self.assertEqual(original, registry)
+
+    def test_v3_optional_nested_collections_remain_optional(self):
+        # A frontier with no nested key, or an empty list, is still valid.
+        registry = self._two_frontier_v3_registry()
+        del registry["frontiers"][0]["lifecycle"]
+        del registry["frontiers"][0]["review_decisions"]
+        del registry["frontiers"][0]["evidence_pointers"]
+        registry["frontiers"][1]["lifecycle"] = []
+        registry["frontiers"][1]["review_decisions"] = []
+        registry["frontiers"][1]["evidence_pointers"] = []
+        original = copy.deepcopy(registry)
+        result = self.module.validate_registry(registry)
+        self.assertIs(registry, result)
+        self.assertEqual(original, registry)
+
     def test_set_layer_labels_adopts_v2_without_inference_or_history_loss(self):
         registry = self.registry()
+        # Seed legacy nested rows that ARE representable under the strict v3
+        # schema. Adoption must preserve them byte-for-byte and only add
+        # layer=None / parent_frontier=None.
+        registry["frontiers"][0]["status"] = "Continued"
+        registry["frontiers"][0]["review_count"] = 1
+        registry["frontiers"][0]["lifecycle"] = [
+            {"to": "New", "at_loop": 1, "ts": "2026-06-22T00:00:00Z"},
+            {"to": "Active", "at_loop": 1, "ts": "2026-06-22T00:00:00Z"},
+            {"to": "Continued", "at_loop": 3, "ts": "2026-06-25T00:00:00Z"},
+        ]
         registry["frontiers"][0]["review_decisions"] = [
             {
-                "decision": "continue",
+                "review_number": 1,
                 "at_loop": 3,
-                "reason": "Supplier evidence remains incomplete",
+                "decision": "Continued",
+                "retire_category": None,
+                "rationale_short": "Supplier evidence remains incomplete",
+                "portfolio_actions": [],
             }
         ]
         registry["frontiers"][0]["evidence_pointers"] = [
@@ -699,9 +1622,23 @@ class TestFrontierLifecycle(unittest.TestCase):
         ]
         registry["frontiers"][1]["source"] = "discovery"
         registry["frontiers"][1]["source_frontier"] = "F1"
-        registry["frontiers"][1]["lifecycle"].append(
-            {"to": "Continued", "at_loop": 4, "ts": "2026-06-25T00:00:00Z"}
-        )
+        registry["frontiers"][1]["status"] = "Continued"
+        registry["frontiers"][1]["review_count"] = 1
+        registry["frontiers"][1]["lifecycle"] = [
+            {"to": "New", "at_loop": 1, "ts": "2026-06-22T00:00:00Z"},
+            {"to": "Active", "at_loop": 1, "ts": "2026-06-22T00:00:00Z"},
+            {"to": "Continued", "at_loop": 4, "ts": "2026-06-26T00:00:00Z"},
+        ]
+        registry["frontiers"][1]["review_decisions"] = [
+            {
+                "review_number": 1,
+                "at_loop": 4,
+                "decision": "Continued",
+                "retire_category": None,
+                "rationale_short": "Branch still productive",
+                "portfolio_actions": [],
+            }
+        ]
         registry["portfolio_actions"] = [
             {
                 "action": "continue",
@@ -738,6 +1675,38 @@ class TestFrontierLifecycle(unittest.TestCase):
         self.assertEqual("F1", updated["frontiers"][1]["source_frontier"])
         self.assertIsNone(updated["frontiers"][1]["parent_frontier"])
         self.assertIs(updated, self.module.validate_registry(updated))
+
+    def test_set_layer_labels_adoption_fails_atomically_on_unrepresentable_legacy_row(self):
+        # A legacy nested row that is NOT representable under the strict v3
+        # schema must make adoption FAIL ATOMICALLY: raise LifecycleError,
+        # do not mutate the input registry, do not normalize/skip/migrate.
+        registry = self.registry()
+        # Old non-v3 review shape (lowercase "continue", key "reason", missing
+        # the six canonical keys) is unrepresentable under strict v3.
+        registry["frontiers"][0]["review_decisions"] = [
+            {
+                "decision": "continue",
+                "at_loop": 3,
+                "reason": "Supplier evidence remains incomplete",
+            }
+        ]
+        indexed_labels = [
+            (0, "End demand"),
+            (1, "System or platform"),
+            (2, "Component or module"),
+            (3, "Material or process"),
+            (4, "Constrained input or equipment"),
+            (5, "Geography or regulation"),
+        ]
+        original = copy.deepcopy(registry)
+
+        with self.assertRaises(self.module.LifecycleError):
+            self.module.set_layer_labels(registry, indexed_labels)
+
+        # Adoption must not mutate the input registry on failure.
+        self.assertEqual(original, registry)
+        self.assertEqual(2, registry["version"])
+        self.assertNotIn("layer_labels", registry)
 
     def test_v2_ordinary_validation_adds_only_version_and_mixed_schema_checks(self):
         ordinary_cases = [
@@ -1544,6 +2513,7 @@ class TestFrontierLifecycle(unittest.TestCase):
         registry = self.configured_v3_registry(2)
         registry["frontiers"][0]["status"] = "Retired"
         registry["frontiers"][0]["retire_category"] = "blocked"
+        self._sync_lifecycle_to_status(registry["frontiers"][0])
         self.module.validate_registry(registry)
 
         with_retired_parent = self.module.bind_frontier_layer(registry, "F1", layer=1)
@@ -1929,6 +2899,7 @@ class TestFrontierLifecycle(unittest.TestCase):
         }
         numeric_registry_by_id["F2"]["status"] = "Retired"
         numeric_registry_by_id["F2"]["retire_category"] = "blocked"
+        self._sync_lifecycle_to_status(numeric_registry_by_id["F2"])
         self.module.validate_registry(numeric_registry)
         coverage = self.module.derive_frontier_layer_coverage(numeric_registry)
         original_coverage = copy.deepcopy(coverage)
@@ -1955,12 +2926,15 @@ class TestFrontierLifecycle(unittest.TestCase):
         interrupted_by_id["F1"]["layer"] = 1
         interrupted_by_id["F1"]["status"] = "Retired"
         interrupted_by_id["F1"]["retire_category"] = "blocked"
+        self._sync_lifecycle_to_status(interrupted_by_id["F1"])
         interrupted_by_id["F2"]["layer"] = 4
         interrupted_by_id["F2"]["status"] = "Retired"
         interrupted_by_id["F2"]["retire_category"] = "blocked"
+        self._sync_lifecycle_to_status(interrupted_by_id["F2"])
         interrupted_by_id["F3"]["layer"] = 4
         interrupted_by_id["F3"]["status"] = "Retired"
         interrupted_by_id["F3"]["retire_category"] = "barren"
+        self._sync_lifecycle_to_status(interrupted_by_id["F3"])
         self.module.validate_registry(interrupted)
         interrupted_coverage = self.module.derive_frontier_layer_coverage(interrupted)
         original_interrupted = copy.deepcopy(interrupted_coverage)
@@ -2481,6 +3455,46 @@ class TestFrontierLifecycle(unittest.TestCase):
                     )
 
                 self.assertEqual(original, registry)
+
+    def test_transition_defaults_new_to_active_at_loop_from_current_loop_count(self):
+        registry = self.module.make_registry("MXL", "ticker")
+        registry = self.module.create_frontier(
+            registry,
+            name="InP substrate supply concentration",
+            proposed_at_loop=1,
+            source="initial",
+        )
+
+        updated = self.module.transition(
+            registry,
+            "F1",
+            "Active",
+            {"F1": 2},
+            mode="ticker",
+            action="start",
+        )
+
+        frontier = self.module.get_frontier(updated, "F1")
+        self.assertEqual(2, frontier["lifecycle"][-1]["at_loop"])
+        self.assertIs(updated, self.module.validate_registry(updated))
+
+    def test_transition_defaults_due_review_at_loop_for_lifecycle_and_decision(self):
+        registry = self.v3_registry()
+
+        updated = self.module.transition(
+            registry,
+            "F1",
+            "Continued",
+            {"F1": 4},
+            mode="ticker",
+            action="review",
+            rationale="review recorded after one extra loop",
+        )
+
+        frontier = self.module.get_frontier(updated, "F1")
+        self.assertEqual(4, frontier["lifecycle"][-1]["at_loop"])
+        self.assertEqual(4, frontier["review_decisions"][-1]["at_loop"])
+        self.assertIs(updated, self.module.validate_registry(updated))
 
     def test_check_review_due_prevents_duplicate_boundary_review(self):
         registry = self.registry()

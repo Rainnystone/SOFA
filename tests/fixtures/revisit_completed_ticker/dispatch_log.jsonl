@@ -1,0 +1,10 @@
+{"dispatch_id":"dispatch_loop_7_scout","loop_id":"loop_7","role":"frontier_scout","mechanism":"host_subagent","delivery_path":"scouts/loop7_customer_qualification.md","status":"delivered"}
+{"dispatch_id":"dispatch_loop_7_challenge","loop_id":"loop_7","role":"challenge_probe","mechanism":"host_subagent","delivery_path":"challenges/loop7_challenge.md","status":"delivered"}
+{"dispatch_id":"dispatch_loop_8_scout","loop_id":"loop_8","role":"frontier_scout","mechanism":"host_subagent","delivery_path":"scouts/loop8_customer_qualification.md","status":"delivered"}
+{"dispatch_id":"dispatch_loop_8_challenge","loop_id":"loop_8","role":"challenge_probe","mechanism":"host_subagent","delivery_path":"challenges/loop8_challenge.md","status":"delivered"}
+{"dispatch_id":"dispatch_loop_9_scout","loop_id":"loop_9","role":"frontier_scout","mechanism":"host_subagent","delivery_path":"scouts/loop9_customer_qualification.md","status":"delivered"}
+{"dispatch_id":"dispatch_loop_9_challenge","loop_id":"loop_9","role":"challenge_probe","mechanism":"host_subagent","delivery_path":"challenges/loop9_challenge.md","status":"delivered"}
+{"dispatch_id":"dispatch_historical_bridge","loop_id":"loop_9","role":"financial_bridge","mechanism":"host_subagent","delivery_path":"financials/AXTI_bridge.md","status":"delivered"}
+{"dispatch_id":"dispatch_historical_redteam","loop_id":"loop_9","role":"red_team","mechanism":"host_subagent","delivery_path":"redteam/round1_redteam.md","status":"delivered"}
+{"dispatch_id":"dispatch_historical_defense","loop_id":"loop_9","role":"red_team","mechanism":"host_subagent","delivery_path":"redteam/round1_defense.md","status":"delivered"}
+{"dispatch_id":"dispatch_historical_revision","loop_id":"loop_9","role":"red_team","mechanism":"host_subagent","delivery_path":"redteam/thesis_revision.md","status":"delivered"}

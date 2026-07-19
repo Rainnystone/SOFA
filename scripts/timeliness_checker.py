@@ -15,6 +15,17 @@ import re
 _READ_LEDGER_FROM_WORKSPACE = object()
 
 
+def check_revisit_freshness(issues) -> tuple[bool, list[str]]:
+    relevant = [
+        issue for issue in issues
+        if str(issue.code).startswith("REVISIT_FRESHNESS_")
+    ]
+    return (
+        not relevant,
+        [f"{issue.path}: {issue.message}" for issue in relevant],
+    )
+
+
 def check_timeliness(
     workspace_path: str,
     *,

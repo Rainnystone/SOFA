@@ -133,6 +133,16 @@ python {PLUGIN_DIR}/scripts/gate_check.py "{WORKSPACE}" stage_2 stage_3
 
 ---
 
+## Revisit Cycle-relative Floor
+
+Ticker Watch Revisit 不复用历史 research floor。每个 selected/derived claim 必须至少有一个 completing frontier binding；每个 bound frontier 从自己的 binding baseline 起完成 **three new loops**，每轮都有 **search + Scout + Challenge** delivery，随后记录一次 **new Frontier Review**。只有 binding 之后、cycle boundary 之后的事实计数：**historical floors do not count**，**early retirement does not count**。
+
+因此，旧 loop、旧 search/dispatch、旧 review，以及本轮未达到三条新 loop 就发生的 standalone retirement，都不能支持 claim resolution 或 readiness。Bound revisit frontier 如果提前 retire，主线程必须显式 `abort` 当前 cycle；不能把 `blocked`、`invalidated` 或历史完成量当成捷径。普通非-revisit Ticker lifecycle 规则保持不变。
+
+Revisit 的搜索效率来自 delta scope 和确定性复用，边界仍是 **no new external search provider or tool**。Exact prior-query replay 必须提供一个 **variation dimension** 和 **non-empty reason**；cached source reuse 保留 explicit freshness disposition，并且 **never implies truth or currentness**。这些复用规则不降低 search、Challenge、review 或反向搜索义务。
+
+---
+
 ## Stage 3: Thesis + Financial Bridge
 
 ### 3a. Initial Thesis（主线程综合分析）

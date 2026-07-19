@@ -65,6 +65,76 @@ class TestRunCoverageStructure(unittest.TestCase):
         # report must carry the threshold.
         self.assertIn("90", report_args)
 
+    def test_default_frontier_argv_remains_exactly_compatible(self):
+        module = _load_module()
+        self.assertEqual(
+            [
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "run",
+                    "--source",
+                    "scripts",
+                    "-m",
+                    "unittest",
+                    "tests/test_frontier_lifecycle.py",
+                ],
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "report",
+                    "--include",
+                    "scripts/frontier_lifecycle.py",
+                    "--fail-under",
+                    "90",
+                ],
+            ],
+            module.build_argv(90),
+        )
+
+    def test_revisit_target_builds_locked_test_and_include_argv(self):
+        module = _load_module()
+        run_args, report_args = module.build_argv(90, target="revisit")
+        self.assertEqual(
+            [
+                sys.executable,
+                "-m",
+                "coverage",
+                "run",
+                "--source",
+                "scripts",
+                "-m",
+                "unittest",
+                "tests/test_revisit_contract.py",
+            ],
+            run_args,
+        )
+        self.assertEqual(
+            [
+                sys.executable,
+                "-m",
+                "coverage",
+                "report",
+                "--include",
+                "scripts/revisit_contract/*.py,scripts/revisit_cycle.py",
+                "--fail-under",
+                "90",
+            ],
+            report_args,
+        )
+
+    def test_parse_args_selects_revisit_without_changing_frontier_default(self):
+        module = _load_module()
+        self.assertEqual("frontier", module.parse_args([]).target)
+        self.assertEqual(
+            "revisit",
+            module.parse_args(["--target", "revisit"]).target,
+        )
+        with self.assertRaises(SystemExit):
+            module.parse_args(["--target", "unknown"])
+
 
 @unittest.skipUnless(_coverage_available(), "coverage not installed in this environment")
 class TestRunCoverageBehavior(unittest.TestCase):
@@ -80,18 +150,34 @@ class TestRunCoverageBehavior(unittest.TestCase):
 
     def test_passes_when_threshold_is_zero(self):
         # A --fail-under of 0 always passes regardless of measured coverage.
-        result = self._run("--fail-under", "0")
-        self.assertEqual(
-            result.returncode, 0,
-            f"Expected exit 0 with --fail-under 0, got {result.returncode}\n"
-            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
-        )
+        for target in ("frontier", "revisit"):
+            with self.subTest(target=target):
+                result = self._run(
+                    "--target",
+                    target,
+                    "--fail-under",
+                    "0",
+                )
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    f"Expected exit 0 with --fail-under 0, got "
+                    f"{result.returncode}\nstdout:\n{result.stdout}\n"
+                    f"stderr:\n{result.stderr}",
+                )
 
     def test_fails_when_threshold_unreachable(self):
         # A --fail-under of 101 is impossible to satisfy, so the runner must exit
         # non-zero. This mirrors the semantics of the old run_coverage.sh.
-        result = self._run("--fail-under", "101")
-        self.assertNotEqual(result.returncode, 0)
+        for target in ("frontier", "revisit"):
+            with self.subTest(target=target):
+                result = self._run(
+                    "--target",
+                    target,
+                    "--fail-under",
+                    "101",
+                )
+                self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":
